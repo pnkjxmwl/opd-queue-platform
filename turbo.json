@@ -2,6 +2,24 @@
   "$schema": "https://turbo.build/schema.json",
   "ui": "stream",
   "globalEnv": ["NODE_ENV"],
+  // Turbo 2 runs tasks in a FILTERED environment: anything not declared here is
+  // stripped before the task sees it. Locally this went unnoticed because
+  // process.loadEnvFile() reads apps/api/.env directly, bypassing Turbo entirely -
+  // but CI has no .env, so every var vanished and env validation refused to boot.
+  // passThrough (not globalEnv) so rotating a secret does not invalidate the cache.
+  "globalPassThroughEnv": [
+    "DATABASE_URL",
+    "REDIS_URL",
+    "PORT",
+    "LOG_LEVEL",
+    "JWT_ACCESS_SECRET",
+    "JWT_REFRESH_SECRET",
+    "JWT_ACCESS_TTL_SEC",
+    "JWT_REFRESH_TTL_SEC",
+    "GOOGLE_CLIENT_IDS",
+    "API_URL",
+    "EXPO_PUBLIC_API_URL"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
