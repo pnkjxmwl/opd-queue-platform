@@ -38,7 +38,7 @@ code alone does not carry.
 
 ## Current state (update the one-liner, keep the history below)
 
-> **Where we are:** Phases 0-1 built, reviewed, on GitHub with **CI green**; mobile now on **Expo SDK 57**.
+> **Where we are:** Phases 0-1 built, reviewed, on GitHub with **CI green**; mobile on **Expo SDK 54** (matches the test device).
 > Private repo: `pnkjxmwl/opd-queue-platform`. **49 tests** (40 api + 9 contracts), incl. the 24-case
 > tenant-isolation + IDOR suite. React 19 across web and mobile, which removed both React-version hacks.
 > Outstanding: the mobile device check (`P0-MOB-01`, `P1-MOB-01/02`) - now unblocked - Google exchange
@@ -709,3 +709,30 @@ worth it), and the local branch was reset back to match the remote. **From this 
 it attributes correctly without publishing a real email.
 
 **Next:** the device check is now unblocked - Expo Go can run an SDK 57 app.
+
+---
+
+## 2026-08-30 — Corrected the SDK target: 57 -> 54, driven by the actual device
+
+**What happened:** after upgrading to SDK 57, Expo Go on the real phone still reported the project as
+incompatible. The Play Store was serving that device **Expo Go 54.0.8, which supports SDK 54** - not the
+current 57.0.9 client. Play serves the newest client an Android version can run, so a device below the
+requirement for Expo Go 55+ is capped at 54 no matter how current the project is.
+
+**Decided: target SDK 54.** Chasing the newest SDK is pointless when the hardware in the room cannot run
+its client. Verified first that this does **not** cost us the Phase-1 cleanup: SDK 54 pins **React 19.1.0**
+and `@types/react` 19.1.17, so it still matches Next 15's React 19. **Both React-version workarounds stay
+deleted** - the tsconfig `paths` pin and `experiments.tsconfigPaths: false`.
+
+Rejected the alternatives: sideloading a newer Expo Go APK would likely fail on the same OS-version
+constraint that capped the Play Store build, and a development build means installing Android Studio to
+solve a problem that picking the right SDK solves for free.
+
+**Lesson worth keeping:** "latest" was the wrong target twice in a row here. Phase 0 pinned SDK 52 because
+it was familiar; the upgrade went to 57 because it was newest. The correct input was neither - it was
+*which client the test device can actually install*, which nobody had checked. Check the target environment
+before choosing a version.
+
+**Result:** expo 54.0.37, react-native 0.81.5, expo-router 6.0.24, React 19.1.0, TypeScript still pinned at
+5.7.2 for monorepo consistency. Mobile typecheck and lint clean, `expo export` produces a **2.71 MB**
+Hermes bundle, and `turbo run lint typecheck test build --force` -> **16/16, 0 cached**.

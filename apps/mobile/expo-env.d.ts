@@ -1,4 +1,3 @@
 /// <reference types="expo/types" />
 
-// Generated-style ambient types for Expo. Declares process.env.EXPO_PUBLIC_* so the
-// API base URL is typed without pulling Node globals into a React Native app.
+// NOTE: This file should not be edited and should be in your git ignore
