@@ -1,0 +1,37 @@
+{
+  "name": "@opd/mobile",
+  "version": "0.0.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "dev": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "build": "echo \"mobile builds ship via EAS (Phase 10)\" && exit 0",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo \"no mobile tests yet\" && exit 0"
+  },
+  "dependencies": {
+    "@babel/runtime": "^7.26.0",
+    "@expo/metro-runtime": "~4.0.1",
+    "@opd/contracts": "workspace:*",
+    "@tanstack/react-query": "^5.62.11",
+    "expo": "~52.0.23",
+    "expo-constants": "~17.0.4",
+    "expo-linking": "~7.0.4",
+    "expo-router": "~4.0.16",
+    "expo-secure-store": "~14.0.1",
+    "expo-status-bar": "~2.0.1",
+    "react": "18.3.1",
+    "react-native": "0.76.6",
+    "react-native-safe-area-context": "4.12.0",
+    "react-native-screens": "~4.4.0"
+  },
+  "devDependencies": {
+    "@opd/config": "workspace:*",
+    "@types/react": "~18.3.12",
+    "eslint": "^9.17.0",
+    "typescript": "^5.7.2"
+  }
+}

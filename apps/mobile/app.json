@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "OPD Queue",
+    "slug": "opd-queue",
+    "version": "0.0.1",
+    "orientation": "portrait",
+    "scheme": "opdqueue",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.opdqueue.app"
+    },
+    "android": {
+      "package": "com.opdqueue.app"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "tsconfigPaths": false
+    }
+  }
+}

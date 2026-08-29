@@ -1,0 +1,10 @@
+# Normalise to LF in the repository. CI runs on Ubuntu and the mobile/web toolchains
+# are LF-native; without this, Windows checkouts commit CRLF and every file shows as
+# fully rewritten in diffs.
+* text=auto eol=lf
+
+# Binary / generated - never touch these.
+*.png binary
+*.jpg binary
+*.ico binary
+pnpm-lock.yaml -diff linguist-generated

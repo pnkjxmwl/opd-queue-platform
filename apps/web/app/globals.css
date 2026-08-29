@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-canvas text-ink font-sans;
+  }
+
+  /* docs/Design.md 3 + 8: live-updating numbers must not jitter as they change. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}

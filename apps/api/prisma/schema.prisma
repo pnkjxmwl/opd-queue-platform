@@ -1,0 +1,193 @@
+// OPD Queue Platform - core schema (Phase 0).
+// Models here follow docs/Architecture.md 5.1. Queue/session/payment models arrive in
+// their own phases (2, 4, 5) - do not add them early.
+//
+// docs/Rules.md 5:
+//   - every tenant-scoped table has hospitalId and is indexed on it
+//   - global tables are Account and Patient ONLY
+//   - money in paise (Int), timestamps in UTC
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Global (cross-hospital) entities
+// ---------------------------------------------------------------------------
+
+/// A login. Owns one or more Patient profiles, and may hold staff memberships.
+model Account {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String?
+  googleId     String?  @unique
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  patients      Patient[]
+  memberships   HospitalStaff[]
+  doctor        Doctor?
+  refreshTokens RefreshToken[]
+}
+
+/// The person actually receiving care - the account holder or a family member.
+model Patient {
+  id        String          @id @default(uuid())
+  accountId String
+  name      String
+  dob       DateTime?
+  gender    Gender?
+  relation  PatientRelation @default(SELF)
+  abhaId    String?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+}
+
+/// One issued refresh token.
+///
+/// Rotation: each use revokes the row and issues a successor in the same `familyId`.
+/// Reuse detection: presenting an already-revoked token means it leaked, so the WHOLE
+/// family is revoked and the session is killed rather than silently re-issued.
+/// Only the SHA-256 of the token is stored - a database leak must not yield usable tokens.
+model RefreshToken {
+  id        String    @id @default(uuid())
+  accountId String
+  /// Shared by every token descended from one login. Revoked as a unit on reuse.
+  familyId  String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+  @@index([familyId])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Tenant-scoped entities
+// ---------------------------------------------------------------------------
+
+/// A tenant. Owns departments, doctors, staff and sessions.
+model Hospital {
+  id        String         @id @default(uuid())
+  name      String
+  city      String
+  area      String?
+  address   String?
+  status    HospitalStatus @default(PENDING)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  departments Department[]
+  doctors     Doctor[]
+  staff       HospitalStaff[]
+
+  @@index([city])
+  @@index([status])
+}
+
+/// An account's membership in a hospital. This - not the Account - carries authority.
+model HospitalStaff {
+  id          String      @id @default(uuid())
+  hospitalId  String
+  accountId   String
+  role        StaffRole
+  permissions String[]    @default([])
+  status      StaffStatus @default(ACTIVE)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  hospital Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  account  Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([hospitalId, accountId])
+  @@index([hospitalId])
+  @@index([accountId])
+}
+
+/// A unit within a hospital (e.g. Cardiology).
+model Department {
+  id         String   @id @default(uuid())
+  hospitalId String
+  name       String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  hospital Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  doctors  Doctor[]
+
+  @@unique([hospitalId, name])
+  @@index([hospitalId])
+}
+
+/// A provider who runs OPD sessions in a department.
+model Doctor {
+  id             String  @id @default(uuid())
+  hospitalId     String
+  departmentId   String
+  /// Set once the doctor is invited and has a login (Phase 1/2).
+  accountId      String? @unique
+  name           String
+  specialization String?
+  /// Cold-start seed for the ETA engine (docs/Architecture.md 8).
+  defaultConsultMins Int      @default(10)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  hospital   Hospital   @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  account    Account?   @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  @@index([hospitalId])
+  @@index([departmentId])
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum PatientRelation {
+  SELF
+  SPOUSE
+  MOTHER
+  FATHER
+  CHILD
+  SIBLING
+  OTHER
+}
+
+enum HospitalStatus {
+  PENDING
+  VERIFIED
+  SUSPENDED
+}
+
+enum StaffRole {
+  ADMIN
+  RECEPTION
+  DOCTOR
+}
+
+enum StaffStatus {
+  ACTIVE
+  INVITED
+  DISABLED
+}
