@@ -38,13 +38,12 @@ code alone does not carry.
 
 ## Current state (update the one-liner, keep the history below)
 
-> **Where we are:** Phases 0-1 built and reviewed (7 of 10 Phase-1 subtasks ticked); ready for Phase 2.
-> Auth, tenancy guards, patient CRUD, the web console auth shell, and the mobile auth + family-profile
-> screens are all built. **40 tests green**, incl. the 24-case tenant-isolation + IDOR suite. A full audit
-> found and fixed 3 defects (non-atomic token rotation, a comment documenting absent validation, a broken
-> `pnpm seed`).
-> Outstanding: mobile needs one device session (`P0-MOB-01`, `P1-MOB-01/02`), CI needs a GitHub remote
-> (`P0-INFRA-02`), Google exchange needs real client ids (`P1-BE-02`).
+> **Where we are:** Phases 0-1 built, reviewed, and **on GitHub with CI green**; ready for Phase 2.
+> Private repo: `pnkjxmwl/opd-queue-platform`. **49 tests** (40 api + 9 contracts), incl. the 24-case
+> tenant-isolation + IDOR suite. CI proves a clean-machine build: install -> prisma generate -> migrate
+> deploy -> lint -> typecheck -> test -> build.
+> Outstanding: mobile needs one device session (`P0-MOB-01`, `P1-MOB-01/02`), Google exchange needs real
+> client ids (`P1-BE-02`), and the local folder still needs renaming to match the project.
 
 ---
 
@@ -612,3 +611,60 @@ schedules, sessions), and those must paginate.
 **Still open, unchanged by this review:** mobile needs one device session (`P0-MOB-01`, `P1-MOB-01/02`),
 CI needs a GitHub remote to prove green (`P0-INFRA-02`), and the Google ID-token exchange needs real client
 ids (`P1-BE-02`).
+
+---
+
+## 2026-08-30 — Pushed to GitHub; CI proven green · P0-INFRA-02
+
+**Did:** Named the project **`opd-queue-platform`** (root `package.json` + Architecture.md §4), committed
+everything in two logical commits, installed the GitHub CLI, and pushed to a **private** repo at
+`pnkjxmwl/opd-queue-platform`. Then fixed two failures the first CI runs exposed and got a green run.
+
+**Decided:**
+- **Two commits, not a fabricated per-phase history.** Phases 0 and 1 were developed together with no
+  meaningful intermediate states to reconstruct, and the files interleave (e.g. `app.module.ts` changed in
+  both). Split by the one boundary that is real and clean: `docs: …` (docs + CLAUDE.md + the source
+  transcript) and `feat: …` (all code). Inventing a granular history would have been fiction.
+- **Added `.gitattributes` with `* text=auto eol=lf` before committing any code.** Git warned on the first
+  commit that it would rewrite LF→CRLF. Without normalisation, a Windows checkout commits CRLF, CI on
+  Ubuntu sees every file as fully rewritten, and diffs become useless.
+- **No `phase-0-done` / `phase-1-done` tags yet.** §A.9 says tag when the *integration checkpoint* passes.
+  Phase 0's checkpoint requires all three apps to boot, and mobile is still unverified on a device. Tagging
+  now would put a "known-good floor" marker on something not actually known good.
+
+**Surprises — CI caught two real bugs on its first two runs, both invisible locally. This is the whole
+argument for CI, demonstrated inside ten minutes:**
+
+1. **`packages/contracts` test script only worked on Windows.**
+   `node --test --experimental-strip-types src/**/*.test.ts` relied on the *shell* expanding the glob.
+   Git Bash swallowed the non-matching pattern and exited 0; Linux passes the literal string through, so
+   Node tried to open a file named `src/**/*.test.ts` and exited 9. Replaced with vitest (matching
+   `apps/api`) and wrote **9 real tests** for the schema logic that actually has behaviour — email
+   trimming/lowercasing, the signup password floor and its deliberate absence on login, the relation
+   default, and the date-of-birth future rejection added during the review.
+
+2. **Turbo was stripping every environment variable.** The API tests failed with `DATABASE_URL: Required`
+   even though the workflow plainly sets it. Cause: **Turbo 2 runs tasks in a filtered environment** and
+   only `NODE_ENV` was declared in `turbo.json`. This could never fail on a dev machine, because
+   `process.loadEnvFile()` reads `apps/api/.env` directly and bypasses Turbo entirely — CI has no `.env`,
+   so the vars simply vanished. Fixed with `globalPassThroughEnv` listing the connection strings, JWT
+   secrets and client URLs. Chose `globalPassThroughEnv` over `globalEnv` deliberately: passthrough vars
+   are not part of the cache hash, so rotating a secret does not invalidate every cached task.
+
+**Verification:** CI run `33277067473` → **conclusion: success**, on a clean Ubuntu runner with its own
+Postgres and Redis: install → prisma generate → migrate deploy → lint → typecheck → test → build.
+**49 tests** now (40 api + 9 contracts). Locally, `turbo run lint typecheck test build --force` → 16/16.
+
+This closes the gap flagged since Phase 0: *the project had never been built on a machine that isn't this
+one.* It now has been, and needed two fixes to get there.
+
+**Known, non-blocking:** GitHub warns that `actions/checkout@v4`, `actions/setup-node@v4` and
+`pnpm/action-setup@v4` target Node 20, which is deprecated on runners — they are being forced onto Node 24
+and still pass. Bump the action majors when convenient; nothing is broken today.
+
+**Repo notes for later:** renaming the GitHub repo is safe (GitHub permanently redirects the old URL; update
+the local remote with `git remote set-url`). Renaming the local folder is safe for the code — no tracked
+file contains an absolute path — but Claude Code keys its per-project memory to the folder path, so the
+memory directory must be copied to the new key or future sessions start blank.
+
+**Next:** the local folder is still `C:\Projects\New folder`; rename it to match the project, then Phase 2.

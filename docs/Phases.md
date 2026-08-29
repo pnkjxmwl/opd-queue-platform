@@ -286,7 +286,7 @@ GET /health/ready     — readiness (checks DB + Redis)
 | ☑ P0-BE-01 | NestJS skeleton: env validation (Zod), pino logger, exception filter + error envelope, `/health` + `/health/ready` | BE | 3 | CFG-01, DB-01 | `curl /health` → 200; `/health/ready` 200 only when DB+Redis up; kill DB → 503 |
 | ☑ P0-WEB-01 | Next.js skeleton: App Router, Tailwind + shadcn, Design.md theme tokens, placeholder page | WEB | 3 | CFG-01 | `pnpm --filter web dev`; page renders; teal primary applied |
 | ☐ P0-MOB-01 | Expo skeleton: Expo Router, theme (Inter + palette), placeholder screen | MOB | 3 | CFG-01 | `pnpm --filter mobile start`; opens in simulator/Expo Go — **code + typecheck/lint done; needs a device to verify** |
-| ☐ P0-INFRA-02 | CI (GitHub Actions): install → lint → typecheck → test → build | INFRA | 4 | all | CI green on a test PR — **workflow written; needs a GitHub remote + push to prove** |
+| ☑ P0-INFRA-02 | CI (GitHub Actions): install → lint → typecheck → test → build | INFRA | 4 | all | **CI green** on pnkjxmwl/opd-queue-platform (run 33277067473): install → prisma generate → migrate deploy → lint → typecheck → test → build |
 
 **Parallelization:** Wave 3 → `BE-01 ∥ WEB-01 ∥ MOB-01` (three agents, three directories).
 **Integration checkpoint:** all three apps boot; `/health` + `/health/ready` green; CI green.
