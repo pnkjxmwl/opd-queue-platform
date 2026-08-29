@@ -3,21 +3,7 @@
   "compilerOptions": {
     "strict": true,
     "noEmit": true,
-    // TYPE-CHECKING ONLY. app.json sets experiments.tsconfigPaths=false so Metro
-    // ignores these - otherwise it resolves the RUNTIME `react` import to the types
-    // package and the bundle fails. See docs/PROGRESS.md.
-    //
-    // pnpm's store holds BOTH @types/react@18 (Expo SDK 52) and @types/react@19
-    // (Next 15, used by apps/web). Packages inside the store resolve React types
-    // from pnpm's hidden hoist dir and pick up v19, while this app compiles against
-    // v18 - every JSX element then fails with TS2786. Pinning the specifier here
-    // forces one React typing across the whole program.
-    "paths": {
-      "@/*": ["./*"],
-      "react": ["./node_modules/@types/react"],
-      "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime"],
-      "react/jsx-dev-runtime": ["./node_modules/@types/react/jsx-dev-runtime"]
-    }
+    "paths": { "@/*": ["./*"] }
   },
   "include": ["**/*.ts", "**/*.tsx", ".expo/types/**/*.ts", "expo-env.d.ts"]
 }

@@ -38,12 +38,11 @@ code alone does not carry.
 
 ## Current state (update the one-liner, keep the history below)
 
-> **Where we are:** Phases 0-1 built, reviewed, and **on GitHub with CI green**; ready for Phase 2.
+> **Where we are:** Phases 0-1 built, reviewed, on GitHub with **CI green**; mobile now on **Expo SDK 57**.
 > Private repo: `pnkjxmwl/opd-queue-platform`. **49 tests** (40 api + 9 contracts), incl. the 24-case
-> tenant-isolation + IDOR suite. CI proves a clean-machine build: install -> prisma generate -> migrate
-> deploy -> lint -> typecheck -> test -> build.
-> Outstanding: mobile needs one device session (`P0-MOB-01`, `P1-MOB-01/02`), Google exchange needs real
-> client ids (`P1-BE-02`), and the local folder still needs renaming to match the project.
+> tenant-isolation + IDOR suite. React 19 across web and mobile, which removed both React-version hacks.
+> Outstanding: the mobile device check (`P0-MOB-01`, `P1-MOB-01/02`) - now unblocked - Google exchange
+> needs real client ids (`P1-BE-02`), and the local folder still needs renaming to match the project.
 
 ---
 
@@ -668,3 +667,45 @@ file contains an absolute path — but Claude Code keys its per-project memory t
 memory directory must be copied to the new key or future sessions start blank.
 
 **Next:** the local folder is still `C:\Projects\New folder`; rename it to match the project, then Phase 2.
+
+---
+
+## 2026-08-30 — Mobile upgraded Expo SDK 52 -> 57; two workarounds deleted
+
+**Why:** preparing the device check surfaced a blocker. Expo Go on the app stores supports only roughly the
+latest one or two SDKs, and the project was pinned to **SDK 52 while 57 is current** - so Expo Go could not
+have run the app at all. That pin was a poor default chosen in Phase 0, not a considered decision.
+
+**Did:** `expo install expo@^57` then `expo install --fix`, which aligned the whole managed dependency set:
+**react 19.2.3**, **@types/react 19.2.18**, react-native 0.86.3, expo-router 57, and the rest.
+
+**The payoff - two accumulated workarounds are now obsolete and were deleted:**
+Web (Next 15) needed React 19 while Expo SDK 52 pinned React 18.3.1, and that split caused two separate
+hacks recorded earlier in this log:
+1. a `paths` mapping in `apps/mobile/tsconfig.json` forcing one React typing, added to stop `TS2786` on
+   every JSX element; and
+2. `experiments.tsconfigPaths: false` in `app.json`, needed because Metro honoured that same mapping and
+   resolved the **runtime** `react` import to a types-only package.
+
+SDK 57 uses React 19, so both apps now agree and **both hacks are gone**. Mobile typechecks and bundles
+without either. This is the cleanest outcome available: the root cause was removed rather than papered over
+a third time.
+
+**Decided:**
+- **Pinned `typescript` back to `^5.7.2`.** `expo install --fix` proposed TypeScript **6.0.3**, but the rest
+  of the monorepo - including NestJS 10 with decorator metadata - is on 5.x. Mixed compiler versions across
+  one workspace is a trap, and a TS major upgrade deserves its own change, not a side effect of an SDK bump.
+- **Kept `@babel/runtime` and `@expo/metro-runtime` as explicit dependencies.** Still correct under pnpm's
+  isolated layout regardless of SDK.
+
+**Verification:** mobile typecheck clean, `expo export --platform android` produces a **2.8 MB** Hermes
+bundle, and `turbo run lint typecheck test build --force` -> **16/16, 0 cached**.
+
+**Also, on git identity:** commits up to `559bc69` were authored as `pankajxemwal123@gmail.com`, taken from
+the machine profile rather than the GitHub account - so they are not linked to `pnkjxmwl` on GitHub. The
+history rewrite that would have fixed them was deliberately abandoned (rewriting shared history is rarely
+worth it), and the local branch was reset back to match the remote. **From this point on commits use
+`Pankaj Semwal <81282394+pnkjxmwl@users.noreply.github.com>`**, which is the GitHub-linked noreply address -
+it attributes correctly without publishing a real email.
+
+**Next:** the device check is now unblocked - Expo Go can run an SDK 57 app.

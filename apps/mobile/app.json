@@ -19,8 +19,7 @@
       "expo-secure-store"
     ],
     "experiments": {
-      "typedRoutes": true,
-      "tsconfigPaths": false
+      "typedRoutes": true
     }
   }
 }
