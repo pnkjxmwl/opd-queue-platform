@@ -30,6 +30,23 @@ export const GoogleAuthRequest = z.object({
 });
 export type GoogleAuthRequest = z.infer<typeof GoogleAuthRequest>;
 
+/**
+ * Accepting a staff invitation.
+ *
+ * The token is the proof the invitation reached the intended person, which is why
+ * an invited account cannot simply be claimed by signing up with its email - that
+ * would let anyone who guesses an invited address take a role in that hospital.
+ *
+ * The password is set only if the account has none. An existing user invited to a
+ * second hospital keeps the password they already have; accepting only activates
+ * the new membership.
+ */
+export const AcceptInviteRequest = z.object({
+  token: z.string().min(1),
+  password: Password,
+});
+export type AcceptInviteRequest = z.infer<typeof AcceptInviteRequest>;
+
 export const RefreshRequest = z.object({
   refreshToken: z.string().min(1),
 });

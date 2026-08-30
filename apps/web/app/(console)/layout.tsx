@@ -15,10 +15,14 @@ export default async function ConsoleLayout({ children }: { children: React.Reac
   const me = await apiGet<MeResponse>('/me');
   const active = me.memberships.find((m) => m.status === 'ACTIVE');
 
+  // `ready: false` = the route does not exist yet. It still appears, so the shape of
+  // the console is visible from the start, but it is NOT a link - docs/Phases.md:
+  // make a placeholder obviously inert, or you will file bugs against your own
+  // placeholder. The queue consoles arrive in Phase 6.
   const links = [
-    { href: '/', label: 'Overview', roles: ['ADMIN', 'RECEPTION', 'DOCTOR'] },
-    { href: '/queue', label: 'Queue', roles: ['RECEPTION', 'DOCTOR'] },
-    { href: '/config', label: 'Configuration', roles: ['ADMIN'] },
+    { href: '/', label: 'Overview', roles: ['ADMIN', 'RECEPTION', 'DOCTOR'], ready: true },
+    { href: '/queue', label: 'Queue', roles: ['RECEPTION', 'DOCTOR'], ready: false },
+    { href: '/config', label: 'Configuration', roles: ['ADMIN'], ready: true },
   ].filter((l) => active && l.roles.includes(active.role));
 
   return (
@@ -30,15 +34,29 @@ export default async function ConsoleLayout({ children }: { children: React.Reac
         </span>
 
         <nav className="mt-6 flex flex-col gap-1">
-          {links.map((l) => (
-            <Link
-              key={l.href}
-              href={l.href}
-              className="rounded-md px-3 py-2 text-label text-ink hover:bg-teal-50"
-            >
-              {l.label}
-            </Link>
-          ))}
+          {links.map((l) =>
+            l.ready ? (
+              <Link
+                key={l.href}
+                href={l.href}
+                className="rounded-md px-3 py-2 text-label text-ink hover:bg-teal-50"
+              >
+                {l.label}
+              </Link>
+            ) : (
+              <span
+                key={l.href}
+                aria-disabled="true"
+                title="Arrives in a later phase"
+                className="flex items-center justify-between rounded-md px-3 py-2 text-label text-ink-disabled"
+              >
+                {l.label}
+                <span className="rounded-full bg-canvas px-2 py-0.5 text-caption text-ink-muted">
+                  Soon
+                </span>
+              </span>
+            ),
+          )}
         </nav>
 
         <div className="mt-auto flex flex-col gap-2 pt-6">

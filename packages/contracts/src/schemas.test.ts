@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { Email, LoginRequest, Password, SignupRequest } from './auth/dto';
 import { CreatePatientRequest } from './patients/dto';
+import {
+  CancellationRules,
+  ClockTime,
+  ConfigListQuery,
+  CreateDoctorScheduleRequest,
+  CreateOPDSessionRequest,
+  DEFAULT_QUEUE_POLICY,
+  InviteStaffRequest,
+  QueuePolicyFields,
+  SessionListQuery,
+  UpdateDoctorRequest,
+} from './config/dto';
+import { PageQuery } from './common/pagination';
 
 describe('auth schemas', () => {
   it('normalises email to trimmed lowercase', () => {
@@ -48,5 +61,145 @@ describe('patient schemas', () => {
 
   it('rejects an empty name', () => {
     expect(CreatePatientRequest.safeParse({ name: '   ' }).success).toBe(false);
+  });
+});
+
+describe('queue policy (frozen Phase-2 shape)', () => {
+  it('produces a complete policy from an empty object', () => {
+    // The engine must never meet a half-filled policy, and a hospital that has
+    // never opened the config screen still has to run a queue.
+    const parsed = QueuePolicyFields.parse({});
+    for (const [key, value] of Object.entries(parsed)) {
+      expect(value, `${key} has no default`).not.toBeUndefined();
+    }
+    expect(parsed).toEqual(DEFAULT_QUEUE_POLICY);
+  });
+
+  it('defaults to the PRD 8 behaviour, not to permissive values', () => {
+    expect(DEFAULT_QUEUE_POLICY.checkInRequired).toBe(true); // PRD 8.2
+    expect(DEFAULT_QUEUE_POLICY.cutoffOnEtaOverrun).toBe(true); // PRD 8.12
+    expect(DEFAULT_QUEUE_POLICY.requeueBehavior).toBe('END_OF_QUEUE'); // PRD 8.8
+  });
+
+  it('treats the three registration limits as independent', () => {
+    // PRD 8.12 words them additively. Setting a token cap must not disable the
+    // ETA guard - that is the regression this test exists to catch.
+    const parsed = QueuePolicyFields.parse({ maxOnlineTokens: 40 });
+    expect(parsed.maxOnlineTokens).toBe(40);
+    expect(parsed.cutoffOnEtaOverrun).toBe(true);
+    expect(parsed.cutoffMinsBeforeEnd).toBeNull();
+  });
+
+  it('rejects out-of-range thresholds', () => {
+    expect(QueuePolicyFields.safeParse({ gracePeriodSec: -1 }).success).toBe(false);
+    expect(QueuePolicyFields.safeParse({ maxOnlineTokens: 0 }).success).toBe(false);
+    expect(QueuePolicyFields.safeParse({ recallAttempts: 99 }).success).toBe(false);
+  });
+
+  it('parses a cancellationRules row that predates a later field', () => {
+    // Forward compatibility is the whole reason every field defaults: a row stored
+    // today must still parse after Phase 5 adds a key, not crash on read.
+    expect(CancellationRules.parse({})).toEqual({
+      freeCancellationMins: 120,
+      lateCancellationRefundPct: 50,
+      noShowRefundPct: 0,
+      sessionCancelledRefundPct: 100,
+    });
+    expect(CancellationRules.parse({ noShowRefundPct: 25 }).noShowRefundPct).toBe(25);
+  });
+});
+
+describe('doctor schedule', () => {
+  const base = { doctorId: '2a1f6f4c-0000-4000-8000-000000000000', startTime: '10:00', endTime: '13:00', defaultFeePaise: 50_000 };
+
+  it('requires exactly one recurrence', () => {
+    expect(CreateDoctorScheduleRequest.safeParse({ ...base, weekday: 1 }).success).toBe(true);
+    expect(CreateDoctorScheduleRequest.safeParse({ ...base, date: '2026-09-01' }).success).toBe(true);
+    expect(CreateDoctorScheduleRequest.safeParse(base).success).toBe(false);
+    expect(
+      CreateDoctorScheduleRequest.safeParse({ ...base, weekday: 1, date: '2026-09-01' }).success,
+    ).toBe(false);
+  });
+
+  it('rejects a block that ends before it starts', () => {
+    expect(
+      CreateDoctorScheduleRequest.safeParse({ ...base, weekday: 1, startTime: '13:00', endTime: '10:00' }).success,
+    ).toBe(false);
+  });
+
+  it('requires zero-padded 24-hour times', () => {
+    // Padding is not cosmetic: it is what makes string comparison equal
+    // chronological comparison, in Zod and in the database CHECK.
+    expect(ClockTime.safeParse('09:00').success).toBe(true);
+    expect(ClockTime.safeParse('9:00').success).toBe(false);
+    expect(ClockTime.safeParse('24:00').success).toBe(false);
+    expect(ClockTime.safeParse('10:60').success).toBe(false);
+  });
+});
+
+describe('session + staff config', () => {
+  const session = {
+    doctorId: '2a1f6f4c-0000-4000-8000-000000000000',
+    date: '2026-09-01',
+    startTime: '10:00',
+    endTime: '13:00',
+    feePaise: 50_000,
+  };
+
+  it('defaults the token prefix and takes no status', () => {
+    const parsed = CreateOPDSessionRequest.parse(session);
+    expect(parsed.tokenPrefix).toBe('A');
+    expect('status' in parsed).toBe(false);
+  });
+
+  it('rejects a fee that is not whole paise', () => {
+    expect(CreateOPDSessionRequest.safeParse({ ...session, feePaise: 500.5 }).success).toBe(false);
+  });
+
+  it('requires a doctorId only when inviting a DOCTOR', () => {
+    expect(InviteStaffRequest.safeParse({ email: 'a@b.com', role: 'RECEPTION' }).success).toBe(true);
+    expect(InviteStaffRequest.safeParse({ email: 'a@b.com', role: 'DOCTOR' }).success).toBe(false);
+    expect(
+      InviteStaffRequest.safeParse({
+        email: 'a@b.com',
+        role: 'DOCTOR',
+        doctorId: '2a1f6f4c-0000-4000-8000-000000000000',
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe('pagination', () => {
+  it('coerces query strings and applies defaults', () => {
+    expect(PageQuery.parse({})).toEqual({ limit: 20, offset: 0 });
+    expect(PageQuery.parse({ limit: '50', offset: '100' })).toEqual({ limit: 50, offset: 100 });
+  });
+
+  it('caps the page size', () => {
+    expect(PageQuery.safeParse({ limit: '1000' }).success).toBe(false);
+  });
+});
+
+describe('config list queries', () => {
+  it('paginates the session list (docs/Rules.md 6 - sessions accumulate daily)', () => {
+    expect(SessionListQuery.parse({})).toEqual({ limit: 20, offset: 0 });
+    expect(SessionListQuery.parse({ limit: '5', date: '2026-08-30' })).toEqual({
+      limit: 5,
+      offset: 0,
+      date: '2026-08-30',
+    });
+    expect(SessionListQuery.safeParse({ limit: '1000' }).success).toBe(false);
+  });
+
+  it('reads includeInactive=false as false, which z.coerce.boolean() would not', () => {
+    expect(ConfigListQuery.parse({}).includeInactive).toBe(false);
+    expect(ConfigListQuery.parse({ includeInactive: 'false' }).includeInactive).toBe(false);
+    expect(ConfigListQuery.parse({ includeInactive: 'true' }).includeInactive).toBe(true);
+    expect(ConfigListQuery.safeParse({ includeInactive: 'yes' }).success).toBe(false);
+  });
+
+  it('lets an update reactivate a deactivated doctor', () => {
+    expect(UpdateDoctorRequest.parse({ isActive: true })).toEqual({ isActive: true });
+    expect(UpdateDoctorRequest.parse({})).toEqual({});
   });
 });

@@ -8,6 +8,9 @@ import { RedisModule } from './redis/redis.module';
 import { HealthModule } from './modules/health/health.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { PatientsModule } from './modules/patients/patients.module';
+import { ConfigModule } from './modules/config/config.module';
+import { SessionsModule } from './modules/sessions/sessions.module';
+import { StaffModule } from './modules/staff/staff.module';
 import { JwtGuard } from './common/guards/jwt.guard';
 import { TenantGuard } from './common/guards/tenant.guard';
 import { RolesGuard } from './common/guards/roles.guard';
@@ -48,6 +51,9 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
     HealthModule,
     AuthModule,
     PatientsModule,
+    ConfigModule,
+    SessionsModule,
+    StaffModule,
   ],
   // Registered through DI, not app.useGlobalFilters(): nestjs-pino's PinoLogger
   // is transient-scoped and cannot be resolved with app.get().
