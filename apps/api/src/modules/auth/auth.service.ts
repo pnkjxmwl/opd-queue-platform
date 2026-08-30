@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { hash as argonHash, verify as argonVerify } from '@node-rs/argon2';
 import { OAuth2Client } from 'google-auth-library';
 import type {
+  AcceptInviteRequest,
   AuthTokens,
   GoogleAuthRequest,
   LoginRequest,
@@ -19,6 +20,7 @@ import {
   NotFoundError,
   UnauthorizedError,
 } from '../../common/errors';
+import { StaffService } from '../staff/staff.service';
 
 @Injectable()
 export class AuthService {
@@ -27,6 +29,7 @@ export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tokens: TokenService,
+    private readonly staff: StaffService,
   ) {}
 
   async signup(input: SignupRequest): Promise<AuthTokens> {
@@ -47,6 +50,50 @@ export class AuthService {
       if (isUniqueViolation(e, 'email')) throw new EmailAlreadyRegisteredError();
       throw e;
     }
+  }
+
+  /**
+   * Accept a staff invitation: prove you received the token, then get a session.
+   *
+   * Three deliberate choices:
+   *
+   *  - **The password is set only if the account has none.** An existing user
+   *    invited to a second hospital keeps the password they already have. Letting
+   *    an invitation overwrite a live credential would turn "invite someone" into
+   *    "reset their password", which is an account-takeover primitive.
+   *  - **The token is cleared in the same transaction that activates the
+   *    membership**, so it is single-use by construction rather than by a flag.
+   *  - **Every failure returns the same UnauthorizedError.** Distinguishing
+   *    "no such token" from "expired" from "already used" tells an attacker which
+   *    guesses were close.
+   */
+  async acceptInvite(input: AcceptInviteRequest): Promise<AuthTokens> {
+    const invalid = new UnauthorizedError('This invitation is not valid');
+
+    // HospitalStaff belongs to the staff module; this asks it rather than reading
+    // the table (docs/CLAUDE.md 3).
+    const invitation = await this.staff.findOpenInvitation(input.token);
+    if (!invitation) throw invalid;
+
+    const account = await this.prisma.account.findUnique({
+      where: { id: invitation.accountId },
+      select: { id: true, email: true, passwordHash: true },
+    });
+    if (!account) throw invalid;
+
+    // Hashed outside the transaction: Argon2id is deliberately slow, and holding a
+    // transaction open across it holds locks for no reason.
+    const passwordHash = account.passwordHash ?? (await argonHash(input.password));
+
+    await this.prisma.$transaction(async (tx) => {
+      if (!(await this.staff.consumeInvitation(invitation.membershipId, tx))) throw invalid;
+
+      if (!account.passwordHash) {
+        await tx.account.update({ where: { id: account.id }, data: { passwordHash } });
+      }
+    });
+
+    return this.tokens.issue({ id: account.id, email: account.email });
   }
 
   async login(input: LoginRequest): Promise<AuthTokens> {

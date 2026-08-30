@@ -6,8 +6,11 @@
  */
 export * from './common/error';
 export * from './common/health';
+export * from './common/pagination';
 export * from './enums/queue';
 export * from './enums/staff';
 export * from './enums/patient';
+export * from './enums/config';
 export * from './auth/dto';
 export * from './patients/dto';
+export * from './config/dto';

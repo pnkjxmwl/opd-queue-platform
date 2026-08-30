@@ -3,12 +3,20 @@ import { apiGet } from '../../lib/api';
 
 export default async function Overview() {
   const me = await apiGet<MeResponse>('/me');
+  const active = me.memberships.find((m) => m.status === 'ACTIVE');
+
+  // What this account can actually do TODAY. A doctor or receptionist landing here
+  // should be told the queue console does not exist yet, not left hunting for it.
+  const nextStep =
+    active?.role === 'ADMIN'
+      ? 'Set up departments, doctors, schedules, sessions and queue rules under Configuration.'
+      : 'Your queue console arrives in a later phase. Nothing to do here yet.';
 
   return (
     <>
       <h1 className="text-h1">Overview</h1>
       <p className="mt-2 text-body-lg text-ink-muted">
-        Signed in as {me.email}. Departments, doctors and sessions arrive in Phase 2.
+        Signed in as {me.email}. {nextStep}
       </p>
 
       <section className="mt-6 rounded-lg border border-line bg-surface p-5 shadow-md">

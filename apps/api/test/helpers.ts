@@ -58,8 +58,9 @@ export async function resetDb(prisma: PrismaService): Promise<void> {
   }
 
   await prisma.$executeRawUnsafe(`
-    TRUNCATE TABLE "RefreshToken", "Patient", "HospitalStaff", "Doctor",
-                   "Department", "Hospital", "Account"
+    TRUNCATE TABLE "RefreshToken", "Patient", "OPDSession", "DoctorSchedule",
+                   "QueuePolicy", "HospitalStaff", "Doctor", "Department",
+                   "Hospital", "Account"
     RESTART IDENTITY CASCADE
   `);
 }

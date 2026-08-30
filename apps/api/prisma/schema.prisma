@@ -1,6 +1,6 @@
-// OPD Queue Platform - core schema (Phase 0).
-// Models here follow docs/Architecture.md 5.1. Queue/session/payment models arrive in
-// their own phases (2, 4, 5) - do not add them early.
+// OPD Queue Platform - core schema (Phases 0-2).
+// Models here follow docs/Architecture.md 5.1. Queue-entry and payment models arrive
+// in their own phases (4, 5) - do not add them early.
 //
 // docs/Rules.md 5:
 //   - every tenant-scoped table has hospitalId and is indexed on it
@@ -93,6 +93,9 @@ model Hospital {
   departments Department[]
   doctors     Doctor[]
   staff       HospitalStaff[]
+  schedules   DoctorSchedule[]
+  sessions    OPDSession[]
+  queuePolicy QueuePolicy?
 
   @@index([city])
   @@index([status])
@@ -106,8 +109,18 @@ model HospitalStaff {
   role        StaffRole
   permissions String[]    @default([])
   status      StaffStatus @default(ACTIVE)
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
+
+  /// Outstanding invitation, if this membership is still INVITED.
+  ///
+  /// Only the SHA-256 of the token is stored - a database leak must not yield usable
+  /// invitations, the same rule RefreshToken follows. Both columns are cleared the
+  /// moment the invitation is accepted, so a token is single-use by construction
+  /// rather than by a flag someone has to remember to check.
+  inviteTokenHash String?   @unique
+  inviteExpiresAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   hospital Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
   account  Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
@@ -122,11 +135,16 @@ model Department {
   id         String   @id @default(uuid())
   hospitalId String
   name       String
+  /// Config is deactivated, never deleted: doctors and sessions reference a
+  /// department with onDelete: Restrict, so a hard DELETE stops working the day the
+  /// department is first used - permanently. DELETE sets this false instead.
+  isActive   Boolean  @default(true)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  hospital Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  hospital Hospital     @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
   doctors  Doctor[]
+  sessions OPDSession[]
 
   @@unique([hospitalId, name])
   @@index([hospitalId])
@@ -134,15 +152,18 @@ model Department {
 
 /// A provider who runs OPD sessions in a department.
 model Doctor {
-  id             String  @id @default(uuid())
-  hospitalId     String
-  departmentId   String
+  id                 String   @id @default(uuid())
+  hospitalId         String
+  departmentId       String
   /// Set once the doctor is invited and has a login (Phase 1/2).
-  accountId      String? @unique
-  name           String
-  specialization String?
+  accountId          String?  @unique
+  name               String
+  specialization     String?
   /// Cold-start seed for the ETA engine (docs/Architecture.md 8).
   defaultConsultMins Int      @default(10)
+  /// Deactivated, never deleted - see Department.isActive. A doctor who leaves the
+  /// hospital still owns every past session, so the row can never be removed.
+  isActive           Boolean  @default(true)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
@@ -150,8 +171,151 @@ model Doctor {
   department Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
   account    Account?   @relation(fields: [accountId], references: [id], onDelete: SetNull)
 
+  schedules          DoctorSchedule[]
+  /// Sessions this doctor is booked for. Survives substitution (docs/PRD.md 8.11).
+  sessionsAsOriginal OPDSession[]     @relation("SessionOriginalDoctor")
+  /// Sessions this doctor is actually running right now.
+  sessionsAsProvider OPDSession[]     @relation("SessionProvider")
+
   @@index([hospitalId])
   @@index([departmentId])
+}
+
+/// A doctor's recurring or one-off working block, as clock times in Asia/Kolkata.
+///
+/// startTime/endTime are "HH:mm" strings, NOT DateTimes. A schedule is a rule about
+/// clock faces; it becomes a UTC instant only when combined with a calendar date at
+/// session-generation time. Zero-padded HH:mm compares lexicographically exactly as
+/// it compares chronologically, so `endTime > startTime` is a real CHECK constraint.
+///
+/// ponytail: no SQL time arithmetic is possible on these columns. Nothing in the MVP
+/// needs it (overlap detection would); switch to `@db.Time` if that changes.
+model DoctorSchedule {
+  id              String    @id @default(uuid())
+  hospitalId      String
+  doctorId        String
+  /// 0=Sunday .. 6=Saturday, evaluated in Asia/Kolkata. Exclusive with `date`.
+  weekday         Int?
+  /// A single calendar date. Exclusive with `weekday`.
+  date            DateTime? @db.Date
+  startTime       String
+  endTime         String
+  /// Copied onto each generated session. docs/Phases.md: the fee belongs to the
+  /// schedule/session, never the doctor - Phase 5 derives the amount from the session.
+  defaultFeePaise Int
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  hospital Hospital     @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  doctor   Doctor       @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  sessions OPDSession[]
+
+  @@index([hospitalId])
+  @@index([doctorId])
+}
+
+/// Per-hospital queue rules. ONE row per hospital.
+///
+/// This is the frozen input to the entire Phase-4 engine: every threshold the engine
+/// uses is read from here, and the engine hardcodes none of them. Each column maps to
+/// a locked rule in docs/PRD.md 8.
+///
+/// Columns carry NO database defaults on purpose - the defaults live once, in
+/// `DEFAULT_QUEUE_POLICY` in packages/contracts. Two sets of defaults drift apart.
+///
+/// OPDSession deliberately holds NO queuePolicyId. hospitalId already determines the
+/// policy (hospitalId is unique here), so a second pointer would be the same fact
+/// twice - and two copies of one fact can disagree, which here would mean a session
+/// running on another hospital's rules. The engine reads it by hospitalId.
+model QueuePolicy {
+  id         String @id @default(uuid())
+  hospitalId String @unique
+
+  /// PRD 8.3/8.5 - the policy, not the engine, owns ordering.
+  orderingStrategy OrderingStrategy
+  /// PRD 8.2 - only checked-in patients are callable.
+  checkInRequired  Boolean
+  /// PRD 8.6
+  walkInEnabled    Boolean
+  /// PRD 8.7
+  priorityEnabled  Boolean
+
+  /// PRD 8.8 - called, absent -> grace -> recall -> SKIPPED -> requeue.
+  gracePeriodSec  Int
+  recallAttempts  Int
+  requeueBehavior RequeueBehavior
+
+  /// PRD 8.12 - three INDEPENDENT registration limits, ANDed. Manual close is the
+  /// third mechanism and lives per-session on OPDSession.registrationClosedAt.
+  cutoffOnEtaOverrun  Boolean
+  cutoffMinsBeforeEnd Int?
+  maxOnlineTokens     Int?
+
+  /// PRD 4.2 - "arrive N minutes before your window", the MVP stand-in for
+  /// maps-based "leave now". Read by Phase 6/7 notifications.
+  arriveBeforeMins Int
+
+  /// Refund rules. JSON because refund tiers are the part most likely to grow; every
+  /// field in the contracts schema defaults, so an old row still parses.
+  cancellationRules Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  hospital Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+}
+
+/// A doctor's working block on one date - the thing a queue belongs to.
+///
+/// `status` and `doctorPresence` are independent by design (docs/PRD.md 8.10): a
+/// doctor being late, on a break, or gone never changes the session's status.
+model OPDSession {
+  id            String  @id @default(uuid())
+  hospitalId    String
+  departmentId  String
+  /// Provenance: set when generated from a schedule, null when created by hand.
+  scheduleId   String?
+
+  /// Who the session was booked with. Preserved across substitution (PRD 8.11).
+  originalDoctorId        String
+  /// Who is actually seeing patients. Equal to the original until substituted.
+  currentProviderDoctorId String
+
+  /// The Asia/Kolkata calendar date this session belongs to. Stored separately from
+  /// the instants so "today's sessions" is an equality test rather than timezone
+  /// arithmetic on every discovery query.
+  date           DateTime @db.Date
+  /// UTC instants, derived from `date` plus the schedule's clock times.
+  scheduledStart DateTime
+  scheduledEnd   DateTime
+
+  status         SessionStatus  @default(OPEN_FOR_REGISTRATION)
+  doctorPresence DoctorPresence @default(NOT_PRESENT)
+
+  /// Prefix for token labels, e.g. "A" -> "A027".
+  tokenPrefix          String    @default("A")
+  feePaise             Int
+  /// Set when staff manually close registration (PRD 8.12, third mechanism).
+  registrationClosedAt DateTime?
+  /// Bumped by Phase-4 commands so clients can drop a stale realtime snapshot.
+  version              Int       @default(0)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  hospital        Hospital        @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  department      Department      @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  schedule        DoctorSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  originalDoctor  Doctor          @relation("SessionOriginalDoctor", fields: [originalDoctorId], references: [id], onDelete: Restrict)
+  currentProvider Doctor          @relation("SessionProvider", fields: [currentProviderDoctorId], references: [id], onDelete: Restrict)
+
+  /// Idempotency for generate-from-schedule, as a DATABASE constraint rather than an
+  /// application check - staff will double-click, and an application check loses that
+  /// race (docs/Phases.md, docs/Rules.md 5).
+  @@unique([originalDoctorId, date, scheduledStart])
+  @@index([hospitalId, date])
+  @@index([hospitalId, status])
+  @@index([departmentId])
+  @@index([scheduleId])
 }
 
 // ---------------------------------------------------------------------------
@@ -190,4 +354,35 @@ enum StaffStatus {
   ACTIVE
   INVITED
   DISABLED
+}
+
+/// docs/PRD.md 8.10. Independent of DoctorPresence.
+enum SessionStatus {
+  SCHEDULED
+  OPEN_FOR_REGISTRATION
+  ACTIVE
+  COMPLETED
+  CANCELLED
+  ENDED_EARLY
+}
+
+/// docs/PRD.md 8.10. Independent of SessionStatus.
+enum DoctorPresence {
+  NOT_PRESENT
+  PRESENT
+  ON_BREAK
+  LEFT
+}
+
+/// docs/PRD.md 8.3 pins v1 to token order. One value is deliberate: the column gives
+/// the decision a home (PRD 8.5 says the policy decides ordering), and adding a value
+/// later is an additive ALTER TYPE.
+enum OrderingStrategy {
+  TOKEN_ORDER
+}
+
+/// docs/PRD.md 8.8 - what happens after grace and every recall attempt is spent.
+enum RequeueBehavior {
+  END_OF_QUEUE
+  NO_REQUEUE
 }

@@ -1,5 +1,6 @@
 import { Body, Controller, Get, HttpCode, Post } from '@nestjs/common';
 import {
+  AcceptInviteRequest,
   GoogleAuthRequest,
   LoginRequest,
   LogoutRequest,
@@ -39,6 +40,20 @@ export class AuthController {
   @Post('auth/google')
   google(@Body(new ZodBody(GoogleAuthRequest)) body: GoogleAuthRequest): Promise<AuthTokens> {
     return this.auth.google(body);
+  }
+
+  /**
+   * Public by necessity: an invitee has no account to authenticate with yet. The
+   * token in the body is the only credential, which is why it is single-use and
+   * expiring.
+   */
+  @Public()
+  @HttpCode(200)
+  @Post('auth/accept-invite')
+  acceptInvite(
+    @Body(new ZodBody(AcceptInviteRequest)) body: AcceptInviteRequest,
+  ): Promise<AuthTokens> {
+    return this.auth.acceptInvite(body);
   }
 
   @Public()

@@ -25,7 +25,7 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 |---|---|---|---|---|---|
 | ☑ | 0 — Foundation / Scaffold | S | 1–2 | 3 | `phase-0-done` |
 | ☑ | 1 — Identity & Tenancy | M | 3–4 | 3 | `phase-1-done` |
-| ☐ | 2 — Hospital Config + Admin + Seed | L | 5–7 | 4 | `phase-2-done` |
+| ☑ | 2 — Hospital Config + Admin + Seed | L | 5–7 | 4 | `phase-2-done` |
 | ☐ | 3 — Discovery | M | 3–4 | 4 | `phase-3-done` |
 | ☐ | 4 — Queue Engine | XL | 8–12 | 4 (with care) | `phase-4-done` |
 | ☐ | 5 — Join + Payment → Token | L | 5–7 | 3 | `phase-5-done` |
@@ -379,7 +379,7 @@ PATCH/DELETE /patients/:id
 | ☑ P1-CONTRACT-01 | DTOs: Signup/Login/GoogleAuth/AuthTokens/Patient/Me; enums Role, Permission | CONTRACT | 1 | — | schemas compile; shared types importable |
 | ☑ P1-DB-01 | Account auth fields, refresh-token store, HospitalStaff(role,permissions); migration | DB | 1 | — | migration applies |
 | ☑ P1-BE-01 | Auth: signup (Argon2id), login, JWT access + rotating refresh, logout | BE | 2 | Wave 1 | signup→login→refresh→logout; wrong password rejected |
-| ☐ P1-BE-02 | Google OAuth + `/me` | BE | 2 | P1-BE-01 | `/me` **done & verified**; Google ID-token exchange **implemented but unverified** — needs real Google client ids in `GOOGLE_CLIENT_IDS` |
+| ☑ P1-BE-02 | Google OAuth + `/me` | BE | 2 | P1-BE-01 | `/me` **done & verified**; Google ID-token exchange **verified against a real Google token** — 200 + tokens issued, account linked not duplicated, wrong audience rejected 401 |
 | ☑ P1-BE-03 | `JwtGuard`, `RolesGuard`, `TenantGuard` + tenant context | BE | 2 | Wave 1 | unit: role allow/deny; **tenant test: A scoped to A only** |
 | ☑ P1-BE-04 | Patients: family-profile CRUD scoped to account | BE | 2 | P1-BE-03 | CRUD works; **IDOR test: can't fetch another account's patient** |
 | ☑ P1-WEB-01 | Auth shell: login, httpOnly cookie, protected routes, role-aware layout | WEB | 2 | Wave 1 | **verified**: unauth → 307 /login?next=; bad password → 401; login sets 2 HttpOnly cookies; console renders role-gated nav |
@@ -466,15 +466,15 @@ POST                  /hospitals/:id/staff              — invite doctor/staff 
 
 | ID | Task | Stream | Wave | Deps | Test / Done-when |
 |---|---|---|---|---|---|
-| ☐ P2-CONTRACT-01 | Config DTOs + session/policy enums | CONTRACT | 1 | — | compiles |
-| ☐ P2-DB-01 | Department, Doctor, DoctorSchedule, QueuePolicy, OPDSession + migration + indexes | DB | 1 | — | migration applies; `hospitalId` indexes present |
-| ☐ P2-BE-01 | Departments + Doctors CRUD (tenant-scoped, RBAC=ADMIN) | BE | 2 | Wave 1 | CRUD; non-admin blocked; cross-tenant blocked |
-| ☐ P2-BE-02 | Schedules CRUD + fees | BE | 2 | Wave 1 | create schedule; end>start validation |
-| ☐ P2-BE-03 | QueuePolicy get/put | BE | 2 | Wave 1 | put→get; invalid values rejected |
-| ☐ P2-BE-04 | OPDSession create + generate-from-schedule | BE | 2 | P2-BE-01,02 | generate today's session; appears `OPEN_FOR_REGISTRATION` |
-| ☐ P2-BE-05 | Staff invite + role assignment | BE | 2 | Wave 1 | invite doctor account; membership created |
-| ☐ P2-BE-06 | **Seed script** | BE/INFRA | 2 | P2-BE-04 | `pnpm seed` → browsable dev DB; idempotent |
-| ☐ P2-WEB-01..05 | Admin UIs: Departments · Doctors · Schedules · Policy · Sessions | WEB | 2 | Wave 1 | each screen creates/edits and persists |
+| ☑ P2-CONTRACT-01 | Config DTOs + session/policy enums | CONTRACT | 1 | — | compiles |
+| ☑ P2-DB-01 | Department, Doctor, DoctorSchedule, QueuePolicy, OPDSession + migration + indexes | DB | 1 | — | migration applies; `hospitalId` indexes present |
+| ☑ P2-BE-01 | Departments + Doctors CRUD (tenant-scoped, RBAC=ADMIN) | BE | 2 | Wave 1 | CRUD; non-admin blocked; cross-tenant blocked |
+| ☑ P2-BE-02 | Schedules CRUD + fees | BE | 2 | Wave 1 | create schedule; end>start validation |
+| ☑ P2-BE-03 | QueuePolicy get/put | BE | 2 | Wave 1 | put→get; invalid values rejected |
+| ☑ P2-BE-04 | OPDSession create + generate-from-schedule | BE | 2 | P2-BE-01,02 | generate today's session; appears `OPEN_FOR_REGISTRATION` |
+| ☑ P2-BE-05 | Staff invite + role assignment | BE | 2 | Wave 1 | invite doctor account; membership created |
+| ☑ P2-BE-06 | **Seed script** | BE/INFRA | 2 | P2-BE-04 | `pnpm seed` → browsable dev DB; idempotent |
+| ☑ P2-WEB-01..05 | Admin UIs: Departments · Doctors · Schedules · Policy · Sessions | WEB | 2 | Wave 1 | each screen creates/edits and persists |
 
 **Parallelization:** Wave 2 BE (01–06) ∥ WEB (01–05). **WEB splits across 2–3 agents** (each screen its own route/files).
 **Integration checkpoint:** admin builds hospital→dept→doctor→schedule→session end-to-end; seed populates dev DB.

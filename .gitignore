@@ -45,3 +45,8 @@ coverage/
 
 # next generates this on build
 next-env.d.ts
+
+# Google OAuth downloads. The console names them client_secret_*.json and people
+# drop them wherever the browser saved them - docs/Rules.md: no secrets in the repo.
+client_secret*.json
+*-oauth-credentials.json

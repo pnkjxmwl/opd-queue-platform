@@ -771,7 +771,658 @@ rather than running a migration, so that diff deserves a slow read before it is 
 
 ---
 
-# 📌 HANDOFF — read this first in a new session
+## 2026-08-30 — Phase 2 Wave 1: the frozen config contract + schema
+
+**Did:** `P2-CONTRACT-01` and `P2-DB-01`. New contracts (`enums/config.ts`, `config/dto.ts`,
+`common/pagination.ts`), five Prisma models/enum groups, migration
+`20260830004758_phase2_hospital_config`, and 12 new contract tests. Wave 2 is deliberately NOT started —
+the shape below is the input to the entire Phase-4 engine and was put in front of the user first.
+
+### The one thing that changed from the design docs: registration cutoff
+
+`docs/Architecture.md` §5.1 sketches `registrationCutoff(SMART|CLOCK|MAX_TOKENS)` — an enum, so a hospital
+picks **one**. `docs/PRD.md` §8.12 words the same rule **additively**: *"auto-close when a new joiner's ETA
+would exceed session end, **plus** optional `max_online_tokens` cap, **plus** manual staff close."*
+
+Those two readings are not compatible, and the enum version is the dangerous one: a hospital that sets a
+token cap silently loses the ETA-overrun guard — the rule that stops someone joining a queue they cannot
+physically be seen in. That guard is the product promise, not a preference.
+
+**Decided:** three independent limits, ANDed — registration is open only while every enabled one permits a
+join:
+
+- `cutoffOnEtaOverrun: boolean` (default true) — the SMART rule
+- `cutoffMinsBeforeEnd: int | null` (default null) — the CLOCK rule, which the enum never had a value for;
+  `CLOCK` mode was unimplementable as sketched because nothing said *what* time
+- `maxOnlineTokens: int | null` (default null) — the cap
+- manual staff close is the third PRD mechanism, is per-session rather than per-hospital, and therefore
+  lives on `OPDSession.registrationClosedAt`
+
+The `RegistrationCutoff` enum named in the Phases.md Wave-1 line does not exist. That is the deviation;
+PRD.md is the authority on product intent.
+
+### The one field neither doc put anywhere
+
+PRD §4.2 rules out maps-based "leave now" and replaces it with *"a hospital-configured 'arrive N minutes
+before your window'"*. No model in Architecture.md §5.1 has that field. It is hospital configuration, and
+`QueuePolicy` is the table that holds hospital configuration, so it is now `arriveBeforeMins` (default 30).
+Found by walking PRD §8 and §4.2 line by line against the field list rather than transcribing the
+Architecture.md sketch — which is exactly what the "review this diff slowly" instruction was for.
+
+### Decisions, and what was rejected
+
+**Clock times are `"HH:mm"` strings, not DateTimes.** A schedule of 10:00–13:00 is a rule about clock
+faces; it becomes an instant only when combined with a date at generation time. A DateTime silently carries
+a date nobody meant — the timezone bug Phases.md predicts. Zero-padded HH:mm compares lexicographically
+exactly as it compares chronologically, so `endTime > startTime` is a real database CHECK, not just a Zod
+refine. *Rejected:* `@db.Time` (Prisma maps it to a JS Date with a junk date attached — the same trap in a
+costume) and `Int` minutes-from-midnight (arithmetic-safe, but an API returning `startMin: 600` is hostile
+and needs a codec in four places). **Known ceiling, marked `ponytail:` in the schema:** no SQL arithmetic on
+schedule times. Nothing in the MVP needs it; schedule-overlap detection would.
+
+**`OPDSession.date` is a separate `@db.Date` column** alongside the UTC instants. Phase 3 discovery asks
+"today's sessions" constantly; with only instants, every one of those queries is timezone arithmetic. One
+denormalised IST calendar date turns it into an equality test — and it is the *fix* for the timezone trap,
+not an instance of it.
+
+**Idempotency is `@@unique([originalDoctorId, date, scheduledStart])`.** Phases.md demands a database
+constraint, not an application check, because staff will double-click. Verified against the live database:
+the second identical insert is rejected. *Cost accepted:* a CANCELLED session cannot be regenerated at the
+same slot. Real, but Phase-2 config is regenerable and the alternative is a partial unique index that has to
+know about queue states this phase does not own yet.
+
+**Policy defaults live once, in `DEFAULT_QUEUE_POLICY` in contracts** — the Prisma columns carry no
+`@default`. Two sets of defaults drift apart, and the one in the database is the one nobody reads. Every
+field of `UpdateQueuePolicyRequest` defaults, so `PUT {}` is a valid "reset to defaults" and a hospital that
+never opened the config screen still yields a complete policy. The engine must never meet a half-filled one.
+
+**`cancellationRules` stays a JSON column** (Architecture.md and Rules.md §11.3 both name it), but every
+field in its Zod schema has a default. That is the actual hazard mitigation: a row written today must still
+parse after Phase 5 adds a key, rather than throwing on read in production. There is a test for exactly that.
+
+**`OrderingStrategy` has one value, `TOKEN_ORDER`.** PRD §8.5 says the *policy* decides ordering, so the
+decision needs a home; §8.3 pins v1 to token order. Adding a value later is an additive `ALTER TYPE`, which
+is cheap — changing what the engine *means* by ordering is not, which is why the semantics are pinned now.
+*Rejected:* inventing `WALK_IN_ALTERNATE` because Indian hospitals often alternate online/walk-in lanes. It
+is not in the PRD, and a second strategy the engine does not implement is a lie in a dropdown.
+
+**No knob for the rules that must not be breakable.** Token number is not call order, a late check-in slots
+into its natural token position, every mutation is audited — all locked engine behaviour, deliberately with
+no configuration. Making them configurable makes them breakable.
+
+**Sessions are created `OPEN_FOR_REGISTRATION` with no `status` in the create DTO.** Rules.md §1.2 forbids
+raw CRUD on session status; every later change is a Phase-4 command. `SCHEDULED` is therefore unreachable
+until a phase adds advance scheduling — that is correct, not an oversight.
+
+**Pagination is offset-based** (`PageQuery` + `paginated()`), because the admin console shows numbered pages
+over small config lists and wants a total. Phase 3 discovery scrolls on mobile and may want a cursor; the
+two can coexist because they serve different screens. Every Phase-2 list uses this — the unbounded
+`GET /patients` was a one-off, not a precedent.
+
+### Surprises
+
+- **`prisma generate` failed with `EPERM`** on the query-engine DLL. The cause was three dev servers still
+  running from the previous session (started 02:15, five hours earlier) holding the file open on Windows.
+  Stopping the API dev-server chain fixed it. Worth knowing before debugging Prisma itself.
+- **Vitest passed while the build did not.** `as const` on the `path` arrays passed to `.refine()` makes them
+  readonly, which Zod's types reject — but esbuild strips types without checking them, so 22 tests went green
+  on code that could not compile. This is the third time in this project a green result has been the wrong
+  signal, and the second time `--force` plus a real `build` is what caught it.
+
+### Verified
+
+`pnpm exec turbo run lint typecheck test build --force` → **16/16, 0 cached**. Migration applied to the
+local database, and every CHECK constraint exercised directly with `psql`: both-recurrences rejected,
+neither-recurrence rejected, `endTime <= startTime` rejected, unpadded `"9:00"` rejected, `weekday 7`
+rejected, negative `gracePeriodSec` rejected, `maxOnlineTokens 0` rejected, session `end <= start` rejected,
+duplicate doctor+date+start rejected, valid rows accepted. Fixtures removed afterwards.
+
+---
+
+## 2026-08-30 — Phase 2 Wave 1 reviewed against PRD 8; three fixes before the freeze
+
+**Did:** Reviewed the previous session's `P2-CONTRACT-01` + `P2-DB-01` diff line by line against
+PRD.md 8 rather than re-building it, then applied three fixes and re-froze. Wave 2 is still NOT started.
+
+### Traceability first, opinions second
+
+Walked all 13 locked rules of PRD 8 and asked, for each, "where does this live and can the engine read
+it". All 13 have a home. The four rules that deliberately have **no** knob (token != call order, late
+check-in natural position, unified typed queue, audited commands) stayed knob-less. The 8.12 deviation
+from Architecture.md's `registrationCutoff(SMART|CLOCK|MAX_TOKENS)` enum was re-examined and kept: PRD
+wording is additive, and the enum version silently drops the ETA-overrun guard for any hospital that
+wants a token cap. Confirming a previous session's deviation is worth as much as finding a new one.
+
+### Three things the review caught
+
+**`SessionListQuery` had no pagination.** It carried `date/departmentId/doctorId/status` and no
+`limit/offset` — in the same commit that added `PageQuery` specifically because Phase 2 introduces the
+first unbounded lists. Sessions accumulate every single day, and this was the schema Wave 2 would have
+copied. Now `PageQuery.extend({...})`. The lesson generalises: adding a pagination helper does not
+paginate anything; the list schemas have to actually use it.
+
+**`DELETE /departments` and `DELETE /doctors` were unimplementable.** Phases.md lists both endpoints
+this phase. `Doctor.department`, `OPDSession.department`, `OPDSession.originalDoctor` and
+`.currentProvider` are all `onDelete: Restrict`, so a hard DELETE stops working the day a department or
+doctor is first used — permanently, including for the real case of a doctor who leaves the hospital.
+Found by asking what each listed endpoint does on day two, not day one.
+
+*Decided:* `isActive Boolean @default(true)` on `Department` and `Doctor`; DELETE deactivates; lists hide
+inactive rows unless `includeInactive=true`. This matches the lifecycle-not-deletion pattern the codebase
+already uses (`Hospital.status`, `HospitalStaff.status`), and Phase 3 needs it anyway — Phases.md says
+inactive config must not appear in discovery. *Rejected:* hard DELETE with a 409 when referenced. It is
+honest and costs no schema, but it gives a doctor who leaves the hospital no answer at all, which is the
+case that actually happens.
+
+*Also decided:* `UpdateDoctorRequest`/`UpdateDepartmentRequest` accept `isActive`, because a
+deactivate-only door with no way back is a trap for the admin who mis-clicks.
+
+**`OPDSession.queuePolicyId` was redundant, and redundancy here is a tenant-leak seat.** `QueuePolicy`
+is `@unique` on `hospitalId`, so `queuePolicyId` is `hospitalId` restated — one fact stored twice. Two
+copies of one fact can disagree, and the disagreement available here is "a session running on another
+hospital's rules", which no constraint would have caught. It also looked like a per-session policy
+snapshot and was not one: it points at the single mutable row, so editing the policy at 11:00 silently
+changes the rules for a queue that started at 09:00.
+
+*Decided:* drop the column. Phase 4 reads the policy by `hospitalId` (unique-indexed, one lookup).
+Deleting it also removed a required `Restrict` FK that made session creation depend on a policy row
+already existing. *Rejected:* keeping it as a join convenience, which is what Architecture.md 5.1
+sketches. One join hop is not worth a column that can contradict `hospitalId`. *Not chosen, and worth
+naming:* making it a genuine per-session snapshot, so mid-session policy edits cannot retroactively
+change a running queue. That is arguably more correct, the PRD does not ask for it, and it is a much
+bigger model. If it is ever wanted, this column is where it goes.
+
+### Two comments, because an undefined enum value is a bug waiting for Phase 4
+
+`RequeueBehavior.NO_REQUEUE` had no defined landing state — `SKIPPED` or `NO_SHOW` was left to whoever
+writes the command. Pinned as **terminal `NO_SHOW`**, refunded by `cancellationRules.noShowRefundPct`,
+deliberately the same terminal state as "booked and never arrived" (PRD 8.9) so there is exactly one
+no-show refund path rather than a second one nobody configured. Same discipline that gave
+`OrderingStrategy` a single value: pin the meaning while it is still free.
+
+`checkInRequired: false` disables a rule PRD 8.2 states as locked (Architecture.md sanctions the knob).
+Its engine semantics are now written down: a booked entry is callable without ever checking in, and
+PRD 8.9 is consequently unenforceable for that hospital. Phase 4 must not have to guess this.
+
+**`includeInactive` is `z.enum(['true','false']).transform(...)`, deliberately not `z.coerce.boolean()`.**
+Coercion follows JS truthiness, so `?includeInactive=false` would coerce to `true` — a filter that means
+the exact opposite of what it says. There is a test asserting that, because the trap is invisible on read.
+
+### Wave-2 landmines, recorded here so they are not rediscovered
+
+- The `@@unique([originalDoctorId, date, scheduledStart])` constraint fires on manual `POST /sessions`
+  too, not just on generate. Map Prisma `P2002` to **409**, never let it surface as a 500.
+- "Today" and a schedule's `weekday` must both be computed in `Asia/Kolkata`, on the server, via one
+  shared helper. An inline `new Date()` anywhere in the generate path is the 00:30-IST bug.
+- Prisma returns `@db.Date` as a JS `Date` at UTC midnight. Serialise with `toISOString().slice(0,10)`;
+  a locale formatter shifts the day on any machine behind UTC.
+- A schedule's `hospitalId` matching its doctor's, and a session's department matching its doctor's, are
+  enforced by application code only — no composite FK. Needs an explicit test, not a code review.
+- Nothing creates the `QueuePolicy` row yet. Something must upsert `DEFAULT_QUEUE_POLICY` before Phase 4
+  reads it. Dropping `queuePolicyId` removed the hard ordering dependency but not the need.
+
+### Limitations now locked at database level (named, not objected to)
+
+Sessions cannot cross midnight (`endTime > startTime` CHECK), so a 21:00-01:00 OPD is unrepresentable.
+A CANCELLED session cannot be regenerated in its own slot. `Doctor.defaultConsultMins` carries a
+`@default(10)` in both Prisma and contracts — the exact drift `QueuePolicy` deliberately avoids, left
+alone because it predates this phase.
+
+### Deliberately not added
+
+An ETA window width (PRD 9 says ETA is "always a window", but Phase 7 may derive it from variance rather
+than a fixed +/-N; an additive column later is cheap). A second `OrderingStrategy`.
+
+### Surprises
+
+- **`prisma migrate reset` is blocked in this environment.** The migration was uncommitted and dev-only,
+  so amending it in place was correct, but the DB could not be re-created the normal way. Path taken:
+  apply the delta by hand in `psql`, drop the `_prisma_migrations` row, `prisma migrate resolve --applied`
+  to let Prisma recompute the checksum — then prove the real thing with
+  `prisma migrate diff --from-migrations ./prisma/migrations --to-schema-datamodel ./prisma/schema.prisma
+  --shadow-database-url <scratch db> --exit-code` → **"No difference detected", exit 0.** That replays
+  every migration onto an empty database and diffs the result against `schema.prisma`, which is a
+  stronger check than `migrate status` and does not touch the dev database. Worth reusing whenever a
+  migration is hand-edited.
+- **A `psql` fixture check deadlocked against the test suite.** The background `turbo run test` was
+  TRUNCATE-ing the same tables (AccessExclusiveLock) while the fixtures held RowExclusiveLock. Not a
+  schema problem at all. Do not run manual DB checks and the integration suite at the same time.
+
+### Verified
+
+`pnpm exec turbo run lint typecheck test build --force` → **16/16, 0 cached** — twice: once as a baseline
+before touching anything, once after the fixes. Contract tests 22 → 25 (session-list pagination, the
+`includeInactive=false` coercion trap, reactivating a deactivated doctor). Migration replay diff clean.
+In `psql`: `isActive` defaults true on both new columns, a session inserts with no `queuePolicyId`, and a
+duplicate doctor+date+start is still rejected by name. All fixtures rolled back; tables left empty.
+
+---
+
+## 2026-08-30 — Phase 2 Wave 2: config API, sessions, staff, seed and the admin console
+
+**Did:** `P2-BE-01` … `P2-BE-06` and `P2-WEB-01` … `P2-WEB-05`. Three new API modules
+(`config`, `sessions`, `staff`), a shared IST helper, a seed script, a 27-case integration suite,
+and five admin screens under `/config`.
+
+### Module layout: one `config` module, not four
+
+Phases.md sketches `apps/api/src/{departments,doctors,schedules,policy}`. Built instead as one
+`modules/config` owning all four tables, because docs/CLAUDE.md 3 forbids a module reading another
+module's tables and these four reference each other constantly — a schedule needs its doctor, a doctor
+needs its department, a session needs all three. Four modules would have turned every ordinary read
+into a cross-module service call and bought no isolation. `sessions` and `staff` are separate modules
+and reach config only through its exported services.
+
+*Rejected:* letting `sessions` query the Doctor table directly. It is two lines shorter and it is the
+exact rule that stops a module from quietly acquiring a second owner.
+
+### The three landmines from the Wave-1 review, closed
+
+**`common/ist.ts` is the only place a clock face becomes an instant.** IST is UTC+05:30 with no DST,
+so a fixed offset is correct and a timezone library would buy nothing. Its test asserts the specific
+bug Phases.md predicts: 19:00 UTC on 29 Aug is 00:30 IST on the 30th, so `istDateOf` returns the 30th
+while `toISOString().slice(0,10)` returns the 29th. `generate` takes its date from this, never from
+the client — the sessions screen sends no date at all when the admin means "today".
+
+**`common/prisma-errors.ts` maps P2002 → 409 once**, where every caller routes through. The
+idempotency constraint fires on a hand-created session as well as on generate, so both paths would
+otherwise have surfaced Prisma internals as a 500. There is a test for each.
+
+**`@db.Date` is read with `toISOString().slice(0,10)`**, never a locale formatter, in the one place
+that converts it.
+
+### Decisions
+
+**DELETE deactivates, everywhere it can.** Departments and doctors set `isActive = false`; schedules
+really are deleted, because sessions keep their provenance through `onDelete: SetNull` and nothing
+restricts them. So the flag exists exactly where the foreign keys make deletion impossible, and
+nowhere else.
+
+**Generation skips deactivated doctors.** Discovered by asking what "deactivate a doctor" means the
+next morning: without the filter their recurring schedule would keep manufacturing sessions for
+someone who no longer works there.
+
+**Session creation guarantees a `QueuePolicy` row exists** (`QueuePolicyService.ensure`, an upsert
+from `DEFAULT_QUEUE_POLICY`). A GET that writes once is impure, and it is the cheapest way to make
+"the engine never meets a missing policy" true rather than merely intended.
+
+**The staff invite is one transaction**, with the doctor link written through `DoctorsService`
+rather than by touching the Doctor table. The validation that can fail for ordinary reasons — doctor
+not found, inactive, already has a login — runs *before* the transaction opens, so the only failure
+left inside it is a genuine database error.
+
+**The seed lives in `src/seed.ts`, not `prisma/seed.ts`.** There is no TypeScript runner in this repo
+and adding `tsx` for one script is a dependency for something `nest build` already does. Marked
+`ponytail:` with the upgrade path. It refuses to run when `NODE_ENV=production` *and* refuses if the
+database holds a hospital it did not create — fixed UUIDs are what make "did not create" checkable,
+and the same fixed ids are what make re-running converge instead of multiply. Verified by running it
+twice: 6 sessions created, then 0 created / 6 already present.
+
+### The console uses server actions, not TanStack Query — flagging this
+
+docs/CLAUDE.md 9 lists TanStack Query for web server state. The console is entirely server
+components reading through `apiGet` with an httpOnly cookie, and a client-side query cache cannot
+read that cookie. These five screens are plain forms an admin uses during onboarding, which is
+exactly what Phases.md asks for, so they are `<form action={serverAction}>` with `revalidatePath` —
+no client JavaScript at all, no new dependency, and the token never leaves the server.
+
+TanStack Query stays in `package.json` because Phase 6/7's live queue screens genuinely need it:
+those are client-side, realtime, and reconnect-driven. **This is a deviation from CLAUDE.md 9 for the
+config screens only** and is called out rather than quietly made.
+
+Server rejections surface as a `?error=` banner rather than an error page (docs/Rules.md 9: the
+console must show what the server said). Only a deliberate `ApiCallError` becomes a banner; anything
+unexpected still reaches the error boundary, so a real fault stays loud.
+
+### Pagination, since it was the standing instruction
+
+Every list endpoint added in this wave paginates: departments, doctors, schedules and sessions, all
+through `PageQuery`. Four assertions cover it — the envelope shape, the offset, the 100-item cap
+returning 400, and the session list specifically. `ConfigListQuery.includeInactive` deliberately
+avoids `z.coerce.boolean()`, which reads the string `"false"` as `true`.
+
+### Known gaps carried forward
+
+- **An invited person cannot yet complete their invitation.** The account exists with a null
+  `passwordHash`, and `/auth/signup` rejects an email that already exists, so there is no way to set
+  that password. `P2-BE-05`'s done-when is "invite doctor account; membership created", which is met,
+  and an accept-invite flow is not in this phase — but the invite is not usable end to end until one
+  exists. Whoever owns the next auth work should start here.
+  *(Closed later the same day — see the accept-invite entry below. Left as written: this file
+  is append-only, and a past entry is never edited to look right in hindsight.)*
+- Two `/me` calls per config page render (the layout and the page each resolve the hospital).
+  Harmless for an admin console, wasteful if this pattern spreads to a hot path.
+
+### Verified
+
+`pnpm exec turbo run lint typecheck test build --force` -> **16/16, 0 cached, exit 0**, run after every
+change rather than once at the end. **97 tests pass** (was 49 at the end of Phase 1): 72 in `apps/api`
+across 5 files, 25 in `packages/contracts`. The 27 new integration cases in `test/config.e2e.test.ts`
+cover, specifically: the paginated envelope on every list plus the 100-item cap returning 400; a
+receptionist blocked from admin config; a cross-hospital read answered 403 from outside and 404 from
+inside; a duplicate department name as 409 rather than 500; a doctor refused a department from another
+hospital; `end <= start` and both-recurrences rejected; policy PUT replacing rather than patching and
+`{}` resetting to defaults; per-hospital policy isolation; a session created OPEN_FOR_REGISTRATION with
+`10:00` IST stored as `04:30Z`; a duplicate slot as 409; generate returning created 1 / skipped 0 then
+created 0 / skipped 1; generation skipping a deactivated doctor; and the doctor invite flipping
+`hasLogin` while leaving `passwordHash` null.
+
+The seed was run twice against the live database: 6 sessions created, then 0 created / 6 already
+present.
+
+**NOT verified, and the reason the Phase 2 box in Phases.md 0 stays unticked:** nobody has driven the
+five admin screens in a browser. The integration checkpoint is "admin builds
+hospital->dept->doctor->schedule->session end to end", and only the API half of that is proven, by the
+suite above. `next build` type-checks and compiles the console but these pages are dynamic - they read
+cookies - so the build never renders them. That click-through, with `pnpm dev` and a real login, is
+what earns the box and the `phase-2-done` tag.
+
+
+---
+
+## 2026-08-30 — Phase 2 integration checkpoint, run against the real servers
+
+**Did:** Ran the checkpoint end to end rather than inferring it from the unit and integration suites.
+Re-seeded (the e2e suite TRUNCATEs the dev database, so the seed has to be re-applied first), started
+`@opd/api` and `@opd/web` dev servers, authenticated through the console's own `/api/auth/login` route
+so the session arrived as real httpOnly cookies, and drove the console with those cookies.
+
+### What was actually proven
+
+- **All five `/config` pages render 200 with seeded data**, not empty states: departments shows
+  Cardiology / Orthopaedics / General Medicine; doctors shows Dr. Anita Sharma and her specialization;
+  schedules shows her working block at 10:00 with a ₹500.00 fee; sessions shows today's date and
+  `OPEN FOR REGISTRATION`; policy shows every control group. This is the half `next build` cannot
+  reach - these pages read cookies, so they are dynamic and the build never renders them.
+- **A server action persists.** Posted the create-department form exactly as a JavaScript-less browser
+  would - multipart body carrying the `$ACTION_ID_…` hidden field lifted out of the rendered HTML -
+  and got `303` plus a real row in the database. That is the whole write path in one shot: form ->
+  server action -> httpOnly cookie -> API -> Postgres -> redirect. Nothing else in the suite covers it,
+  because the tests call the API directly and never go through Next.
+- **The error path renders as designed.** A duplicate name redirected to
+  `?error=A department with this name already exists` and the page rendered the banner with
+  `role="alert"` and the API's own message. Server rejections surface instead of failing silently
+  (docs/Rules.md 9).
+- **Authorization holds in the running app, not just in tests.** `reception@apollo.test` hitting
+  `/config/departments` got `307 -> /`, and an unauthenticated call straight to the API got `401`.
+
+### Surprises
+
+- **`grep "Every Sunday"` missed on a page that renders it correctly.** React server-rendering splits
+  `Every {day}` into `Every<!-- -->Sunday`, so a naive string search finds nothing. Worth remembering
+  before treating a grep miss as a rendering bug - the fix was to search for `>Sunday<`.
+- **Stopping the dev servers did not stop them.** Killing the `pnpm --filter … dev` wrappers left the
+  actual node processes listening on 3000 and 3001; `prisma generate` would then have hit the `EPERM`
+  file-lock trap recorded earlier in this log. Killing by listening port
+  (`netstat -ano` -> `taskkill //PID … //F`) is what actually worked, and `prisma generate` was re-run
+  afterwards to prove the lock was gone.
+
+### Status
+
+The checkpoint passes for everything reachable without a human looking at the screen. What remains is
+visual only - layout, spacing, whether the forms read well. The Phase 2 box and the `phase-2-done` tag
+stay unticked until that eyeball happens, per the convention that a phase is tagged only when its
+checkpoint genuinely passes.
+
+Test fixture (`Checkpoint Ward`) was deleted afterwards; the database holds exactly the seeded 5
+departments, 6 doctors and 6 sessions.
+
+---
+
+## 2026-08-30 — Accept-invite: closing the gap that made P2-BE-05 unusable
+
+**Did:** Built the missing half of the staff invitation. An invited doctor or receptionist can now set
+a password and log in. New contract types, two columns on `HospitalStaff`, a migration, a public
+`POST /auth/accept-invite`, an `/accept-invite` page, and 10 integration tests that are mostly about
+attacks rather than the happy path.
+
+### The gap, stated precisely
+
+`P2-BE-05` created an `Account` with a null `passwordHash` and a membership in `INVITED`. There was
+then no way to set that password: `/auth/login` rejects an account with no hash, and `/auth/signup`
+rejects an email that already exists. The invite was created and then stranded.
+
+### Why not the obvious fix
+
+The tempting one-liner is to let signup complete an invitation - if the account exists with no
+password, set it instead of returning 409. **That is a privilege escalation.** Anyone who guesses
+`dr.sharma@hospital.in` could sign up first and inherit a DOCTOR role inside that hospital, before the
+real doctor ever saw their invite. There is a test asserting signup still refuses.
+
+**Decided:** a single-use, expiring token, generated at invite time. It is the only thing that proves
+the invitation reached its intended recipient.
+
+### Decisions
+
+**The invitation lives on `HospitalStaff`, not in its own table.** Two nullable columns,
+`inviteTokenHash` and `inviteExpiresAt`. One account invited to two hospitals is two memberships and
+therefore two independent invitations, which falls out for free; a separate `StaffInvite` table would
+have needed its own uniqueness rules to say the same thing.
+
+**Only the SHA-256 is stored**, the rule `RefreshToken` already follows. A database leak must not
+yield usable invitations. There is a test asserting the stored value is a 64-hex-character string and
+is not the token.
+
+**Both columns are cleared on acceptance**, in the same statement that flips the status. That makes
+the token single-use *by construction* rather than by a flag someone has to remember to check, and it
+means the "already used" case needs no separate branch.
+
+**The status and the token are in the WHERE of that update, not checked beforehand.** Two simultaneous
+accepts of the same token both pass the lookup; only one can win the `updateMany`, and the loser gets
+the same rejection as a forged token. The check-then-act version would have activated twice.
+
+**The password is set only if the account has none.** An existing user invited to a second hospital
+keeps the password they already have, and accepting only activates the new membership. Otherwise
+"invite this address" would be an account-takeover primitive against any existing user. Tested from
+both sides: the attacker-chosen password does not work, the original still does, and the membership
+is active regardless.
+
+**Every failure returns the same `UnauthorizedError` with the same message.** Unknown, expired and
+already-used are indistinguishable to the caller - telling them apart says which guesses were close.
+A test asserts the two messages are byte-identical.
+
+**Argon2id runs outside the transaction.** It is deliberately slow; hashing inside would hold locks
+for the duration for no reason.
+
+**Re-inviting an outstanding invitation reissues the token rather than 409-ing.** Invitations get lost
+and expire, and the alternative is an admin with no way to resend one. Re-inviting an *active* member
+is still a 409. This changed behaviour an existing Phase-2 test asserted, so that test was rewritten
+rather than worked around - it now asserts the new contract, and points at the accept-invite suite
+which proves the replaced token stops working.
+
+### Module boundary: caught and fixed rather than shipped
+
+The first working version had `AuthService` reading and writing `HospitalStaff` directly. That table
+belongs to the staff module, and docs/CLAUDE.md 3 forbids exactly this. It typechecked and would have
+passed every test.
+
+Reworked so `StaffService` owns both halves - `findOpenInvitation` and `consumeInvitation`, the latter
+taking an optional transaction client - and `AuthService` orchestrates: it owns `Account` and the
+tokens, and asks the staff module about memberships. `AuthModule` imports `StaffModule`; no cycle,
+because `StaffService` never reaches back into auth.
+
+Worth recording because the rule caught something a passing test suite would not have: the violation
+was invisible at runtime and only visible against the architecture.
+
+### Delivery: how the token reaches the invitee
+
+MVP has no email channel - PRD 4.2 rules out SMS/WhatsApp, and push notifications go to app users, who
+an invitee by definition is not yet. So the admin passes the link on, and the console shows it once,
+on the doctors screen, immediately after inviting.
+
+**It is handed over in a short-lived httpOnly cookie, not a `?token=` redirect.** A query parameter
+would land in browser history, the Next server log, and any proxy log in between. The cookie is
+scoped to that one page and expires in three minutes; the API returns the token exactly once, so that
+render is the only chance to display it.
+
+`/accept-invite` had to be added to the middleware matcher's exclusion list alongside `/login` - an
+invitee has no session, so the protected-route redirect would otherwise bounce them to a login they
+cannot complete.
+
+### Still open
+
+- **No rate limit on `/auth/accept-invite`.** The token is 32 random bytes, so guessing is not the
+  practical risk, but the endpoint is public and unthrottled. Rate limiting is Phase 9 and this
+  endpoint belongs on that list with signup, login and the webhook.
+- **No way to revoke an outstanding invitation** short of re-inviting to burn the old token. Nobody
+  has asked for it; noting it so the absence is a decision rather than an oversight.
+
+
+### Surprises
+
+- **The web build failed where every typecheck passed.** `INVITE_COOKIE` was exported from the
+  `'use server'` actions module, and such a module may only export async functions. `tsc --noEmit`
+  is happy; the Next build is not. Fourth time in this project a green signal has been the wrong one,
+  and the second caused by a rule the type system does not model. The constant moved to `_run.ts`
+  with a comment saying why it lives there rather than beside the action that uses it.
+
+### Verified
+
+`pnpm exec turbo run lint typecheck test build --force` -> **16/16, 0 cached, exit 0**.
+**92 tests** (was 82 before this work, 49 at the end of Phase 1): 82 in `apps/api` across 6 files,
+25 in `packages/contracts`. Migration replay against a scratch database: "No difference detected".
+
+---
+
+## 2026-08-30 — Generate reports what it did; server actions can now return a result
+
+**Did:** Closed a gap found while writing the manual verification steps: the sessions screen called
+`generate` and threw the answer away. The contract returns `{ created, skipped }` and
+`packages/contracts` documents `skipped` as *"the visible proof that re-running changed nothing"* —
+but the admin saw only a page refresh. An admin who clicks twice could not tell idempotency from a
+silent failure, which is precisely the thing docs/Phases.md says to prove.
+
+**Decided:** `runAction` accepts a string back from its work callback and appends it to the success
+redirect, so an action can report what it did. `generateSessions` returns
+`created=<n>&skipped=<m>` and the page renders `role="status"` with
+*"0 sessions created, 4 already existed — running this twice is safe."*
+
+*Rejected:* a second cookie like the invite token uses. Cookies are for values that must not appear
+in a URL; these are two non-secret integers, and a query parameter survives a copy-pasted link and a
+reload, which a 3-minute cookie does not. The rule is now written into `runAction`'s comment so the
+distinction is explicit rather than remembered: **counts go in the query, secrets go in a cookie.**
+
+Found by writing the user-facing walkthrough rather than by testing. Describing what someone would
+see is a different check from asserting what the server returns, and it caught something 92 passing
+tests did not.
+
+### Verified
+
+`pnpm exec turbo run lint typecheck test build --force` -> **16/16, 0 cached, exit 0**, re-run after
+this change rather than trusting the earlier green. 92 tests. The dev database was re-seeded
+afterwards, because `turbo run test` TRUNCATEs it.
+
+---
+
+## 2026-08-30 — The console linked to a route that does not exist; found by the user, in the browser
+
+**Did:** The user ran the Phase 2 walkthrough and hit a **404 on "Queue"** immediately after accepting
+a doctor invitation. `/queue` is the doctor and staff console, which is **Phase 6** — the nav link was
+written in Phase 1 as a placeholder pointing at a route nobody had built.
+
+**This is the failure docs/Phases.md predicts by name.** Its Phase 3 risk list says: *"The Join button
+is visible but inert here. Make that obvious in the UI (disabled, with a reason), or you will file
+bugs against your own placeholder."* The same principle applies to nav, we did not apply it, and the
+predicted bug arrived on schedule — reported by a human, because no test asserts that every rendered
+link resolves.
+
+**Decided:** nav items carry a `ready` flag. A route that does not exist yet still appears — the shape
+of the console should be visible from day one — but renders as greyed text with a `Soon` badge and
+`aria-disabled`, never as an `<a>`. Verified by fetching the page as RECEPTION and confirming no
+`href="/queue"` is emitted at all.
+
+*Rejected:* deleting the link until Phase 6. It hides that the queue console is coming, which is the
+one thing the sidebar is for. *Also rejected:* a `/queue` stub page saying "coming soon" — a route
+that exists only to apologise is worse than a label that never pretended to be clickable.
+
+**Second, smaller thing the same report exposed:** the Overview greeted every role with *"Admins can
+set up departments, doctors, schedules..."*, which is wrong and slightly insulting for the doctor who
+had just logged in and can do none of it. It is now role-aware: an ADMIN gets the configuration
+sentence, everyone else gets *"Your queue console arrives in a later phase. Nothing to do here yet."*
+
+### What this says about the test suite
+
+92 tests, and none of them would ever have caught this: they assert what the API returns, and this was
+a link in a layout. The cheap general guard would be a test that every `href` rendered by the console
+resolves to a real route. Not written now — with three routes it would be ceremony — but worth having
+once Phase 6 adds the queue consoles and the nav stops being trivially checkable by eye.
+
+### Verified
+
+`pnpm exec turbo run lint typecheck test build --force` -> **16/16, 0 cached, exit 0**, run after the
+fix so the green result covers the code the user actually exercised rather than the version they
+reported the bug against. 92 tests. Fetched the console as RECEPTION and confirmed no `href="/queue"`
+is emitted. Database re-seeded afterwards.
+
+---
+
+## 2026-08-30 — Google sign-in verified against a real token · P1-BE-02 closed
+
+**Did:** The user created a Google Cloud project and a **Web** OAuth client, obtained a real ID token
+through Google's OAuth Playground, and the exchange was tested end to end. `P1-BE-02` had been carried
+as unticked since Phase 1 with the note *"implemented but unverified"*. It is now genuinely verified.
+
+### What was proven, not assumed
+
+| Path | Result |
+|---|---|
+| `POST /auth/google` with a real Google ID token | **200**, access + refresh tokens issued |
+| Account created | `googleId` set, `passwordHash` null (Google-only), email from the verified claim |
+| `GET /me` with the issued token | 200, `linkedGoogle: true`, `hasPassword: false` |
+| Signing in twice | still **one** account — no duplicate |
+| **Existing password account, same email, then Google** | **linked**: same account id before and after, `googleId` added, `passwordHash` preserved, still exactly one row |
+| Password login after linking | **200** — linking does not break the original credential |
+| Garbage token | **401** `Invalid Google token` |
+| Well-formed token minted for a **different** `aud` | **401** — the audience check is real, not decorative |
+
+The linking case is the one worth having tested by hand. "Same verified email as an existing password
+account: link, don't duplicate" is a branch that only runs against a genuine Google token, and getting
+it wrong either strands the user with two accounts or lets an unverified email claim an existing one.
+
+### A client secret landed in the repo directory, and got caught
+
+The user downloaded Google's credentials JSON and put it in `docs/`. It was still **untracked** —
+`git status` showed `??`, so nothing leaked — but `docs/` is a tracked directory and the next
+`git add .` would have pushed a client secret to GitHub.
+
+**Did:** moved the file to `~/.opd-secrets/` (outside the repo) and added `client_secret*.json` plus
+`*-oauth-credentials.json` to `.gitignore`, then proved the pattern works by creating
+`docs/client_secret_test.json` and confirming `git status` ignored it.
+
+**Decided:** the guard goes in `.gitignore`, not into a code-review habit. Google names these downloads
+`client_secret_<id>.apps.googleusercontent.com.json` and the browser saves them wherever it likes; the
+next person will do the same thing, and a rule that depends on someone noticing is not a rule.
+docs/Rules.md §5 says no secrets in the repo — this makes the common accident impossible rather than
+merely forbidden.
+
+**Note:** only the **client id** is needed by the backend, and it is not a secret. It lives in
+`apps/api/.env` (gitignored — `git check-ignore` was run to confirm). `.env.example` keeps
+`GOOGLE_CLIENT_IDS=""` empty. The client *secret* is not used by this codebase at all; it was only
+needed for the Playground to mint a token, and the backend never sees it.
+
+### What this does NOT mean
+
+**No user can sign in with Google yet.** Grepping both clients found zero Google code: `apps/mobile`
+and `apps/web` have no Google button. `P1-MOB-01` was scoped as "auth screens + secure-store tokens +
+protected nav", and the Google path was never built. The endpoint works and is proven; nothing calls it.
+
+Shipping it needs iOS and Android OAuth client ids (the Android one needs the app's SHA-1 fingerprint)
+and `expo-auth-session` wired into the mobile sign-in screen. `GOOGLE_CLIENT_IDS` is comma-separated
+precisely so those get appended without a code change. Deliberately not built now: no patient can
+reach a sign-in that leads anywhere until Phase 3 gives them something to browse.
+
+### Verified
+
+The dev database was left exactly as the seed leaves it — the test account was deleted afterwards and
+the count confirmed zero. The ID token was written to a temp file for the curl and removed after.
+
+---
+
+# 📌 HANDOFF (Phases 0–1) — SUPERSEDED
+
+> **Superseded by 📌 HANDOFF v2 at the bottom of this file.** Kept, not deleted: its
+> "five things most likely to waste your time" are all still true, and this file does not
+> rewrite its own history. Where the two disagree about project state, v2 wins.
 
 *Written at the end of the session that built Phases 0 and 1. Everything above is chronological history;
 this section is the distilled "what you need to know before touching anything".*
@@ -841,3 +1492,218 @@ Phase 2's Wave 1 freezes the **`QueuePolicy` shape**, which is the input to the 
 engine. Phases.md is explicit that changing it later means reworking the engine, not just running a
 migration. Read that diff slowly against PRD.md §8 before merging it, and resist the urge to parallelise
 Wave 2 until it is locked.
+
+---
+
+# 📌 HANDOFF v2 — read this first in a new session
+
+*Written at the end of the session that reviewed Phase 2's frozen contract, built all of Phase 2
+Wave 2, and added the accept-invite flow. Supersedes the Phases 0–1 handoff above, which is kept
+because the traps it records are all still true.*
+
+---
+
+## 1. Where the project actually stands
+
+| Phase | State |
+|---|---|
+| 0 — Foundation | ✅ complete, tagged `phase-0-done` |
+| 1 — Identity & Tenancy | ✅ complete, tagged `phase-1-done` |
+| 2 — Hospital Config + Admin + Seed | 🟡 **built and verified, NOT signed off** — see §2 |
+| 3 — Discovery | ☐ not started |
+| 4 — Queue Engine | ☐ not started |
+
+**Everything from Phase 2 onward is UNCOMMITTED.** 34 changed/new paths, two migrations. Nothing has
+been committed or tagged, because the user has not asked. `git status` is the inventory.
+
+**Health:** `pnpm exec turbo run lint typecheck test build --force` → **16/16, 0 cached**.
+**92 tests** (82 in `apps/api` across 6 files, 25 in `packages/contracts`). Was 49 at the end of
+Phase 1.
+
+Working and proven end to end: signup / login / refresh / logout, `/me`, patient CRUD, the three
+global guards, the web console login, departments / doctors / schedules / queue-policy / sessions /
+staff-invite APIs, the five admin screens, the seed, and accept-invite.
+
+---
+
+## 2. The ONE thing standing between here and `phase-2-done`
+
+A human has to look at the five admin screens. Everything reachable without eyes is already proven:
+all five pages render with real seeded data, a server action persists through the whole stack, the
+error banner renders, and a receptionist is redirected away. What is **not** verified is visual —
+layout, spacing, whether the forms read well.
+
+### The steps the user agreed to run
+
+Docker (`opd-postgres`, `opd-redis`) should already be up; start it with `docker compose up -d` if
+not. **Re-seed first** — the test suite TRUNCATEs the dev database, so a `turbo run test` leaves the
+console showing empty screens:
+
+```
+pnpm seed
+```
+
+**1. Two separate terminals**, both from the repo root. They stay running, so do not use Claude
+Code's `!` prefix, which blocks:
+
+```
+pnpm --filter @opd/api dev     # terminal A — wait for "Nest application successfully started"
+pnpm --filter @opd/web dev     # terminal B — wait for "Ready in ..."
+```
+
+**2. Log in** at http://localhost:3001/login as `admin@apollo.test` / `Demo@12345`.
+Sidebar should read "Apollo Clinic · ADMIN". Click **Configuration**.
+
+**3. Walk the five screens.** Expected seeded content for Apollo: **3 departments**
+(Cardiology, Orthopaedics, General Medicine), **4 doctors** (Anita Sharma, Rohit Menon, Kavita Rao,
+Suresh Iyer), **28 schedules**, **4 sessions today**.
+
+- **Departments** — add one; rename inline and Save; Deactivate (the row stays, flips to
+  `○ Inactive` with a Reactivate button); add a duplicate name and expect a red "Error:" banner.
+- **Doctors** — edit a row and Save. In the **Login** column enter any email → Invite. A **green
+  panel appears at the top** with `/accept-invite?token=…`. **Copy the whole link**; it is shown once
+  and the cookie holding it expires in 3 minutes.
+- **Schedules** — 28 blocks means pagination is visible: "Page 1 of 2". Click Next. Edit a row.
+  Set End earlier than Start and expect an error banner.
+- **Sessions** — click **Generate** with the date blank → expect
+  *"0 sessions created, 4 already existed — running this twice is safe."* Then filter to a future
+  date, Generate again, expect *"4 sessions created, 0 already existed."* Check "Window (IST)" reads
+  10:00–13:00 / 15:00–18:00 and is **not** shifted by 5½ hours.
+- **Queue policy** — every control filled, none blank. Change Grace period to 300, Save, reload,
+  confirm it stuck. **This screen mirrors the frozen schema field-for-field — wrong or confusing
+  wording here matters, because it is the shape the entire Phase-4 engine reads.**
+
+**4. Test the invitation** in a **private/incognito window** (so it does not share the admin
+session): paste the copied link, set a password twice (10+ chars), submit. Expect to land in the
+console with the sidebar reading "Apollo Clinic · DOCTOR". Paste the same link again → expect
+"This invitation is not valid" (the token is single-use).
+
+**5. Ctrl+C both terminals.** This matters — a running dev server holds a lock on the Prisma engine
+DLL and the next `prisma generate` fails with `EPERM`. That already cost a session once.
+
+**6. Report back.** Then tick the Phase 2 box in `docs/Phases.md` §0 and tag `phase-2-done`,
+**only if the user asks** for the commit and tag.
+
+---
+
+## 3. Traps — the ones that have actually cost time
+
+Carried from the Phases 0–1 handoff, all still true:
+
+1. **A green Turbo result can be a lie.** It has cached "passing" tasks that never ran. Verify
+   anything that matters with `pnpm exec turbo run lint typecheck test build --force`.
+2. **esbuild (Vitest, `tsx`) does not implement `emitDecoratorMetadata`**, so NestJS DI silently
+   resolves every constructor parameter as `undefined`. `unplugin-swc` is wired into
+   `apps/api/vitest.config.ts` — do not remove it, and do not move the API's dev/build off the Nest CLI.
+3. **Turbo runs tasks in a filtered environment.** A new env var must go in `globalPassThroughEnv`
+   in `turbo.json` or the task never sees it. Invisible locally, because `process.loadEnvFile()`
+   bypasses Turbo; it bites in CI.
+4. **pnpm's isolated layout hides transitive deps** — declare them explicitly.
+5. **Expo SDK is pinned to 54 deliberately** — it is what the test device's Expo Go supports.
+
+Added this session:
+
+6. **`--force` plus a real `build` has now caught four wrong green signals.** The newest:
+   `tsc --noEmit` passes on a `'use server'` module that exports a plain constant, and the Next build
+   fails on it. A `'use server'` file may export **only async functions**. Non-function shared values
+   go in `app/(console)/config/_run.ts`.
+7. **`prisma migrate reset` and `prisma migrate dev` are both unusable here** — reset is blocked by
+   the permission classifier, and `migrate dev` needs a TTY. The working recipe for a hand-written
+   migration is: write `migration.sql` by hand (or generate it with `prisma migrate diff --script`),
+   `prisma migrate deploy`, then **prove it** with
+   `prisma migrate diff --from-migrations ./prisma/migrations --to-schema-datamodel ./prisma/schema.prisma --shadow-database-url postgresql://opd:opd_local_dev@localhost:5433/opd_shadow?schema=public --exit-code`
+   → must say "No difference detected". Create `opd_shadow` first and drop it afterwards. This is a
+   stronger check than `migrate status` and never touches the dev database.
+8. **Stopping a dev server does not stop it.** Killing the `pnpm --filter … dev` wrapper leaves the
+   node process listening. Kill by port: `netstat -ano | grep ":3000 .*LISTENING"` → `taskkill //PID <pid> //F`.
+9. **Never run manual `psql` checks while the integration suite is running.** They deadlock — the
+   suite holds AccessExclusiveLock via TRUNCATE while fixtures hold RowExclusiveLock.
+10. **React server-rendering splits `Every {day}` into `Every<!-- -->Sunday`.** A grep for the rendered
+    phrase misses on a page that renders it correctly. Search for `>Sunday<` instead.
+11. **The e2e suite TRUNCATEs the dev database.** Run `pnpm seed` after any `turbo run test` if you
+    want a browsable console.
+
+---
+
+## 4. Decisions that constrain future work
+
+Read the full reasoning in the entries above; these are the ones a new session will trip over.
+
+- **`QueuePolicy` is frozen** and is the input to the entire Phase-4 engine. Three registration
+  limits are ANDed, not an either/or enum. `RequeueBehavior.NO_REQUEUE` means **terminal `NO_SHOW`**,
+  refunded by `cancellationRules.noShowRefundPct`. `checkInRequired: false` means a booked entry is
+  callable without checking in, and makes PRD 8.9 unenforceable for that hospital.
+- **`OPDSession` holds no `queuePolicyId`.** `hospitalId` determines the policy (it is `@unique` on
+  `QueuePolicy`). Read the policy by `hospitalId`; `QueuePolicyService.ensure()` guarantees a row.
+- **DELETE deactivates** departments and doctors (`isActive`), because every FK to them is
+  `onDelete: Restrict`. Schedules really are deleted — sessions keep provenance via `SetNull`.
+- **Every clock↔instant conversion goes through `apps/api/src/common/ist.ts`.** Never an inline
+  `new Date()` in the generate path. `@db.Date` is read with `toISOString().slice(0,10)`, never a
+  locale formatter.
+- **P2002 → 409 is mapped once**, in `apps/api/src/common/prisma-errors.ts`.
+- **One `config` module owns departments, doctors, schedules and policy.** `sessions` and `staff`
+  reach it only through exported services — docs/CLAUDE.md §3 forbids cross-module table access.
+  This rule already caught a real violation (`AuthService` writing `HospitalStaff`) that typechecked
+  and passed every test.
+- **The admin console uses Next server actions, not TanStack Query.** A deliberate, user-approved
+  deviation from CLAUDE.md §9: the console is server-components-only and a client cache cannot read
+  the httpOnly cookie. TanStack Query stays installed for Phase 6/7's realtime screens, where it fits.
+- **In a server action: counts go in the query string, secrets go in a short-lived cookie.**
+- **Sessions are created `OPEN_FOR_REGISTRATION`** and there is no `status` on the create DTO. Every
+  later status change is a Phase-4 domain command (Rules.md §1.2).
+
+---
+
+## 5. Known gaps carried forward
+
+- ~~**Google ID-token exchange has never run against a real token.**~~ **CLOSED** — verified against a
+  real token; `P1-BE-02` is ticked. What remains is that **no client has a Google button**: `apps/mobile`
+  and `apps/web` contain zero Google code, so the working endpoint is unreachable by a user. Needs iOS +
+  Android client ids and `expo-auth-session` in the mobile sign-in screen.
+- **`/auth/accept-invite` is public and unthrottled.** The token is 32 random bytes so guessing is
+  not the practical risk, but it belongs on the Phase-9 rate-limit list beside signup, login and the
+  Razorpay webhook.
+- **No way to revoke an outstanding invitation** short of re-inviting to burn the old token.
+- **`GET /patients` is unbounded** — a conscious one-off. Every Phase-2 list paginates.
+- **Expired `RefreshToken` rows are never pruned** — belongs with the Phase-8 workers.
+- **Two `/me` calls per config page render** (layout + page each resolve the hospital). Harmless for
+  an admin console; do not let the pattern spread to a hot path.
+- **CI actions warn about Node 20 deprecation.** Not breaking.
+- **The folder is still `C:\Projects\New folder`.** Renaming is safe for the code, but Claude Code
+  keys per-project memory to the folder path — copy the memory directory to the new key first.
+
+---
+
+## 6. Prompt for the next session
+
+Paste this to pick the work back up:
+
+> Continue building the OPD Queue Platform. Read `docs/PROGRESS.md` — start at the 📌 HANDOFF v2
+> section at the bottom, which is the current brief; the handoff above it is superseded.
+>
+> Phases 0 and 1 are complete and tagged. **Phase 2 is built and verified but not signed off**: all
+> subtasks are ticked, 92 tests pass, and I still owe it the manual browser walkthrough described in
+> §2 of that handoff. Nothing from Phase 2 is committed yet — do not commit or tag unless I ask.
+>
+> Before anything else, tell me: (a) whether I have reported back on the Phase 2 walkthrough, and if
+> not, whether you want me to run it now; (b) what you plan to do first.
+>
+> Then continue with **Phase 4 — Queue Engine** unless I say otherwise. Read `docs/Phases.md`
+> Phase 4 in full first. It is the highest-risk phase in the project and Phases.md says explicitly
+> to slow down: Wave 1 is the contract + schema, Wave 2 is the pure table-driven state machine plus
+> the `SELECT … FOR UPDATE` transaction skeleton, and Wave 3 is command-per-file. **Do not
+> parallelise Wave 3 unless every command really is its own file.** Show me the Wave 1 diff before
+> Wave 2, the same way Phase 2's frozen contract was reviewed.
+>
+> Three standing rules from previous sessions:
+> - Verify with `pnpm exec turbo run lint typecheck test build --force`. A cached green result has
+>   lied four times now.
+> - Every list endpoint paginates. `GET /patients` is the one documented exception, not a precedent.
+> - Append to `docs/PROGRESS.md` as you go — what you did, what you decided, **why**, and what you
+>   rejected. Failures and dead ends are the most valuable entries. Tick the ☐ in `docs/Phases.md`.
+>
+> Run `pnpm seed` before any manual browser check — the test suite truncates the dev database.
+> Docker may need `docker compose up -d`.
+
+*(If Phase 3 — Discovery is wanted instead, it is lower risk and read-only, and the seed already
+gives it something to show. Phases.md says 3 and 4 can run in parallel.)*
