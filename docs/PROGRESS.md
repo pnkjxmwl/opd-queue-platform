@@ -36,6 +36,8 @@ code alone does not carry.
 
 ---
 
+> **New session? Jump to the 📌 HANDOFF section at the very bottom of this file first.**
+
 ## Current state (update the one-liner, keep the history below)
 
 > **Where we are:** **Phases 0 and 1 complete** and tagged; ready to start Phase 2 (Hospital Configuration).
@@ -766,3 +768,76 @@ OAuth client ids. Everything else in Phase 1 is verified.
 **Next:** Phase 2 - Hospital Configuration. Its Wave 1 freezes the `QueuePolicy` shape, which is the input
 to the entire Phase-4 queue engine; Phases.md flags that changing it later means reworking the engine
 rather than running a migration, so that diff deserves a slow read before it is merged.
+
+---
+
+# 📌 HANDOFF — read this first in a new session
+
+*Written at the end of the session that built Phases 0 and 1. Everything above is chronological history;
+this section is the distilled "what you need to know before touching anything".*
+
+## Where the project actually stands
+
+**Phases 0 and 1 are complete and tagged** (`phase-0-done`, `phase-1-done`). CI is green on GitHub
+(`pnkjxmwl/opd-queue-platform`, private). 49 tests pass. Phase 2 has not been started.
+
+Working today, verified rather than assumed:
+- API: signup / login / refresh / logout, `/me`, account-scoped patient CRUD, `/health` + `/health/ready`
+- Three global guards, with a 24-case tenant-isolation + IDOR suite proving cross-hospital and
+  cross-account access is blocked
+- Web console: login through httpOnly cookies, middleware-driven silent refresh, role-aware nav
+- Mobile: auth + family profiles, verified on a physical device including session survival across force-quit
+
+## The five things most likely to waste your time
+
+1. **A green Turbo result can be a lie.** Turbo caches aggressively, and twice this session a "passing"
+   task had not actually run — once hiding a broken mobile typecheck, once hiding a stale `@types/react`
+   conflict. **Before believing any green result that matters, run
+   `pnpm exec turbo run lint typecheck test build --force`.** That is the trustworthy signal.
+2. **Vitest and `tsx` use esbuild, which does not implement `emitDecoratorMetadata`.** NestJS DI then
+   resolves every constructor parameter as `undefined`, with a misleading error. `apps/api` already has
+   `unplugin-swc` wired into `vitest.config.ts` — do not remove it, and do not switch the API's dev/build
+   away from the Nest CLI back to `tsx`.
+3. **Turbo runs tasks in a filtered environment.** Any new env var must be added to `globalPassThroughEnv`
+   in `turbo.json` or the task simply will not see it. This is invisible locally, because
+   `process.loadEnvFile()` reads `apps/api/.env` directly and bypasses Turbo entirely. CI has no `.env`,
+   so CI is where it bites.
+4. **pnpm's isolated layout means transitive deps are not resolvable.** `apps/mobile` declares
+   `@babel/runtime` and `@expo/metro-runtime` explicitly for exactly this reason. If Metro reports
+   "unable to resolve" for something you never imported, declare it rather than fighting the resolver.
+5. **Check the target environment before picking a version.** The Expo SDK was wrong twice — pinned to 52
+   out of familiarity, then bumped to 57 because it was newest. The correct input was which Expo Go the
+   test device can install: **SDK 54**. Do not "upgrade" it without checking that first.
+
+## Conventions that are not obvious from the code
+
+- **`docs/Rules.md` §16 is binding**: append to this file whenever you finish a unit of work — what you
+  did, what you decided, **why**, and the alternatives you rejected. Failures and dead ends are the
+  highest-value entries. Append only; never edit a past entry to look right in hindsight.
+- **Tick the `☐` in `docs/Phases.md` too.** Phases.md is the scoreboard, PROGRESS.md is the narrative.
+- **Tag a phase only when its integration checkpoint genuinely passes.** No tag existed until the device
+  check actually happened, deliberately.
+- **Never commit unless asked** (Rules.md §13). Commits use
+  `Pankaj Semwal <81282394+pnkjxmwl@users.noreply.github.com>`. Commits before `55185f9` carry a different
+  email and are attributed to another GitHub account — that is known and was deliberately left alone.
+- `CLAUDE.md` must stay at the repo root; it only auto-loads from there.
+
+## Known gaps carried forward
+
+- **`P1-BE-02`** — the Google ID-token exchange is implemented but has never run against a real token
+  (`GOOGLE_CLIENT_IDS` is empty). Needs iOS/Android/web OAuth client ids.
+- **`GET /patients` is unbounded**, a conscious deviation from Rules.md §6. Family size is naturally
+  bounded — **but Phase 2 introduces genuinely open-ended lists (departments, doctors, schedules,
+  sessions) and those must paginate.**
+- **Expired `RefreshToken` rows are never cleaned up.** Harmless now; belongs with the Phase-8 workers.
+- **CI actions warn about Node 20 deprecation.** Not breaking; bump the action majors when convenient.
+- **The local folder is still `C:\Projects\New folder`.** Renaming is safe for the code (no tracked file
+  contains an absolute path), but Claude Code keys its per-project memory to the folder path, so the
+  memory directory must be copied to the new key or the next session starts with no memory.
+
+## Starting Phase 2 — the one thing to be careful about
+
+Phase 2's Wave 1 freezes the **`QueuePolicy` shape**, which is the input to the entire Phase-4 queue
+engine. Phases.md is explicit that changing it later means reworking the engine, not just running a
+migration. Read that diff slowly against PRD.md §8 before merging it, and resist the urge to parallelise
+Wave 2 until it is locked.
