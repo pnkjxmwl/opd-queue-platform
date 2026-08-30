@@ -2402,36 +2402,67 @@ Mobile shell (rebuilt 2026-08-31):
 
 ## 6. Prompt for the next session
 
-> Continue building the OPD Queue Platform. Read `docs/PROGRESS.md` — start at **📌 HANDOFF v3** at the
-> bottom, which is the current brief; the two handoffs above it are superseded.
->
-> **Phases 0-3 are complete, merged to `main` and tagged** (`phase-3-done` is the newest). `main` is
-> green, the working tree is clean and nothing is outstanding - 103 tests, `turbo run lint typecheck
-> test build --force` at 16/16, 0 cached. Do not commit, branch, push or tag unless I ask.
->
-> Next is **Phase 4 — Queue Engine**. Read `docs/Phases.md` Phase 4 in full before touching anything.
-> It is the highest-risk phase in the project and Phases.md says explicitly to slow down: Wave 1 is the
-> contract + schema, Wave 2 is the pure table-driven state machine plus the `SELECT … FOR UPDATE`
-> transaction skeleton, and Wave 3 is command-per-file. **Do not parallelise Wave 3 unless every command
-> really is its own file.** Show me the Wave 1 diff before starting Wave 2, the way Phase 2's frozen
-> contract and Phase 3's response shape were both reviewed.
->
-> Two things Phase 3 left for you, both marked in the code:
-> - `snapshots()` in `apps/api/src/modules/discovery/discovery.service.ts` is the single place per-card
->   queue numbers are produced. Fill it with ONE `groupBy` over `QueueEntry.status` keyed by sessionId —
->   never a query per card.
-> - `QueueSnapshot` in `packages/contracts/src/discovery/dto.ts` is a frozen response shape the mobile
->   app already renders. Fill `nowServingToken`, `checkedInCount` and `bookedNotArrivedCount`; do not
->   rename or remove anything.
->
-> Standing rules:
-> - Verify with `pnpm exec turbo run lint typecheck test build --force`. A cached green has lied five times.
-> - Every list endpoint paginates. `GET /patients` is the one documented exception, not a precedent.
-> - Append to `docs/PROGRESS.md` as you go — what you did, what you decided, **why**, and what you
->   rejected. Failures and dead ends are the most valuable entries. Tick the ☐ in `docs/Phases.md`.
->
-> Run `pnpm --filter @opd/api seed` before any manual browser or app check — the test suite truncates the
-> dev database. Docker may need `docker compose up -d`.
+Paste this whole block into a fresh session.
 
-*(Phase 3 and Phase 4 were designed to run in parallel; Phase 3 is now done, so Phase 4 has no
-competition for attention. Phases 5–7 all depend on it.)*
+> Continue building the **OPD Queue Platform** — a multi-tenant OPD queue app for Indian hospitals
+> (`C:\Projects\New folder`). Patients join a doctor's live queue remotely, watch a dynamic ETA, and
+> arrive only when their turn is near. **The queue is the product.**
+>
+> **Read first, in this order:** `CLAUDE.md` (always-on rules) → `docs/PROGRESS.md`, starting at
+> **📌 HANDOFF v3** at the very bottom — that is the live brief, and the two handoffs above it are
+> marked SUPERSEDED — → `docs/Phases.md` **Phase 4** in full. `docs/Rules.md` wins on any conflict.
+>
+> **State:** Phases 0–3 are complete, merged to `main` and tagged (`phase-0-done` … `phase-3-done`).
+> `main` is green, the working tree is clean, CI passes on a clean runner. 103 tests. The API,
+> admin console and the patient mobile app all work end to end, read-only — nothing books yet.
+>
+> **Next is Phase 4 — the Queue Engine.** It *is* the product and the highest-risk phase in the
+> project; `docs/Phases.md` says explicitly to slow down. Work it in wave order:
+> Wave 1 = contract + Prisma schema · Wave 2 = the pure, table-driven state machine plus the
+> `SELECT … FOR UPDATE` transaction skeleton · Wave 3 = command-per-file.
+> **Do not parallelise Wave 3 unless every command really is its own file.**
+> **Show me the Wave 1 diff and wait, before starting Wave 2** — that review caught three real
+> problems in Phase 2's frozen contract before anything was built on it, and it is the single
+> highest-value thing we do.
+>
+> **Two hooks Phase 3 deliberately left for you, both marked in the code:**
+> - `snapshots()` in `apps/api/src/modules/discovery/discovery.service.ts` is the **only** place
+>   per-card queue numbers are produced. Fill it with **ONE `groupBy`** over `QueueEntry.status`
+>   keyed by `sessionId` — never a query per card. It is the hottest read path in the product.
+> - `QueueSnapshot` in `packages/contracts/src/discovery/dto.ts` is a **frozen response shape the
+>   mobile app already renders**. Fill `nowServingToken`, `checkedInCount`, `bookedNotArrivedCount`.
+>   Adding a field is fine; renaming or removing one breaks a shipped app.
+> - Also: `registrationOpen` is currently only the session-local half of PRD 8.12. Phase 5 must AND
+>   in the three policy limits. It can only ever get stricter.
+>
+> **Standing rules — these came from things that actually went wrong:**
+> - Verify with `pnpm exec turbo run lint typecheck test build --force`. **A cached green has lied
+>   five times.** Never report work complete on a cached result.
+> - **Every list endpoint paginates.** `GET /patients` is the one documented exception, not a precedent.
+> - **Append to `docs/PROGRESS.md` as you go** — what you did, what you decided, **why**, and what you
+>   rejected. Failures, dead ends and surprises are the most valuable entries. It is append-only:
+>   never edit a past entry, write a new one that reverses it. Tick the ☐ in `docs/Phases.md`.
+> - **Never commit, branch, push or tag unless I ask.** When I do: branch → PR → squash merge → and
+>   **tag after the merge**, because a tag made on the branch does not land on `main`.
+> - If the build has to diverge from `PRD.md` / `Architecture.md` / `Design.md`, **say so and update
+>   that doc**, don't diverge silently. Two stale lines in `Architecture.md` survived a whole phase.
+> - Tick a phase box only when its integration checkpoint genuinely passes. I ticked four mobile
+>   subtasks on a typecheck once and had to un-tick them.
+>
+> **`apps/mobile` has no test script.** Lint + typecheck + `expo export` is the entire automated
+> evidence for the whole app. **Four Phase-3 defects reached my device and I found every one of
+> them** — budget a device walkthrough into any phase that touches a screen, and give me exact
+> steps with the expected values rather than "check it works".
+>
+> **Before any manual check:** `docker compose up -d` · `pnpm --filter @opd/api seed` (the test suite
+> TRUNCATEs the dev database) · API `pnpm --filter @opd/api start` (:3000) · console
+> `pnpm --filter @opd/web dev` (:3001) · app `pnpm --filter @opd/mobile dev -- --clear`.
+> Seeded logins are in the seed output; `admin@apollo.test` / `Demo@12345` for the console.
+> If the phone says "offline", `apps/mobile/.env` needs the **Wi-Fi** adapter's IPv4 — `ipconfig`
+> lists Hyper-V switches first and a phone cannot reach those.
+>
+> **Start by telling me:** (a) a one-paragraph summary of where the project stands, so I can see you
+> actually read the handoff, and (b) what you plan to do first. Then wait for me.
+
+*(Phase 3 was designed to run in parallel with Phase 4 and is now done, so Phase 4 has no competition
+for attention. Phases 5, 6 and 7 all depend on it.)*
