@@ -23,8 +23,8 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 
 | ✓ | Phase | Size | Est. focused days | Parallel agents | Tag when done |
 |---|---|---|---|---|---|
-| ☐ | 0 — Foundation / Scaffold | S | 1–2 | 3 | `phase-0-done` |
-| ☐ | 1 — Identity & Tenancy | M | 3–4 | 3 | `phase-1-done` |
+| ☑ | 0 — Foundation / Scaffold | S | 1–2 | 3 | `phase-0-done` |
+| ☑ | 1 — Identity & Tenancy | M | 3–4 | 3 | `phase-1-done` |
 | ☐ | 2 — Hospital Config + Admin + Seed | L | 5–7 | 4 | `phase-2-done` |
 | ☐ | 3 — Discovery | M | 3–4 | 4 | `phase-3-done` |
 | ☐ | 4 — Queue Engine | XL | 8–12 | 4 (with care) | `phase-4-done` |
@@ -285,7 +285,7 @@ GET /health/ready     — readiness (checks DB + Redis)
 | ☑ P0-DB-01 | Prisma init; docker-compose (Postgres+Redis); core schema (Account, Patient, Hospital, HospitalStaff, Department, Doctor); first migration | DB | 2 | 01 | `docker compose up`; `prisma migrate dev` creates tables; `prisma studio` shows them |
 | ☑ P0-BE-01 | NestJS skeleton: env validation (Zod), pino logger, exception filter + error envelope, `/health` + `/health/ready` | BE | 3 | CFG-01, DB-01 | `curl /health` → 200; `/health/ready` 200 only when DB+Redis up; kill DB → 503 |
 | ☑ P0-WEB-01 | Next.js skeleton: App Router, Tailwind + shadcn, Design.md theme tokens, placeholder page | WEB | 3 | CFG-01 | `pnpm --filter web dev`; page renders; teal primary applied |
-| ☐ P0-MOB-01 | Expo skeleton: Expo Router, theme (Inter + palette), placeholder screen | MOB | 3 | CFG-01 | `pnpm --filter mobile start`; opens in simulator/Expo Go — **code + typecheck/lint done; needs a device to verify** |
+| ☑ P0-MOB-01 | Expo skeleton: Expo Router, theme (Inter + palette), placeholder screen | MOB | 3 | CFG-01 | **verified on a physical device** via Expo Go (SDK 54) |
 | ☑ P0-INFRA-02 | CI (GitHub Actions): install → lint → typecheck → test → build | INFRA | 4 | all | **CI green** on pnkjxmwl/opd-queue-platform (run 33277067473): install → prisma generate → migrate deploy → lint → typecheck → test → build |
 
 **Parallelization:** Wave 3 → `BE-01 ∥ WEB-01 ∥ MOB-01` (three agents, three directories).
@@ -383,8 +383,8 @@ PATCH/DELETE /patients/:id
 | ☑ P1-BE-03 | `JwtGuard`, `RolesGuard`, `TenantGuard` + tenant context | BE | 2 | Wave 1 | unit: role allow/deny; **tenant test: A scoped to A only** |
 | ☑ P1-BE-04 | Patients: family-profile CRUD scoped to account | BE | 2 | P1-BE-03 | CRUD works; **IDOR test: can't fetch another account's patient** |
 | ☑ P1-WEB-01 | Auth shell: login, httpOnly cookie, protected routes, role-aware layout | WEB | 2 | Wave 1 | **verified**: unauth → 307 /login?next=; bad password → 401; login sets 2 HttpOnly cookies; console renders role-gated nav |
-| ☐ P1-MOB-01 | Auth screens + expo-secure-store tokens + protected nav | MOB | 2 | Wave 1 | login persists across restart — **code complete; Metro bundle verified (`expo export` succeeds); needs a device to prove persistence** |
-| ☐ P1-MOB-02 | Family-profile screens (add/list/edit, choose-who-for) | MOB | 2 | P1-MOB-01 | add "Father" → persists — **code complete; needs a device** |
+| ☑ P1-MOB-01 | Auth screens + expo-secure-store tokens + protected nav | MOB | 2 | Wave 1 | **verified on device**: signed in, force-quit the app, reopened — still signed in |
+| ☑ P1-MOB-02 | Family-profile screens (add/list/edit, choose-who-for) | MOB | 2 | P1-MOB-01 | **verified on device**: SELF profile auto-present, added "Father", persisted across restart |
 | ☑ P1-TEST-01 | **Tenant-isolation + IDOR test suite** | TEST | 3 | BE-03,04 | proves cross-hospital + cross-account access blocked |
 
 **Parallelization:** Wave 2 → `BE (01–04) ∥ WEB-01 ∥ MOB (01–02)`. UI mocks auth until BE ready.
@@ -1345,8 +1345,8 @@ Keep the *narrative* (what you built, what you decided, what broke) in **PROGRES
 
 | Phase | Started | Signed off | Actual focused days | Tag | What surprised you |
 |---|---|---|---|---|---|
-| 0 |  |  |  |  |  |
-| 1 |  |  |  |  |  |
+| 0 | 2026-08-29 | 2026-08-30 | ~1 | `phase-0-done` | `tsx` silently breaks NestJS DI (esbuild omits decorator metadata); a stale turbo cache reported a passing test that never ran |
+| 1 | 2026-08-30 | 2026-08-30 | ~1 | `phase-1-done` | the tenant suite caught global auth breaking `/health`; CI caught a Windows-only test glob and turbo stripping every env var |
 | 2 |  |  |  |  |  |
 | 3 |  |  |  |  |  |
 | 4 |  |  |  |  |  |

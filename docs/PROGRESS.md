@@ -38,11 +38,12 @@ code alone does not carry.
 
 ## Current state (update the one-liner, keep the history below)
 
-> **Where we are:** Phases 0-1 built, reviewed, on GitHub with **CI green**; mobile on **Expo SDK 54** (matches the test device).
-> Private repo: `pnkjxmwl/opd-queue-platform`. **49 tests** (40 api + 9 contracts), incl. the 24-case
-> tenant-isolation + IDOR suite. React 19 across web and mobile, which removed both React-version hacks.
-> Outstanding: the mobile device check (`P0-MOB-01`, `P1-MOB-01/02`) - now unblocked - Google exchange
-> needs real client ids (`P1-BE-02`), and the local folder still needs renaming to match the project.
+> **Where we are:** **Phases 0 and 1 complete** and tagged; ready to start Phase 2 (Hospital Configuration).
+> Private repo `pnkjxmwl/opd-queue-platform`, **CI green**. 49 tests (40 api + 9 contracts) incl. the
+> 24-case tenant-isolation + IDOR suite. Web auth shell verified end-to-end; mobile verified on a physical
+> device (Expo Go, SDK 54) including session persistence across a force-quit.
+> One carried gap: `P1-BE-02`'s Google ID-token exchange is implemented but unverified - it needs real
+> OAuth client ids in `GOOGLE_CLIENT_IDS`. The local folder still wants renaming to match the project.
 
 ---
 
@@ -736,3 +737,32 @@ before choosing a version.
 **Result:** expo 54.0.37, react-native 0.81.5, expo-router 6.0.24, React 19.1.0, TypeScript still pinned at
 5.7.2 for monorepo consistency. Mobile typecheck and lint clean, `expo export` produces a **2.71 MB**
 Hermes bundle, and `turbo run lint typecheck test build --force` -> **16/16, 0 cached**.
+
+---
+
+## 2026-08-30 — Device check passed; Phases 0 and 1 signed off
+
+**Did:** Ran the mobile app on a physical phone through Expo Go (SDK 54) and walked the full journey:
+sign up -> home -> family profiles (the SELF profile was already there, created server-side at signup) ->
+added "Father" -> **force-quit the app entirely and reopened**. Still signed in, Father still listed.
+
+**Why that last step was the whole point:** every earlier mobile check proved the code *builds*.
+`expo export` producing a Hermes bundle says Metro resolved the graph - it says nothing about whether
+`expo-secure-store` actually persists to the OS keychain. Only a real force-quit and relaunch shows that,
+and it is the difference between "users log in once" and "users log in every single time they open the app".
+
+**Ticked:** `P0-MOB-01`, `P1-MOB-01`, `P1-MOB-02`. That closes both integration checkpoints -
+Phase 0 ("all three apps boot; /health green; CI green") and Phase 1 ("real login on mobile + web;
+P1-TEST-01 green").
+
+**Tagged `phase-0-done` and `phase-1-done`** - the known-good floor that Phases.md §A.9 calls for. This is
+the first tag in the repo; none was created earlier precisely because the checkpoints were not genuinely met.
+
+**Carried gap, deliberately not hidden behind a tag:** `P1-BE-02` remains unticked. `/me` is done and
+tested, but the Google ID-token exchange has never run against a real Google token - `GOOGLE_CLIENT_IDS` is
+empty and the only test asserts the endpoint refuses cleanly when unconfigured. It needs iOS/Android/web
+OAuth client ids. Everything else in Phase 1 is verified.
+
+**Next:** Phase 2 - Hospital Configuration. Its Wave 1 freezes the `QueuePolicy` shape, which is the input
+to the entire Phase-4 queue engine; Phases.md flags that changing it later means reworking the engine
+rather than running a migration, so that diff deserves a slow read before it is merged.
