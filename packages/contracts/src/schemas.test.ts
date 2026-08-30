@@ -14,6 +14,14 @@ import {
   UpdateDoctorRequest,
 } from './config/dto';
 import { PageQuery } from './common/pagination';
+import {
+  DepartmentListQuery,
+  DoctorSearchQuery,
+  HospitalSearchQuery,
+  QueueSnapshot,
+  SessionCard,
+  SessionCardQuery,
+} from './discovery/dto';
 
 describe('auth schemas', () => {
   it('normalises email to trimmed lowercase', () => {
@@ -201,5 +209,79 @@ describe('config list queries', () => {
   it('lets an update reactivate a deactivated doctor', () => {
     expect(UpdateDoctorRequest.parse({ isActive: true })).toEqual({ isActive: true });
     expect(UpdateDoctorRequest.parse({})).toEqual({});
+  });
+});
+
+describe('discovery schemas', () => {
+  const snapshot = {
+    nowServingToken: null,
+    checkedInCount: 0,
+    bookedNotArrivedCount: 0,
+    registrationOpen: true,
+    joinNowEtaFrom: null,
+    joinNowEtaTo: null,
+  };
+
+  const card = {
+    id: '11111111-0000-4000-8000-000000000001',
+    hospitalId: '11111111-0000-4000-8000-000000000002',
+    hospitalName: 'Apollo Clinic',
+    departmentId: '11111111-0000-4000-8000-000000000003',
+    departmentName: 'Cardiology',
+    doctorId: '11111111-0000-4000-8000-000000000004',
+    doctorName: 'Dr. Anita Sharma',
+    doctorSpecialization: null,
+    isSubstitute: false,
+    date: '2026-08-30',
+    scheduledStart: '2026-08-30T04:30:00.000Z',
+    scheduledEnd: '2026-08-30T07:30:00.000Z',
+    status: 'OPEN_FOR_REGISTRATION',
+    doctorPresence: 'NOT_PRESENT',
+    feePaise: 50_000,
+    snapshot,
+  };
+
+  it('accepts a card whose ETA window is still unfilled (Phase 7 fills it)', () => {
+    expect(SessionCard.parse(card).snapshot.joinNowEtaFrom).toBeNull();
+  });
+
+  it('accepts the same card once Phase 7 fills the window - the shape does not change', () => {
+    const filled = {
+      ...card,
+      snapshot: {
+        ...snapshot,
+        nowServingToken: 'A018',
+        checkedInCount: 3,
+        bookedNotArrivedCount: 5,
+        joinNowEtaFrom: '2026-08-30T05:40:00.000Z',
+        joinNowEtaTo: '2026-08-30T06:00:00.000Z',
+      },
+    };
+    expect(SessionCard.parse(filled).snapshot.nowServingToken).toBe('A018');
+  });
+
+  it('keeps the two counts separate - they are not one number (docs/PRD.md 7.3)', () => {
+    expect(Object.keys(QueueSnapshot.shape)).toContain('checkedInCount');
+    expect(Object.keys(QueueSnapshot.shape)).toContain('bookedNotArrivedCount');
+  });
+
+  it('paginates every discovery list (docs/Rules.md 6)', () => {
+    expect(HospitalSearchQuery.parse({})).toEqual({ limit: 20, offset: 0 });
+    expect(SessionCardQuery.parse({})).toEqual({ limit: 20, offset: 0 });
+    expect(DoctorSearchQuery.parse({})).toEqual({ limit: 20, offset: 0 });
+    expect(HospitalSearchQuery.safeParse({ limit: '1000' }).success).toBe(false);
+  });
+
+  it('requires a hospitalId on the department list, since the path carries none', () => {
+    expect(DepartmentListQuery.safeParse({}).success).toBe(false);
+    expect(
+      DepartmentListQuery.parse({ hospitalId: '11111111-0000-4000-8000-000000000002' }).limit,
+    ).toBe(20);
+  });
+
+  it('trims search text and rejects an empty or oversized q', () => {
+    expect(HospitalSearchQuery.parse({ q: '  apollo ' }).q).toBe('apollo');
+    expect(HospitalSearchQuery.safeParse({ q: '   ' }).success).toBe(false);
+    expect(HospitalSearchQuery.safeParse({ q: 'x'.repeat(81) }).success).toBe(false);
   });
 });

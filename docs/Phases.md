@@ -26,7 +26,7 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 | ☑ | 0 — Foundation / Scaffold | S | 1–2 | 3 | `phase-0-done` |
 | ☑ | 1 — Identity & Tenancy | M | 3–4 | 3 | `phase-1-done` |
 | ☑ | 2 — Hospital Config + Admin + Seed | L | 5–7 | 4 | `phase-2-done` |
-| ☐ | 3 — Discovery | M | 3–4 | 4 | `phase-3-done` |
+| ☑ | 3 — Discovery | M | 3–4 | 4 | `phase-3-done` |
 | ☐ | 4 — Queue Engine | XL | 8–12 | 4 (with care) | `phase-4-done` |
 | ☐ | 5 — Join + Payment → Token | L | 5–7 | 3 | `phase-5-done` |
 | ☐ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
@@ -525,7 +525,7 @@ Let patients discover these sessions (Phase 3).
 **Goal:** Patients can browse to a doctor's live session (read-only).
 **Prerequisites:** Phase 2 (needs sessions + seed).
 **Size:** `M` · ~3–4 focused days · up to 4 parallel agents
-**Status:** ☐ not started → tick in §0 when the integration checkpoint passes
+**Status:** ☑ complete — integration checkpoint passed on a real device, 2026-08-30 (see docs/PROGRESS.md)
 
 ### 📦 What you'll have after this phase
 Patients can browse. From the mobile app: pick a city → see hospitals → departments → **today's sessions**,
@@ -552,14 +552,14 @@ GET /doctors/:id                            — secondary path (doctor → their
 
 | ID | Task | Stream | Wave | Deps | Test / Done-when |
 |---|---|---|---|---|---|
-| ☐ P3-CONTRACT-01 | Discovery DTOs (session-first) | CONTRACT | 1 | — | compiles |
-| ☐ P3-BE-01 | Cities + hospital search + hospital detail | BE | 2 | Wave 1 | seeded hospitals returned; filters + pagination |
-| ☐ P3-BE-02 | Departments + today's sessions with snapshot | BE | 2 | Wave 1 | session cards from seed |
-| ☐ P3-BE-03 | Session detail + doctor profile | BE | 2 | Wave 1 | detail returns snapshot; doctor→sessions |
-| ☐ P3-MOB-01 | City select + hospital list | MOB | 2 | Wave 1 | browse seeded hospitals |
-| ☐ P3-MOB-02 | Hospital detail + departments | MOB | 2 | Wave 1 | drill into departments |
-| ☐ P3-MOB-03 | **Session cards** (Design 5.5) + detail | MOB | 2 | Wave 1 | session-first list renders |
-| ☐ P3-MOB-04 | Doctor profile (secondary) | MOB | 2 | Wave 1 | search doctor → sessions |
+| ☑ P3-CONTRACT-01 | Discovery DTOs (session-first) | CONTRACT | 1 | — | compiles |
+| ☑ P3-BE-01 | Cities + hospital search + hospital detail | BE | 2 | Wave 1 | seeded hospitals returned; filters + pagination |
+| ☑ P3-BE-02 | Departments + today's sessions with snapshot | BE | 2 | Wave 1 | session cards from seed |
+| ☑ P3-BE-03 | Session detail + doctor profile | BE | 2 | Wave 1 | detail returns snapshot; doctor→sessions |
+| ☑ P3-MOB-01 | City select + hospital list | MOB | 2 | Wave 1 | browse seeded hospitals |
+| ☑ P3-MOB-02 | Hospital detail + departments | MOB | 2 | Wave 1 | drill into departments |
+| ☑ P3-MOB-03 | **Session cards** (Design 5.5) + detail | MOB | 2 | Wave 1 | session-first list renders |
+| ☑ P3-MOB-04 | Doctor profile (secondary) | MOB | 2 | Wave 1 | search doctor → sessions |
 
 **Parallelization:** Wave 2 BE (01–03) ∥ MOB (01–04, split across agents). MOB mocks until BE ready.
 **Integration checkpoint:** patient browses full path city→hospital→dept→session→detail from seed.
