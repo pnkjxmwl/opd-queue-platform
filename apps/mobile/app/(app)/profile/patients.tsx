@@ -3,9 +3,11 @@ import { Stack } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import type { CreatePatientRequest, Patient, PatientRelation } from '@opd/contracts';
-import { useAuth } from '../../lib/auth';
-import { Button, ErrorNote, Field } from '../../lib/ui';
-import { theme } from '../../theme';
+import { useAuth } from '../../../lib/auth';
+import { Icon } from '../../../lib/icon';
+import { QueryState } from '../../../lib/discovery';
+import { Avatar, Button, ErrorNote, Field, SectionLabel, pressable } from '../../../lib/ui';
+import { theme } from '../../../theme';
 
 const RELATIONS: PatientRelation[] = [
   'SELF',
@@ -17,6 +19,7 @@ const RELATIONS: PatientRelation[] = [
   'OTHER',
 ];
 
+/** The people this account books for (docs/PRD.md 6.1, family profiles). */
 export default function Patients() {
   const { authedFetch } = useAuth();
   const queryClient = useQueryClient();
@@ -25,8 +28,10 @@ export default function Patients() {
   const [relation, setRelation] = useState<PatientRelation>('SELF');
   const [formError, setFormError] = useState<string | null>(null);
 
+  // The key matches lib/api.ts's useApi('/patients'), so adding a profile here also
+  // refreshes the greeting and avatar on home.
   const patients = useQuery({
-    queryKey: ['patients'],
+    queryKey: ['/patients'],
     queryFn: async (): Promise<Patient[]> => {
       const res = await authedFetch('/patients');
       if (!res.ok) throw new Error('Could not load your profiles');
@@ -44,7 +49,7 @@ export default function Patients() {
       setName('');
       setRelation('SELF');
       setFormError(null);
-      void queryClient.invalidateQueries({ queryKey: ['patients'] });
+      void queryClient.invalidateQueries({ queryKey: ['/patients'] });
     },
     onError: (e: Error) => setFormError(e.message),
   });
@@ -54,7 +59,7 @@ export default function Patients() {
       const res = await authedFetch(`/patients/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Could not remove this profile');
     },
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['patients'] }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['/patients'] }),
     onError: (e: Error) => setFormError(e.message),
   });
 
@@ -67,13 +72,23 @@ export default function Patients() {
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.screen} keyboardShouldPersistTaps="handled">
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={styles.content}
+      keyboardShouldPersistTaps="handled"
+    >
       <Stack.Screen options={{ title: 'Family profiles' }} />
 
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Add a profile</Text>
+        <SectionLabel>Add a profile</SectionLabel>
 
-        <Field label="Name" value={name} onChangeText={setName} autoCapitalize="words" />
+        <Field
+          label="Name"
+          value={name}
+          onChangeText={setName}
+          autoCapitalize="words"
+          icon="user"
+        />
 
         <Text style={styles.label}>Relation</Text>
         <View style={styles.chips}>
@@ -85,11 +100,14 @@ export default function Patients() {
                 onPress={() => setRelation(r)}
                 accessibilityRole="radio"
                 accessibilityState={{ selected }}
-                style={[styles.chip, selected && styles.chipSelected]}
+                {...pressable(theme.radius.full)}
               >
-                <Text style={[styles.chipText, selected && styles.chipTextSelected]}>
-                  {label(r)}
-                </Text>
+                <View style={[styles.chip, selected && styles.chipSelected]}>
+                  {selected ? <Icon name="check" size={14} color="#FFFFFF" /> : null}
+                  <Text style={[styles.chipText, selected && styles.chipTextSelected]}>
+                    {label(r)}
+                  </Text>
+                </View>
               </Pressable>
             );
           })}
@@ -97,19 +115,28 @@ export default function Patients() {
 
         {formError && <ErrorNote message={formError} />}
 
-        <Button title="Add profile" onPress={onAdd} pending={addPatient.isPending} />
+        <Button
+          title="Add profile"
+          icon="plus"
+          onPress={onAdd}
+          pending={addPatient.isPending}
+        />
       </View>
 
-      <Text style={styles.sectionTitle}>Your profiles</Text>
+      <SectionLabel>Your profiles</SectionLabel>
 
-      {patients.isPending && <Text style={styles.muted}>Loading…</Text>}
-      {patients.isError && <ErrorNote message={patients.error.message} />}
-      {patients.data?.length === 0 && (
-        <Text style={styles.muted}>No profiles yet. Add yourself first.</Text>
-      )}
+      <QueryState
+        pending={patients.isPending}
+        error={patients.error}
+        isEmpty={patients.isSuccess && patients.data.length === 0}
+        emptyIcon="users"
+        emptyText="No profiles yet. Add yourself first."
+        onRetry={() => void patients.refetch()}
+      />
 
       {patients.data?.map((p) => (
         <View key={p.id} style={styles.row}>
+          <Avatar name={p.name} />
           <View style={styles.rowText}>
             <Text style={styles.rowName}>{p.name}</Text>
             <Text style={styles.muted}>{label(p.relation)}</Text>
@@ -119,8 +146,11 @@ export default function Patients() {
             accessibilityRole="button"
             accessibilityLabel={`Remove ${p.name}`}
             hitSlop={8}
+            {...pressable(theme.radius.full)}
           >
-            <Text style={styles.remove}>Remove</Text>
+            <View style={styles.remove}>
+              <Icon name="trash-2" size={18} color={theme.color.danger.fg} />
+            </View>
           </Pressable>
         </View>
       ))}
@@ -135,42 +165,52 @@ function label(relation: PatientRelation): string {
 }
 
 const styles = StyleSheet.create({
-  screen: { padding: theme.space[4], gap: theme.space[4] },
+  screen: { backgroundColor: theme.color.canvas },
+  content: { padding: theme.space[4], gap: theme.space[3], paddingBottom: theme.space[8] },
   card: {
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
-    borderWidth: 1,
-    borderColor: theme.color.border,
-    padding: theme.space[5],
+    padding: theme.space[4],
     gap: theme.space[3],
+    ...theme.elevation.sm,
   },
-  cardTitle: { ...theme.font.h3, color: theme.color.text },
-  sectionTitle: { ...theme.font.h3, color: theme.color.text },
   label: { ...theme.font.label, color: theme.color.text },
-  muted: { ...theme.font.body, color: theme.color.textMuted },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.space[2] },
   chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.space[1],
+    // 36 tall inside a row that keeps 44px of tappable area via the parent padding.
+    height: 36,
     paddingHorizontal: theme.space[3],
-    paddingVertical: theme.space[2],
     borderRadius: theme.radius.full,
     borderWidth: 1,
     borderColor: theme.color.border,
     backgroundColor: theme.color.surface,
   },
   chipSelected: { backgroundColor: theme.color.primary, borderColor: theme.color.primary },
-  chipText: { ...theme.font.caption, color: theme.color.textMuted },
+  chipText: { ...theme.font.label, color: theme.color.text },
   chipTextSelected: { color: '#FFFFFF' },
+
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    gap: theme.space[3],
+    minHeight: 64,
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
-    borderWidth: 1,
-    borderColor: theme.color.border,
-    padding: theme.space[4],
+    paddingHorizontal: theme.space[4],
+    paddingVertical: theme.space[3],
+    ...theme.elevation.sm,
   },
-  rowText: { gap: 2 },
-  rowName: { ...theme.font.bodyLg, color: theme.color.text },
-  remove: { ...theme.font.label, color: theme.color.danger.fg },
+  rowText: { flex: 1, gap: 2 },
+  rowName: { ...theme.font.h3, color: theme.color.text },
+  muted: { ...theme.font.body, color: theme.color.textMuted },
+  remove: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: theme.radius.full,
+  },
 });

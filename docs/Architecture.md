@@ -105,10 +105,9 @@ apps/api/src/
 │   ├── auth/               # signup/login/google/refresh
 │   ├── accounts/           # user accounts
 │   ├── patients/           # family profiles
-│   ├── hospitals/          # tenants
-│   ├── departments/
-│   ├── doctors/
-│   ├── schedules/          # doctor schedules → session generation
+│   ├── config/             # departments + doctors + schedules + queue policy (ADMIN)
+│   ├── staff/              # memberships and invitations
+│   ├── discovery/          # ★ patient READ model: cities/hospitals/departments/doctors/sessions
 │   ├── sessions/           # OPD sessions + presence + session state
 │   ├── queue/              # ★ the heart: state machine + domain commands
 │   ├── eta/                # estimation engine
@@ -120,6 +119,18 @@ apps/api/src/
 ```
 
 Each module owns its controller (HTTP), service (logic), and Prisma access. Cross-module calls go through services, not direct DB reads into another module's tables.
+
+Two deliberate departures from the sketch above, both taken during the build and recorded in
+`PROGRESS.md`:
+
+- **`config/` is one module, not four.** Departments, doctors, schedules and the queue policy are
+  edited together, are all ADMIN-only and tenant-scoped, and reference each other constantly. Splitting
+  them would turn every ordinary read into a cross-module service call for no isolation gained.
+- **`discovery/` reads tables it does not own** — the single exception to the rule above. It is
+  read-only, writes nothing and exports no service. The owning services are scoped to a *staff*
+  membership and apply admin visibility rules, which a patient has neither of; and a session card is
+  one aggregate join across four tables, which split across services becomes a per-card N+1 on the
+  hottest read path in the product. Do not extend the exception to anything that writes.
 
 ---
 
@@ -205,15 +216,33 @@ GET/POST/PATCH /patients     family profiles under the account
 ```
 
 ### 6.2 Discovery (patient, session-first)
+
+Built in Phase 3. Authenticated but NOT tenant-scoped: any signed-in patient may see any listable
+hospital, which is expressed by the absence of a `:hospitalId` segment — `TenantGuard` keys off that
+parameter, so every route here uses `:id`.
+
 ```
 GET /cities
 GET /hospitals?city=&area=&q=
 GET /hospitals/:id
-GET /hospitals/:id/departments
+GET /departments?hospitalId=                → NOT /hospitals/:id/departments, see below
 GET /departments/:id/sessions?date=today   → session cards (doctor + live queue + ETA + fee)
 GET /sessions/:id                          → session detail + live queue snapshot
-GET /doctors/:id                           → secondary path (doctor → their sessions)
+GET /doctors?q=&city=                      → doctor search (secondary path)
+GET /doctors/:id                           → doctor profile
+GET /doctors/:id/sessions?date=            → that doctor's sessions (matches CURRENT PROVIDER)
 ```
+
+**Why departments hang off a query string.** `GET /hospitals/:id/departments` collides with the
+admin route `GET /hospitals/:hospitalId/departments` from Phase 2. Express matches on route *shape*,
+not parameter name, so one silently shadows the other — and the matched route's parameter name is what
+decides whether `TenantGuard` engages, so a patient would get a 403 instead of a list. Guarded by a
+test in `apps/api/test/discovery.e2e.test.ts`.
+
+**The queue snapshot on these responses is a frozen shape.** `QueueSnapshot` in `packages/contracts`
+declares `nowServingToken`, the two ahead-of-you counts, `registrationOpen` and the ETA window now;
+Phase 4 fills the counts and Phase 7 the window. Adding a field is safe, renaming or removing one
+breaks a shipped mobile app.
 
 ### 6.3 Join & payment (patient)
 ```

@@ -1,6 +1,6 @@
 import { Stack, useRouter } from 'expo-router';
 import { useState } from 'react';
-import { ScrollView, StyleSheet, Text } from 'react-native';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useAuth } from '../../lib/auth';
 import { Button, ErrorNote, Field } from '../../lib/ui';
 import { theme } from '../../theme';
@@ -29,9 +29,22 @@ export default function Signup() {
   return (
     <ScrollView contentContainerStyle={styles.screen} keyboardShouldPersistTaps="handled">
       <Stack.Screen options={{ title: 'Create account' }} />
-      <Text style={styles.title}>Create your account</Text>
 
-      <Field label="Your name" value={name} onChangeText={setName} autoComplete="name" autoCapitalize="words" />
+      <View style={styles.intro}>
+        <Text style={styles.title}>Create your account</Text>
+        <Text style={styles.subtitle}>
+          Your name becomes your first patient profile — you can add family later.
+        </Text>
+      </View>
+
+      <Field
+        label="Your name"
+        value={name}
+        onChangeText={setName}
+        autoComplete="name"
+        autoCapitalize="words"
+        icon="user"
+      />
       <Field
         label="Email"
         value={email}
@@ -39,6 +52,7 @@ export default function Signup() {
         autoCapitalize="none"
         keyboardType="email-address"
         autoComplete="email"
+        icon="mail"
       />
       <Field
         label="Password"
@@ -47,7 +61,8 @@ export default function Signup() {
         secureTextEntry
         autoCapitalize="none"
         autoComplete="new-password"
-        placeholder="At least 10 characters"
+        icon="lock"
+        helper="At least 10 characters."
       />
 
       {error && <ErrorNote message={error} />}
@@ -59,6 +74,14 @@ export default function Signup() {
 }
 
 const styles = StyleSheet.create({
-  screen: { flexGrow: 1, justifyContent: 'center', padding: theme.space[4], gap: theme.space[4] },
-  title: { ...theme.font.h1, color: theme.color.primary },
+  screen: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    padding: theme.space[5],
+    gap: theme.space[4],
+    backgroundColor: theme.color.canvas,
+  },
+  intro: { gap: theme.space[1] },
+  title: { ...theme.font.h1, color: theme.color.text },
+  subtitle: { ...theme.font.body, color: theme.color.textMuted },
 });

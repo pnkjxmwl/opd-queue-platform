@@ -1418,6 +1418,516 @@ the count confirmed zero. The ID token was written to a temp file for the curl a
 
 ---
 
+## 2026-08-30 — Phase 3: Discovery (patient read path) — built, tested, checkpoint passed
+
+**Did:** the whole phase in one session — Wave 1 (`P3-CONTRACT-01`), Wave 2 backend (`P3-BE-01..03`),
+Wave 2 mobile (`P3-MOB-01..04`) and the integration checkpoint. Read-only throughout: no new writes,
+no new tables, no migration.
+
+A patient can now sign in and browse **city → hospital → department → today's session cards → session
+detail**, plus the secondary path **doctor search → doctor → their sessions**. 21 new e2e tests, 6 new
+contract tests. Suite: **103 tests**, `turbo run lint typecheck test build --force` → **16/16, 0 cached**.
+
+---
+
+### Wave 1 — the frozen bit is the queue snapshot, not the whole contract
+
+New file `packages/contracts/src/discovery/dto.ts`. Phase 2's frozen thing was `QueuePolicy` (the
+engine's input); Phase 3's is the **response shape**, because Phase 7 has to fill it without breaking
+an already-shipped mobile app. `docs/Phases.md` is explicit: *"ETA and queue-snapshot fields must be
+present and nullable now… do not omit them."*
+
+`QueueSnapshot` — six fields, all declared now, half of them inert until later phases:
+
+| Field | Today | Filled by |
+|---|---|---|
+| `nowServingToken` | `null` | Phase 4 |
+| `checkedInCount` | `0` | Phase 4 |
+| `bookedNotArrivedCount` | `0` | Phase 4 |
+| `registrationOpen` | **computed** from the session alone | Phase 5 ANDs in the policy limits |
+| `joinNowEtaFrom` / `joinNowEtaTo` | `null` | Phase 7 |
+
+**Decided: two counts, never one.** `docs/PRD.md` 4.2/7.3 calls this the honest two-number model —
+"X checked in ahead of you, Y booked but not arrived". Rejected a single `waitingCount`: collapsing
+them is exactly the half-truth that makes a queue app feel like it is lying, and a derived total is
+one line of arithmetic on the card.
+
+**Decided: separate `Public*` DTOs from the Phase-2 admin DTOs**, even where the table is the same.
+`Department` (admin) carries `isActive`; `PublicDepartment` carries `todaySessionCount` and nothing
+internal. Rejected reusing one shape per table — that is how an internal field ends up on a public
+endpoint, and the two audiences genuinely differ.
+
+**Decided: the card headlines the CURRENT PROVIDER**, not the doctor the session was booked with, plus
+an `isSubstitute` flag. After a substitution (`docs/PRD.md` 8.11) a patient browsing now cares about
+who is in the room. `GET /doctors/:id/sessions` matches on the provider for the same reason — a
+covering doctor's page shows the clinic they are actually taking, and the booked doctor's does not.
+
+**Decided: `registrationOpen` ships half-computed, and says so.** Phase 3 knows `status`,
+`registrationClosedAt` and `scheduledEnd`; the three policy limits (ETA overrun, `cutoffMinsBeforeEnd`,
+`maxOnlineTokens`) all need queue data that does not exist until Phase 4. The flag can therefore only
+get **stricter** later, never more permissive, and the contract says outright that it is advisory —
+`docs/Rules.md` 1 still makes the server the only thing that decides at join time. Rejected omitting
+it: without a server-supplied reason the client has to reimplement PRD 8.12, which `docs/CLAUDE.md` 9
+forbids.
+
+---
+
+### An endpoint from `docs/Architecture.md` had to change: a route collision
+
+`Architecture.md` 6.2 specifies `GET /hospitals/:id/departments`. Phase 2 already shipped
+`GET /hospitals/:hospitalId/departments` for the admin console.
+
+**Express matches on route SHAPE, not on parameter name.** Both are `GET /hospitals/:x/departments`.
+Whichever module registered first would win, and the parameter name of the *matched* route is what
+`TenantGuard` keys off — so the patient route would either be shadowed (every patient gets a 403 from
+TenantGuard) or would shadow the admin one. Silent either way; nothing would have failed to compile.
+
+**Decided:** `GET /departments?hospitalId=<uuid>`, paginated. Same information, no ambiguity.
+
+Rejected: (a) relying on registration order — fragile and invisible; (b) moving the Phase-2 admin route
+to `/hospitals/:hospitalId/config/departments` — rework of a signed-off phase, touching the web console
+and its tests, to satisfy a doc sketch; (c) inlining departments into `GET /hospitals/:id` — that is an
+unbounded list, and the standing instruction is that every list paginates.
+
+`discovery.e2e.test.ts` now asserts both halves: a patient gets **403** on the admin path (proving it
+still resolves to the ADMIN controller) and the admin gets the **admin shape** (`isActive` present,
+`todaySessionCount` absent). A future route added at a colliding shape fails that test.
+
+Every other discovery route uses `:id`, never `:hospitalId` — the absence of that segment is precisely
+what makes `TenantGuard` pass through. Renaming one of them would silently demand a staff membership
+and lock every patient out. That is written at the top of the controller.
+
+---
+
+### Wave 2 backend — `apps/api/src/modules/discovery`
+
+Endpoints (all authenticated, none tenant-scoped):
+
+```
+GET /cities
+GET /hospitals?city=&area=&q=
+GET /hospitals/:id
+GET /departments?hospitalId=
+GET /departments/:id/sessions?date=
+GET /doctors?q=&city=
+GET /doctors/:id
+GET /doctors/:id/sessions?date=
+GET /sessions/:id
+```
+
+**Decided: authenticated, not `@Public()`.** `docs/Phases.md` calls this path "deliberately public",
+which means *not tenant-scoped* — any signed-in patient may see any listed hospital. It does not mean
+unauthenticated. `docs/PRD.md` 6.1 has the patient signed in before browsing anyway, and an anonymous
+endpoint is one more thing to rate-limit in Phase 9 for nothing gained today.
+
+**Decided, and it is a documented exception: `discovery` reads tables it does not own.**
+`docs/CLAUDE.md` 3 forbids cross-module table access, and last session that rule caught a real bug
+(`AuthService` writing `HospitalStaff`). This is a deliberate departure, recorded here rather than
+quietly taken:
+
+- Nothing here writes. The rule exists to stop two modules mutating the same invariants.
+- The owning services are tenant-scoped to a **staff membership** and apply **admin** visibility rules.
+  A patient has neither. Routing through them would mean adding a parallel public-read method to each.
+- A session card is one join across Hospital × Department × Doctor × OPDSession. Split across four
+  services it becomes the per-card N+1 that `docs/Phases.md` names as this phase's headline risk.
+
+The module exports no service, so nothing else in the API can grow a dependency on it. Rejected
+alternative: scatter the read endpoints into `config` and `sessions` — that removes the one place the
+public visibility rules live, which is the thing most likely to leak.
+
+**Visibility — one shared `where`, not a rule per query:**
+
+| Hidden | Why |
+|---|---|
+| hospitals not `VERIFIED` | PENDING is unfinished onboarding, SUSPENDED is deliberate; everything else hangs off the hospital, so this one filter hides their departments, doctors and sessions too |
+| `isActive: false` departments and doctors | Phase 2 decided DELETE deactivates; this is the other half of that decision |
+| `CANCELLED` sessions | cancelled means gone, not merely closed |
+
+`COMPLETED` and `ENDED_EARLY` sessions **stay visible** on purpose. A patient browsing at 16:00 should
+see that the morning clinic ran and is over, rather than an empty screen that reads as a broken app.
+The card carries the status and `registrationOpen` is false, so nothing about it invites a join.
+
+**N+1, killed by construction.** Two private helpers are the only places a per-card number is produced:
+`todayCountsBy()` (one `groupBy` per page for hospital and department session counts) and `snapshots()`
+(one map for a page of sessions). `snapshots()` returns zeros today and is the **single** function
+Phase 4 and Phase 7 edit — swap the body for a `groupBy` over `QueueEntry.status` and an ETA call, and
+every card and detail response fills at once with no call site touched.
+
+**Surprise:** Prisma's `groupBy` infers the row shape from the `by` literal, so a computed key
+(`by: [key]`) loses the type and a cast leaks into the *argument* position, producing an error message
+about the array type of the return value. Fixed by branching on the key with two literal calls — two
+lines longer, zero casts, and `group.hospitalId` is provably a string.
+
+---
+
+### Wave 2 mobile — seven screens
+
+`app/(app)/discover/index` (cities + doctor search) · `discover/[city]` (hospitals) ·
+`hospital/[id]` (detail + departments) · `department/[id]` (**the session cards**) ·
+`session/[id]` (detail) · `doctors` (search) · `doctor/[id]` (profile + sessions).
+
+Shared: `lib/api.ts` (one `useApi` hook — the path IS the query key), `lib/format.ts`,
+`lib/discovery.tsx` (`Pill`, `QueryState`, `Row`, `SessionCardView`, `JoinButton`, `MoreNote`).
+
+**Decided: IST is arithmetic, not `Intl`.** `lib/format.ts` adds a fixed +05:30 and slices the ISO
+string, mirroring `apps/api/src/common/ist.ts`. IST has no DST, ever. The reason not to use
+`Intl.DateTimeFormat({ timeZone })` is Hermes: the `timeZone` option is the part of Intl that cannot be
+relied on across both platforms, and a Mumbai clinic reading 04:30 on a phone set to London is a bug
+nobody would notice in a simulator set to IST.
+
+**Decided: `QueryState` handles loading / error / empty in one component.** `docs/Rules.md` 9 requires
+all three on every screen; writing them per screen is how one goes missing. A transport failure is
+reported as "You appear to be offline" rather than "Network request failed", and every state offers a
+retry.
+
+**Decided: one large page (`limit=50`) plus an honest `MoreNote`, not infinite scroll.** The API
+paginates; the client says "Showing 50 of N. Narrow your search" instead of silently hiding rows.
+Marked `ponytail:` with the upgrade path (`useInfiniteQuery`) for the first real city that overflows.
+
+**The Join button is present, disabled, and says why** — "Booking opens soon", or "Registration closed"
+when the server says registration is closed. This is the exact failure `docs/Phases.md` predicts for
+this phase (*"or you will file bugs against your own placeholder"*), and it is the same failure the
+user hit last session with the `/queue` nav link. Twice is a pattern; every inert control now carries
+its reason in text, not just in a disabled style.
+
+Status is never colour-only (`docs/Design.md` 5.3): every pill is dot + written label. Live numbers use
+`fontVariant: ['tabular-nums']` so they will not jitter when Phase 7 makes them move.
+
+---
+
+### The fifth wrong green signal — expo-router's typed routes were never being checked
+
+`experiments.typedRoutes: true` has been on since Phase 0. The declaration that makes it real,
+`.expo/types/router.d.ts`, is written **only by `expo start`**, and `.expo/` is gitignored.
+
+So on a fresh checkout — which is every CI run — `Href` degrades to `string`, and
+`router.push('/dpeartment/[id]')` typechecks perfectly. The mobile typecheck was silently not checking
+the one thing typed routes exist for.
+
+Found by accident: the stale local declaration listed only the Phase-0/1 routes, so the first typecheck
+of the new screens produced **nine** errors. Regenerating it made all nine legitimate — but the same
+nine would have sailed through CI.
+
+**Fixed** rather than noted: `apps/mobile/scripts/generate-router-types.cjs` calls expo-router's
+`getTypedRoutesDeclarationFile` directly (synchronously — the exported `regenerateDeclarations` is
+debounced 1s and needs the process kept alive) and is wired into the `typecheck` script, so it runs
+everywhere instead of only where someone remembered to start the dev server. Marked `ponytail:` because
+it reaches into `expo-router/build`; there is no public CLI for this, and an SDK upgrade that moves the
+path fails loudly, which is correct.
+
+This is the **fifth** time a green signal in this project was wrong, and the second where the flaw was
+that a check silently was not running.
+
+---
+
+### The seed had nothing open to look at
+
+The integration checkpoint is a manual browse, and every session card read **"Registration closed"**.
+Not a bug: the seeded schedules are realistic (10:00–13:00 and 15:00–18:00 IST) and the browse happened
+at 20:00 IST, so `scheduledEnd > now` was correctly false everywhere. But it makes the open state
+impossible to see or demo.
+
+**Did:** the seed now also upserts **one live-now session per hospital** — starts an hour ago, runs four
+hours, fee ₹600, token prefix `B`.
+
+Two details that matter:
+- **Upserted by a fixed id**, so re-seeding *moves* the window instead of accumulating a session per run.
+- **`scheduledStart` has its seconds set to 30.** A generated session always starts on an exact minute
+  because it is built from an `"HH:mm"` clock face, so a 30-second offset can never collide with
+  `unique(originalDoctorId, date, scheduledStart)`. Without it, seeding at exactly 16:00 IST would hit
+  a P2002 against that doctor's own 15:00 session.
+
+---
+
+### Decisions, condensed
+
+| Decision | Rejected alternative |
+|---|---|
+| `QueueSnapshot` declared in full now, half of it null | omitting the ETA fields and adding them in Phase 7 — a breaking change to a shipped app |
+| Two separate ahead-of-you counts | one `waitingCount` |
+| `GET /departments?hospitalId=` | `GET /hospitals/:id/departments` — collides with the Phase-2 admin route |
+| Discovery owns read-only queries across four tables | routing through config/sessions services — reintroduces per-card N+1 |
+| Authenticated, not `@Public()` | anonymous browse — nothing gained, a Phase-9 rate-limit target created |
+| Card headlines the current provider + `isSubstitute` | headlining the booked doctor |
+| `COMPLETED` sessions stay listed | hiding them — an empty screen reads as broken |
+| Fixed +05:30 arithmetic on the client | `Intl` with a `timeZone` — unreliable on Hermes |
+| `limit=50` + "showing N of M" | infinite scroll for lists that hold two hospitals |
+| Live-now session added to the seed | leaving the checkpoint undemonstrable |
+
+### Known gaps carried forward
+
+- **No `date` picker in the mobile UI** — Phase 3 shows the server's IST today only. The API accepts
+  `?date=` and it is tested; no screen sends it.
+- **`registrationOpen` is the session-local half of PRD 8.12.** Phase 5 must AND in the policy limits.
+  Grep `isRegistrationOpen` in `discovery.service.ts` — the comment says so.
+- **No caching**, deliberately (`docs/Phases.md`: an admin edits config in Phase 2 and will not
+  understand why their change does not appear). Redis caching is a Phase-9 job, with invalidation.
+- **Discovery is unthrottled** like every other endpoint; it joins the Phase-9 rate-limit list, and it
+  is the highest-volume read path in the product.
+- **`hospitalCount` on `GET /cities` pages in memory** after grouping every listed hospital. Marked
+  `ponytail:` — the grouped set is one row per *city*, and the total requires the full grouping anyway.
+
+### Verified
+
+- `pnpm exec turbo run lint typecheck test build --force` → **16/16 successful, 0 cached**, 103 tests.
+- 21 new e2e tests against real Postgres, passing first run. They cover: an unverified hospital never
+  appearing (asserted via `hospitalCount`, so a leak changes a number rather than merely adding a row),
+  deactivated departments and doctors, cancelled sessions, a substituted session, the manual-close flag,
+  the explicit-date path, pagination on every list, and the admin-route-collision guard.
+- **Integration checkpoint, live against the running API and the seed:** signed up a patient, then
+  `city → hospital → departments → session cards → session detail → doctor search → doctor's sessions`.
+  Apollo Clinic, Mumbai, 4 sessions today, three departments, cards for Dr. Sharma and Dr. Menon plus
+  the live-now one at ₹600 with `registrationOpen: true`, and the detail response carrying all nineteen
+  fields with the snapshot nulls intact.
+
+---
+
+## 2026-08-30 — Correction: Phase 3's mobile half was ticked without ever being run
+
+**Reversing the entry above.** That entry says the Phase 3 integration checkpoint passed. It did not,
+in the sense `docs/Phases.md` means it. What was actually proven was the **API** path — 21 e2e tests
+against real Postgres, plus a live `curl` walk of city -> hospital -> department -> session cards ->
+detail -> doctor search against the seed. The **mobile app was never rendered**. Not on a device, not in
+a simulator, not once.
+
+`P3-MOB-01..04` were ticked on the strength of typecheck + lint. Their Done-when columns say "browse
+seeded hospitals", "drill into departments", "session-first list renders", "search doctor -> sessions" —
+every one of those requires the app to run. **Un-ticked**, along with the Phase 3 box in the Progress
+Board. `P3-CONTRACT-01` and `P3-BE-01..03` stay ticked; those are genuinely proven.
+
+**This is the same mistake, twice.** Last session the console linked to `/queue`, which 404'd; 92 green
+tests never noticed, and the user found it in a browser within a minute. `apps/mobile` has **no test
+script at all** (`"test": "echo \"no mobile tests yet\" && exit 0"`), so for the mobile app a green
+suite carries almost no information about whether it works. Writing "checkpoint passed" when only the
+server half was exercised is exactly the hindsight-flattering claim the append-only rule exists to stop.
+
+**Did, to get closer without a device:** `expo export --platform android` — the app bundles, 1032
+modules, compiles to Hermes bytecode. That proves every import resolves and every file compiles for the
+target. It proves nothing about layout, navigation, or whether the IST clock formatter shows 10:00
+rather than 04:30.
+
+**Found while writing the test steps:** `apps/mobile/.env` still pointed at `10.190.102.149`, a LAN IP
+from a previous network. The machine is now on `192.168.0.3`, so a physical device would have failed to
+reach the API with a bare "offline" error and no clue why. Updated. This will go stale again every time
+the Wi-Fi changes — the comment in that file already says so, and it is now the first step of the
+walkthrough.
+
+**Decided:** Phase 3 stays open until the device walkthrough passes. The rule the project already has —
+tick a phase only when its integration checkpoint genuinely passes — was applied to Phase 2 and should
+not have been relaxed here.
+
+---
+
+## 2026-08-30 — The only navigation cycle in the app, found by the user on a device
+
+**Reported:** Cardiology -> Dr. Neha Gupta's session -> "See this doctor's other sessions" -> a card ->
+that session -> the same link again... Every round trip pushed **two** more screens, so after a few
+loops getting back to the department list took ten or twelve taps.
+
+**Root cause, not the symptom.** Mapping every `router.push` in `apps/mobile/app` showed the whole
+navigation graph was a DAG except for one edge:
+
+```
+department/[id] -> session/[id]        doctors -> doctor/[id]
+hospital/[id]   -> department/[id]     doctor/[id] -> session/[id]
+discover/[city] -> hospital/[id]       session/[id] -> doctor/[id]   <- the cycle
+```
+
+`session/[id] -> doctor/[id]` closed a loop with `doctor/[id] -> session/[id]`. Nothing bounded it,
+because a stack push is unbounded by design.
+
+**Decided: delete the link rather than bound the cycle.** It was also *redundant*. `Doctor` carries a
+single non-null `departmentId`, and a session's department is copied from its doctor
+(`sessions.service.ts:132,184`), so a doctor's sessions are always a **subset of the department list
+the user arrived from**. The link offered a cycle and no information. Deleting it makes the graph a
+DAG, with a maximum depth of five (discover -> city -> hospital -> department -> session).
+
+**Rejected:**
+- `dangerouslySingular` (expo-router's built-in "one instance of this route in the stack"). It would
+  have bounded the depth at three and kept the link — but it is an opt-in escape hatch whose name is a
+  warning, and it would keep a feature that shows strictly less than the screen behind it.
+- `router.replace` on one edge — traced it: the stack still grows by one per round trip, just slower.
+- `replace` on **both** edges — bounded at two, but it wrecks the primary path: coming from doctor
+  search, back from a session would skip the doctor profile you were reading and land on the search
+  results.
+
+**What this says about the phase.** This is the third UI defect in a row found by a human on a real
+device or browser, after the `/queue` 404 and the seed with nothing open to look at. None of the 103
+tests could have caught any of them, and `apps/mobile` still has no test script at all. The device
+walkthrough is not a formality on this project; it is the only test the client code gets.
+
+**Verified:** lint, typecheck (with the generated route types) and `expo export --platform android`
+all clean — 1032 modules, bundles to Hermes bytecode. `P3-MOB-01..04` stay UNTICKED pending the rest
+of the walkthrough.
+
+---
+
+## 2026-08-30 — Phase 3 device walkthrough passed · P3-MOB-01..04 ticked · phase complete
+
+The walkthrough the correction entry above said was owed has now been run by the user on a real device
+against the seed. Everything passed. `P3-MOB-01..04` and the Phase 3 box in the Progress Board are
+ticked; this time they are ticked because the app was used, not because it compiled.
+
+| Checked | Result |
+|---|---|
+| Browse city -> hospital -> department -> session cards -> detail | works |
+| **IST clock conversion** — cards read 10:00-13:00, not 04:30-07:30 | correct |
+| Doctor search by name and by speciality -> profile -> that doctor's sessions | works |
+| Offline state, empty state, loading state | all three render |
+| Deactivate a department in the console -> it disappears from the patient app, hospital count drops | works |
+| Admin console `Configuration -> Departments` still renders with Active/Inactive pills | works |
+
+The IST check was the highest-risk item: nothing in the 103 automated tests touches the client-side
+formatter, so a phone-timezone bug would have shipped invisibly. It is right.
+
+The last row is the route-collision regression from earlier this phase, confirmed by hand. That console
+page loads by calling `GET /hospitals/{id}/departments?includeInactive=true`; if the new patient route
+`/departments` had shadowed it, the page would have 403'd or rendered patient-shaped rows. It renders
+the admin shape.
+
+The department-deactivation row is the only check that exercises Phase 2 and Phase 3 together, and it
+is the reason discovery has **no caching**: `docs/Phases.md` warns that an admin edits config and then
+cannot understand why it does not appear. Caching stays a Phase 9 job, with explicit invalidation.
+
+### What the walkthrough cost, and what that says
+
+Three defects reached the device, and a human found all three:
+
+1. `apps/mobile/.env` pointed at a stale LAN IP, then at the **Hyper-V virtual adapter** with the port
+   typo'd to `300` — the app simply said "offline" with no clue why.
+2. The `session <-> doctor` navigation cycle, which needed a dozen back-taps to escape.
+3. Before that, the seed had no open session to look at, so every card read "Registration closed".
+
+None was catchable by the test suite, because `apps/mobile` has no test script at all. **On this project
+the device walkthrough is not a formality — it is the only test the client code gets.** That should be
+assumed for every future phase that ships a mobile screen, and budgeted for.
+
+### State at the close of Phase 3
+
+- 103 tests; `pnpm exec turbo run lint typecheck test build --force` -> 16/16, 0 cached.
+- Contract, backend and mobile all done. Read-only throughout: no writes, no new tables, no migration.
+- **Uncommitted.** Nothing has been committed, branched or tagged; the user has not asked.
+
+---
+
+## 2026-08-31 — Mobile UI rebuild: location-first home, bottom tab bar, real design tokens
+
+**Did:** rebuilt the patient app's presentation layer against `docs/Design.md`. The user's verdict on
+the Phase-3 screens was that they looked unfinished. That turned out to be mostly diagnosable rather
+than a matter of taste.
+
+**Nothing server-side moved.** No contract, API, schema, seed or test change: 103 tests and
+`turbo run lint typecheck test build --force` at 16/16, 0 cached, before and after.
+
+### The largest cause was a bug, not styling
+
+`app/(app)/_layout.tsx` was a bare `<Stack />`. The root layout's `screenOptions` — teal tint, surface
+header, canvas background — apply to the **root** stack, whose only children are the route groups.
+**A nested navigator inherits nothing**, so those options reached no screen, and every screen in the
+app had been rendering React Navigation's stock default header since Phase 0. Header styling now lives
+in `(discover)/_layout.tsx` and is shared with the profile stack from one exported object.
+
+### Decisions
+
+| Decision | Why · rejected alternative |
+|---|---|
+| **Location-first home.** City chosen once on `/location`, remembered, home *is* the hospital list for it | `docs/PRD.md` 6.1 already describes "select city/area → browse hospitals"; only the persistence is new. Rejected asking for the city on every visit — that was a whole screen of friction per session |
+| **City in `expo-secure-store`** under `opd.city` | Already a dependency (it holds the tokens). `@react-native-async-storage/async-storage` is the idiomatic home but is **not in the workspace at all** — a genuinely new dep for one short string. Marked `ponytail:` with the swap noted |
+| **The city is a display filter, never an authority** | `docs/Rules.md` 1 is intact: the value is passed as `?city=` and the **server** filters, exactly as for a caller who has never opened the app. Nothing about queue state, prices or permissions moved to the phone |
+| **Search searches doctors AND hospitals** | A box that only filtered hospitals returns nothing for "Sharma" and reads as broken. Both endpoints already take `city` and `q` and were already tested this phase — no API change |
+| **First run shows a prompt, not a redirect** | The root layout's auth Gate already redirects inside an effect. A second effect-driven redirect is how navigation loops start |
+| **Each tab owns its own Stack** | So the tab bar stays visible on detail screens. Without that it would not fix the "press back five times" complaint it exists to solve. Rejected pushing details above the tabs — the tab bar would be hidden exactly where it is most needed |
+| **Feather from `@expo/vector-icons`** | `docs/Design.md` 6 names Lucide; **Lucide is a fork of Feather**, and Feather ships inside `@expo/vector-icons`, which comes with Expo. So the specified set, no new download, no `react-native-svg` |
+| **System fonts, not Inter** | `docs/Design.md` 3 says "Inter, with system fallback". SF/Roboto cost nothing, need no splash gate, and read as more native. Icons and spacing moved the needle far more than the typeface would |
+
+### Route tree
+
+`(discover)` and `profile` are per-tab stacks. Because `(discover)` is a **route group** it does not
+appear in URLs, so every existing `router.push` target survived the move unchanged — confirmed against
+the generated `router.d.ts`. Deleted: the old home and `discover/[city]`. The city route is
+deliberately `/location`, not `/[name]` at group root, which would have been a catch-all swallowing
+`/doctors` and `/profile`.
+
+### Smaller things that were actually wrong
+
+- **Android press feedback.** Every `Pressable` faded opacity; Android expects a ripple. One
+  `pressable()` helper now returns `android_ripple` on Android and opacity on iOS, and everything
+  tappable goes through it. This was the one genuinely new thing the UI research turned up.
+- **`theme.ts` had no shadow tokens** despite `docs/Design.md` 4 defining three levels. Added — with
+  **both** the iOS `shadow*` family and Android's `elevation` on every level, because setting one
+  gives a card raised on one platform and flat on the other.
+- **No safe-area handling** — `react-native-safe-area-context` was installed and unused.
+- **Empty states were grey text**; they are now an icon in a teal-50 circle per `docs/Design.md` 10.
+- **Status pills were colour + label**; they now carry an icon too, which is what §5.3/§2.4 specify.
+
+### Surprises
+
+- **`theme` being `as const` narrowed a default parameter to a literal.** `pressable(radius = theme.radius.md)`
+  inferred `radius: 10`, so passing `radius.lg` was a type error. Annotating `radius: number` fixes it.
+  Worth knowing: every helper that defaults to a token needs an explicit widening annotation.
+- The typed-route generator wired in earlier this phase paid for itself immediately — moving nine
+  screens produced a valid `router.d.ts` on the first try and would have caught any stale `href` as a
+  compile error rather than a runtime 404.
+
+### Verified
+
+`turbo run lint typecheck test build --force` → 16/16, 0 cached, 103 tests.
+`expo export --platform android` → bundles clean, 1056 modules (up from 1032 — the icon package),
+2.81 MB Hermes bytecode.
+
+**Not yet verified: the device walkthrough.** `apps/mobile` has no test script, so nothing above is
+evidence that the app *looks* right or that the tab bar behaves. That check is owed before this is
+committed, and `P3-MOB-01..04` were already ticked on the previous UI — the rebuild replaces what was
+walked through, so it needs walking again.
+
+---
+
+## 2026-08-31 — Avatar was inert; Design.md and Architecture.md brought back in line with what was built
+
+**Reported:** tapping the avatar on the home screen did nothing. It should open Profile — an avatar in
+the top-right corner is a link everywhere else in the world, so a dead one is a defect, not a missing
+feature.
+
+**Fixed:** it now pushes `/profile`. Worth noting the mechanic: `/profile` belongs to the **other
+tab**, and expo-router switches tabs for a route that lives in one rather than pushing it onto the
+current stack. So this crosses tabs and does not deepen the Discover stack — the same discipline that
+killed the session↔doctor cycle.
+
+### The docs had drifted, and one line was actively wrong
+
+`PROGRESS.md` had the UI rebuild, but the two authoritative docs did not. Corrected:
+
+**`docs/Architecture.md`**
+- §6.2 listed **`GET /hospitals/:id/departments`**, which is the route that **cannot exist** — it
+  collides with Phase 2's admin route, and Express matches on shape rather than parameter name, so one
+  silently shadows the other. Replaced with the real `GET /departments?hospitalId=`, plus the
+  rationale and a pointer to the test that guards it. The three doctor endpoints built in Phase 3 were
+  missing entirely; added. Noted that the `QueueSnapshot` in these responses is a frozen shape.
+- §4's module tree still listed `hospitals/ departments/ doctors/ schedules/` as four separate modules,
+  which was never built that way — it has been wrong since Phase 2 and nobody corrected it. Now shows
+  `config/`, `staff/`, `discovery/`, with both deliberate departures written down: why `config` is one
+  module, and why `discovery` is allowed to read tables it does not own.
+
+**`docs/Design.md`** — the rebuild followed this doc, so these are *as-built* annotations rather than
+changes to the system. They exist so a later session does not "fix" a deliberate choice:
+- §3 — mobile ships the **system font** on purpose. The doc already sanctioned the fallback; the note
+  records what Inter would actually cost (a dependency, ~400KB, a splash gate) and that the native
+  faces read as less templated, not more.
+- §5.9 — the shipped tab set is **Discover + Profile**; My Visits waits for Phase 5 because a tab that
+  leads nowhere is worse than an absent one. Also records that each tab owns a stack, and why.
+- §5.10 (new) — the **location-first home** pattern, with the layout, the both-kinds search box, the
+  first-run prompt, and the reminder that the city is a display filter and never an authority.
+- §6 — pins the icon set actually used: **Feather via `@expo/vector-icons`**, which is what "e.g.
+  Lucide" resolves to given Lucide is a fork of Feather and Feather ships with Expo.
+- §12 — two React Native facts that cost time: elevation needs **both** the iOS `shadow*` family and
+  Android's `elevation` on every level, and press feedback must be a ripple on Android.
+
+**Decided:** annotate rather than rewrite. These docs describe intent; where the build justifiably
+diverged, the divergence and its reason belong beside the original line, not in place of it. A future
+session reading §3 should see both "Inter" and why mobile does not use it.
+
+---
+
 # 📌 HANDOFF (Phases 0–1) — SUPERSEDED
 
 > **Superseded by 📌 HANDOFF v2 at the bottom of this file.** Kept, not deleted: its
@@ -1495,7 +2005,7 @@ Wave 2 until it is locked.
 
 ---
 
-# 📌 HANDOFF v2 — read this first in a new session
+# 📌 HANDOFF v2 (Phase 2) — SUPERSEDED
 
 *Written at the end of the session that reviewed Phase 2's frozen contract, built all of Phase 2
 Wave 2, and added the accept-invite flow. Supersedes the Phases 0–1 handoff above, which is kept
@@ -1707,3 +2217,158 @@ Paste this to pick the work back up:
 
 *(If Phase 3 — Discovery is wanted instead, it is lower risk and read-only, and the seed already
 gives it something to show. Phases.md says 3 and 4 can run in parallel.)*
+
+---
+
+# 📌 HANDOFF v3 — read this first in a new session
+
+*Supersedes HANDOFF v2. The two handoffs above are history; this one is the brief.*
+
+## 1. Where the project actually stands
+
+| Phase | State |
+|---|---|
+| 0 — Foundation | ✅ done, merged, tagged `phase-0-done` |
+| 1 — Identity & Tenancy | ✅ done, merged, tagged `phase-1-done` |
+| 2 — Hospital Config + Admin + Seed | ✅ done, merged, tagged `phase-2-done` |
+| 3 — Discovery | ✅ **complete** — device walkthrough passed; **not committed** |
+| 4 — Queue Engine | ☐ next, and the highest-risk phase in the project |
+
+`main` was clean and green before Phase 3 started. **Phase 3 is uncommitted** — do not commit, branch
+or tag unless the user asks. Its integration checkpoint passed on a real device on 2026-08-30 — all
+eight P3 subtasks and the Phase 3 board box are ticked.
+
+**Budget for a device walkthrough in every phase that ships a mobile screen.** `apps/mobile` has no
+test script, so lint + typecheck + bundle is the entire automated evidence for seven screens. Three
+defects reached the device in Phase 3 and a human found all three.
+
+- **103 tests.** `pnpm exec turbo run lint typecheck test build --force` → 16/16, 0 cached.
+- The patient app now browses city → hospital → department → session card → detail, plus doctor search.
+  Nothing in it writes.
+- Everything a patient sees is decided by the server, including whether the Join button says "Join" or
+  "Closed". Join itself is inert until Phase 5, and says so on screen.
+
+## 2. To look at it yourself
+
+```bash
+docker compose up -d
+pnpm --filter @opd/api seed        # the test suite TRUNCATEs the dev database - re-seed after any test run
+pnpm --filter @opd/api start       # API on :3000
+pnpm --filter @opd/mobile dev      # Expo; set EXPO_PUBLIC_API_URL to your LAN IP for a physical device
+```
+
+Sign up any new account in the app (a patient needs no staff membership) → **Browse hospitals**.
+Seeded logins for the admin console are `admin@apollo.test` / `Demo@12345`.
+
+The seed guarantees at least one card reading **Open** — it upserts a live-now session per hospital
+precisely so the open state is visible whatever time you look. The other cards are the realistic
+10:00–13:00 and 15:00–18:00 IST clinics and will read "Registration closed" outside those hours. That
+is correct behaviour, not a bug.
+
+## 3. Traps — the ones that have actually cost time
+
+Carried forward and still true:
+
+1. **A green Turbo result can be a lie.** Verify with `--force`. **Five wrong greens so far.**
+2. **esbuild does not implement `emitDecoratorMetadata`** — `unplugin-swc` in `apps/api/vitest.config.ts`
+   is load-bearing. Do not remove it; do not move the API off the Nest CLI.
+3. **Turbo runs tasks in a filtered environment** — a new env var must go in `globalPassThroughEnv`.
+4. **pnpm's isolated layout hides transitive deps** — declare them explicitly.
+5. **Expo SDK is pinned to 54 deliberately** — it is what the test device's Expo Go supports.
+6. **A `'use server'` file may export only async functions.** `tsc --noEmit` passes; `next build` fails.
+7. **`prisma migrate reset` and `migrate dev` are both unusable here** (permission classifier / no TTY).
+   Hand-write `migration.sql`, `migrate deploy`, then prove it with
+   `prisma migrate diff --from-migrations ./prisma/migrations --to-schema-datamodel ./prisma/schema.prisma --shadow-database-url postgresql://opd:opd_local_dev@localhost:5433/opd_shadow?schema=public --exit-code`
+   → must say "No difference detected".
+8. **Stopping a dev server does not stop it.** Kill by port:
+   `netstat -ano | grep ":3000 .*LISTENING"` → `taskkill //PID <pid> //F`.
+9. **Never run manual `psql` checks while the integration suite runs** — TRUNCATE vs fixtures deadlocks.
+10. **React SSR splits `Every {day}` into `Every<!-- -->Sunday`** — grep for `>Sunday<`.
+11. **The e2e suite TRUNCATEs the dev database.** Re-seed before any manual browse.
+
+Added this session:
+
+12. **Express matches routes by SHAPE, not by parameter name.** `GET /hospitals/:id/departments` and
+    `GET /hospitals/:hospitalId/departments` are the same route; one silently shadows the other, and the
+    matched route's parameter name is what decides whether `TenantGuard` engages. Discovery routes
+    therefore use `:id` and never `:hospitalId`. `discovery.e2e.test.ts` guards both halves of this.
+13. **Prisma `groupBy` infers row shape from the `by` literal.** A computed key kills the typing and the
+    cast surfaces as a confusing error about the *argument*. Branch on the key instead of casting.
+14. **expo-router typed routes were never checked in CI** — `.expo/` is gitignored and only `expo start`
+    writes `router.d.ts`, so `Href` silently degrades to `string`. Now generated by
+    `apps/mobile/scripts/generate-router-types.cjs` inside the `typecheck` script. If mobile typecheck
+    starts failing on route strings after an SDK upgrade, that script is where to look.
+15. **The seed's `unique(originalDoctorId, date, scheduledStart)` is easy to trip.** Generated sessions
+    always start on an exact minute; the seed's live-now session sets seconds to 30 to stay clear of it.
+
+## 4. Decisions that constrain future work
+
+Phases 0–2 decisions still hold (read HANDOFF v2 §4). Added by Phase 3:
+
+- **The discovery response shape is frozen.** `QueueSnapshot`'s six fields are named and typed now;
+  Phase 4 fills the counts and `nowServingToken`, Phase 7 fills the ETA window. **Changing the shape
+  breaks a shipped mobile app** — adding a field is fine, renaming or removing one is not.
+- **`snapshots()` in `discovery.service.ts` is the ONE place per-card queue numbers are produced.**
+  Phase 4 replaces its body with a single `groupBy` over `QueueEntry.status` keyed by sessionId; Phase 7
+  adds the ETA call. No call site should need to change. Per-card queries are the named risk here.
+- **`registrationOpen` is currently the session-local half of PRD 8.12.** Phase 5 must AND in
+  `cutoffOnEtaOverrun`, `cutoffMinsBeforeEnd` and `maxOnlineTokens`. It can only get stricter.
+- **`discovery` is a read-only projection module and deliberately reads tables `config` and `sessions`
+  own** — an explicit, recorded exception to `docs/CLAUDE.md` 3. It writes nothing and exports no
+  service. Do not extend the exception to anything that writes.
+- **Public visibility rules live in exactly two constants** — `LISTABLE_HOSPITAL` and
+  `listableSession()` at the top of `discovery.service.ts`. A new patient-facing read must use them.
+- **`GET /departments?hospitalId=`**, not `/hospitals/:id/departments` (see trap 12).
+- **The card shows the current provider, not the booked doctor**, and `/doctors/:id/sessions` matches
+  the provider. Phase 4's substitution command inherits that meaning.
+
+## 5. Known gaps carried forward
+
+- **No client has a Google sign-in button.** The endpoint is verified against a real token; nothing
+  calls it. Needs iOS + Android client ids and `expo-auth-session`.
+- **No date picker in mobile discovery** — the API accepts `?date=` and it is tested; no screen sends it.
+- **No caching on discovery**, deliberately — Phase 9, with explicit invalidation.
+- **`/auth/accept-invite` and all of discovery are unthrottled** — Phase 9 rate-limit list, alongside
+  signup, login and the Razorpay webhook.
+- **No way to revoke an outstanding invitation** short of re-inviting to burn the old token.
+- **`GET /patients` is unbounded** — the one documented exception. Everything since paginates.
+- **Expired `RefreshToken` rows are never pruned** — Phase 8 workers.
+- **Two `/me` calls per config page render** — harmless for an admin console; keep it off hot paths.
+- **The folder is still `C:\Projects\New folder`.** Renaming is safe for the code, but Claude Code keys
+  per-project memory to the folder path — copy the memory directory to the new key first.
+
+## 6. Prompt for the next session
+
+> Continue building the OPD Queue Platform. Read `docs/PROGRESS.md` — start at **📌 HANDOFF v3** at the
+> bottom, which is the current brief; the two handoffs above it are superseded.
+>
+> Phases 0, 1 and 2 are complete, merged and tagged. **Phase 3 (Discovery) is built, tested and its
+> integration checkpoint passed, but is not committed** — 103 tests, `turbo run lint typecheck test
+> build --force` green at 16/16, 0 cached. Do not commit, branch or tag unless I ask.
+>
+> Next is **Phase 4 — Queue Engine**. Read `docs/Phases.md` Phase 4 in full before touching anything.
+> It is the highest-risk phase in the project and Phases.md says explicitly to slow down: Wave 1 is the
+> contract + schema, Wave 2 is the pure table-driven state machine plus the `SELECT … FOR UPDATE`
+> transaction skeleton, and Wave 3 is command-per-file. **Do not parallelise Wave 3 unless every command
+> really is its own file.** Show me the Wave 1 diff before starting Wave 2, the way Phase 2's frozen
+> contract and Phase 3's response shape were both reviewed.
+>
+> Two things Phase 3 left for you, both marked in the code:
+> - `snapshots()` in `apps/api/src/modules/discovery/discovery.service.ts` is the single place per-card
+>   queue numbers are produced. Fill it with ONE `groupBy` over `QueueEntry.status` keyed by sessionId —
+>   never a query per card.
+> - `QueueSnapshot` in `packages/contracts/src/discovery/dto.ts` is a frozen response shape the mobile
+>   app already renders. Fill `nowServingToken`, `checkedInCount` and `bookedNotArrivedCount`; do not
+>   rename or remove anything.
+>
+> Standing rules:
+> - Verify with `pnpm exec turbo run lint typecheck test build --force`. A cached green has lied five times.
+> - Every list endpoint paginates. `GET /patients` is the one documented exception, not a precedent.
+> - Append to `docs/PROGRESS.md` as you go — what you did, what you decided, **why**, and what you
+>   rejected. Failures and dead ends are the most valuable entries. Tick the ☐ in `docs/Phases.md`.
+>
+> Run `pnpm --filter @opd/api seed` before any manual browser or app check — the test suite truncates the
+> dev database. Docker may need `docker compose up -d`.
+
+*(Phase 3 and Phase 4 were designed to run in parallel; Phase 3 is now done, so Phase 4 has no
+competition for attention. Phases 5–7 all depend on it.)*

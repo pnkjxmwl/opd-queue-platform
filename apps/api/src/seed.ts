@@ -169,11 +169,47 @@ async function main(): Promise<void> {
     skipDuplicates: true,
   });
 
+  // One clinic per hospital that is RUNNING RIGHT NOW.
+  //
+  // The recurring schedules above are realistic (10:00-13:00, 15:00-18:00 IST) and
+  // therefore closed most of the time someone sits down to look at the app. Without
+  // this, every session card in discovery reads "Registration closed" - correct, but
+  // it makes the open state impossible to see or demo.
+  //
+  // Upserted by a fixed id so re-seeding MOVES the window instead of accumulating a
+  // new session every run. The 30-second offset is what keeps it from ever colliding
+  // with unique(originalDoctorId, date, scheduledStart): a generated session always
+  // starts on an exact minute, because it is built from an "HH:mm" clock face.
+  const liveStart = new Date(Date.now() - 60 * 60 * 1000);
+  liveStart.setSeconds(30, 0);
+  const liveEnd = new Date(liveStart.getTime() + 4 * 60 * 60 * 1000);
+
+  for (const [index, hospital] of HOSPITALS.entries()) {
+    const doctor = DOCTORS.find((d) => departmentHospital.get(d.departmentId) === hospital.id)!;
+    const columns = {
+      hospitalId: hospital.id,
+      departmentId: doctor.departmentId,
+      originalDoctorId: doctor.id,
+      currentProviderDoctorId: doctor.id,
+      date: dateColumnFromString(date),
+      scheduledStart: liveStart,
+      scheduledEnd: liveEnd,
+      feePaise: 60_000,
+      tokenPrefix: 'B',
+    };
+    await prisma.oPDSession.upsert({
+      where: { id: `ffffffff-0000-4000-8000-${String(index).padStart(12, '0')}` },
+      update: { scheduledStart: liveStart, scheduledEnd: liveEnd, date: columns.date },
+      create: { id: `ffffffff-0000-4000-8000-${String(index).padStart(12, '0')}`, ...columns },
+    });
+  }
+
   console.log(
     [
       `seeded ${HOSPITALS.length} hospitals, ${DEPARTMENTS.length} departments, ` +
         `${DOCTORS.length} doctors, ${SCHEDULES.length} schedules`,
       `sessions for ${date} (IST): ${count} created, ${todays.length - count} already present`,
+      `plus ${HOSPITALS.length} live-now session(s) so discovery has an OPEN card to show`,
       `logins: ${STAFF.map((s) => s.email).join(', ')} / ${DEMO_PASSWORD}`,
     ].join('\n'),
   );
