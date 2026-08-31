@@ -74,3 +74,66 @@ export class EmailAlreadyRegisteredError extends AppError {
     super('EMAIL_ALREADY_REGISTERED', 409, 'An account with this email already exists');
   }
 }
+
+// ---------------------------------------------------------------------------
+// Queue engine (Phase 4)
+// ---------------------------------------------------------------------------
+
+/**
+ * A command the state machine does not allow from the current state.
+ *
+ * 409, not 400: the request was well-formed and the caller was permitted - the
+ * world simply moved. A doctor console that shows a stale patient gets this, and
+ * the states in `details` are what let it explain itself instead of just failing.
+ */
+export class InvalidQueueTransitionError extends AppError {
+  constructor(command: string, from: string) {
+    super('INVALID_QUEUE_TRANSITION', 409, `Cannot ${command} from ${from}`, { command, from });
+  }
+}
+
+/** call-next with nobody checked in. docs/PRD.md 8.2 - the doctor never idles for someone still at home. */
+export class NoEligiblePatientError extends AppError {
+  constructor() {
+    super('NO_ELIGIBLE_PATIENT', 409, 'Nobody in this queue has checked in yet');
+  }
+}
+
+/** A call-next while the queue is paused. Distinct from the above so the console can say "resume first". */
+export class QueuePausedError extends AppError {
+  constructor() {
+    super('QUEUE_PAUSED', 409, 'The queue is paused - resume it before calling the next patient');
+  }
+}
+
+/** The hospital's QueuePolicy switches this action off (walk-ins, priority). */
+export class PolicyForbidsError extends AppError {
+  constructor(what: string) {
+    super('POLICY_FORBIDS', 409, `This hospital's queue policy does not allow ${what}`, { what });
+  }
+}
+
+/** An action that requires the patient to be physically present. */
+export class NotCheckedInError extends AppError {
+  constructor() {
+    super('NOT_CHECKED_IN', 409, 'That patient has not checked in');
+  }
+}
+
+/**
+ * call-next while the doctor's presence is LEFT.
+ *
+ * docs/PRD.md 8.11 says a doctor leaving early ends the session and reschedules the
+ * rest. Staff who mark LEFT but forget to end the session would otherwise keep
+ * calling patients into an empty room, so the command is refused and says which of
+ * the two things to do instead.
+ */
+export class DoctorHasLeftError extends AppError {
+  constructor() {
+    super(
+      'DOCTOR_HAS_LEFT',
+      409,
+      'The doctor is marked as having left - end the session, or set them present again',
+    );
+  }
+}

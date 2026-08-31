@@ -10,13 +10,27 @@ import { useAuth } from './auth';
  * fetch and one cache entry - including the query string, which is what varies.
  *
  * docs/Rules.md 9: server state lives in TanStack Query, never in component state.
+ *
+ * `refetchMs` polls while the screen is mounted. Opt-in per screen, and only worth
+ * it where the answer actually changes on its own - a live queue does, a hospital's
+ * address does not. Polling every list would multiply load on a read path that has
+ * no caching yet (deliberate; docs/Phases.md Phase 9).
+ *
+ * This is NOT a substitute for Phase 7's realtime, and Phase 7 does not have to undo
+ * it: docs/Rules.md 8 already requires clients to reconcile against a REST snapshot
+ * rather than replay events, so this is that path, running on a timer until there is
+ * a socket to trigger it instead.
  */
-export function useApi<T>(path: string, enabled = true) {
+export function useApi<T>(path: string, enabled = true, refetchMs?: number) {
   const { authedFetch } = useAuth();
 
   return useQuery({
     queryKey: [path],
     enabled,
+    refetchInterval: refetchMs,
+    // Default is false, but state it: a phone in someone's pocket must not poll a
+    // hospital API every few seconds for a screen nobody is looking at.
+    refetchIntervalInBackground: false,
     queryFn: async (): Promise<T> => {
       let res: Response;
       try {

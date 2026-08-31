@@ -1,5 +1,5 @@
 import { Stack, useLocalSearchParams } from 'expo-router';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 import type { SessionDetail } from '@opd/contracts';
 import { useApi } from '../../../../lib/api';
 import { Icon } from '../../../../lib/icon';
@@ -25,16 +25,42 @@ import { theme } from '../../../../theme';
  * always a SUBSET of the department list the user came from. It offered a cycle and
  * no information. The navigation graph is now a DAG.
  */
+/**
+ * How often the live queue re-reads itself while this screen is open.
+ *
+ * This is the ONE screen that polls. A session's queue moves on its own - the
+ * numbers on it are stale the moment they are drawn - while a hospital's address is
+ * not, so nothing else pays for a timer.
+ *
+ * Ten seconds is a guess at the boundary between "feels live" and "hammers an
+ * uncached read path". Phase 7 replaces the timer with a socket push and keeps the
+ * fetch, because docs/Rules.md 8 makes the REST snapshot the thing a client
+ * reconciles against either way.
+ */
+const LIVE_QUEUE_POLL_MS = 10_000;
+
 export default function Session() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const session = useApi<SessionDetail>(`/sessions/${id}`);
+  const session = useApi<SessionDetail>(`/sessions/${id}`, true, LIVE_QUEUE_POLL_MS);
   const data = session.data;
 
   return (
     <View style={styles.screen}>
       <Stack.Screen options={{ title: data?.doctorName ?? 'Session' }} />
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        // The timer covers the ordinary case; this is for the patient who wants to
+        // know NOW, and it is the gesture they will try first regardless.
+        refreshControl={
+          <RefreshControl
+            refreshing={session.isFetching && !session.isPending}
+            onRefresh={() => void session.refetch()}
+            tintColor={theme.color.primary}
+            colors={[theme.color.primary]}
+          />
+        }
+      >
         <QueryState
           pending={session.isPending}
           error={session.error}
