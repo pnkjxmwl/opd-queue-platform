@@ -137,3 +137,34 @@ export class DoctorHasLeftError extends AppError {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Join + payment (Phase 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * The session will not accept a join right now (docs/PRD.md 8.12).
+ *
+ * 409, and `details.reason` names WHICH of the four limits bit - manual close, past
+ * the cutoff, the online-token cap, or the session simply being over. The patient's
+ * next action is to pick another session, so an opaque "not allowed" would leave
+ * them tapping the same button.
+ */
+export class RegistrationClosedError extends AppError {
+  constructor(reason: string) {
+    super('REGISTRATION_CLOSED', 409, 'This session is no longer accepting bookings', { reason });
+  }
+}
+
+/**
+ * This patient already holds a PAID place in this session.
+ *
+ * Only ever thrown for a confirmed entry. An unpaid reservation that is still live
+ * is not an error at all - join returns it, so a client that lost its checkout
+ * resumes rather than paying twice.
+ */
+export class AlreadyInQueueError extends AppError {
+  constructor(entryId: string) {
+    super('ALREADY_IN_QUEUE', 409, 'This patient is already booked into this session', { entryId });
+  }
+}

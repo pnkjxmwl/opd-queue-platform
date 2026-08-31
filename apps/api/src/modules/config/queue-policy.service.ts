@@ -27,6 +27,16 @@ type PolicyRow = {
   updatedAt: Date;
 };
 
+/**
+ * The defaults as a complete QueuePolicy, for a hospital that has never configured
+ * one. `updatedAt` is the epoch because nothing has ever been written.
+ */
+const DEFAULTS: QueuePolicy = {
+  ...DEFAULT_QUEUE_POLICY,
+  cancellationRules: CancellationRules.parse(DEFAULT_QUEUE_POLICY.cancellationRules ?? {}),
+  updatedAt: new Date(0).toISOString(),
+};
+
 const toDto = (row: PolicyRow): QueuePolicy => ({
   orderingStrategy: row.orderingStrategy as OrderingStrategy,
   checkInRequired: row.checkInRequired,
@@ -89,6 +99,22 @@ export class QueuePolicyService {
    * for a hospital, this is a single indexed select rather than an upsert on every
    * queue command for the life of the deployment.
    */
+  /**
+   * The policy as it stands, WITHOUT creating one.
+   *
+   * `ensure` inserts on first use, which is right for a command that is about to act
+   * on the policy - and wrong for a read. `discovery` is a patient-facing projection
+   * documented as writing nothing, so calling `ensure` there meant a stranger
+   * browsing a hospital could insert a row into it.
+   *
+   * An absent row means the defaults, which is exactly what `ensure` would have
+   * written, so the ANSWER is identical either way - only the side effect differs.
+   */
+  async read(hospitalId: string): Promise<QueuePolicy> {
+    const existing = await this.prisma.queuePolicy.findUnique({ where: { hospitalId } });
+    return existing === null ? DEFAULTS : toDto(existing as PolicyRow);
+  }
+
   async ensure(hospitalId: string): Promise<QueuePolicy> {
     const existing = await this.prisma.queuePolicy.findUnique({ where: { hospitalId } });
     if (existing !== null) {

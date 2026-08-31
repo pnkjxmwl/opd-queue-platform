@@ -85,11 +85,20 @@ export type ActorType = z.infer<typeof ActorType>;
  * the same event whether a human or the grace-expiry job caused it, and `actorType`
  * is what tells them apart.
  *
- * Phase 5 adds the join/payment events (`ENTRY_RESERVED`, `ENTRY_CONFIRMED`,
- * `ENTRY_CANCELLED`) as an additive `ALTER TYPE ... ADD VALUE`, which is cheap.
- * These are the ones Phase 4 emits.
+ * Phase 5 added the join/payment events (`ENTRY_RESERVED`, `ENTRY_CONFIRMED`,
+ * `ENTRY_CANCELLED`) as an additive `ALTER TYPE ... ADD VALUE`, which was cheap
+ * exactly as predicted.
+ *
+ * **There is no `ENTRY_RESERVATION_EXPIRED`, on purpose.** An expired hold IS a
+ * cancellation - the same thing happening to the same entry - and `actorType` is
+ * what says whether a person or the sweeper caused it, precisely as it already does
+ * for a skip. A second value would mean every reader had to learn that two events
+ * mean one thing.
  */
 export const QueueEventType = z.enum([
+  'ENTRY_RESERVED',
+  'ENTRY_CONFIRMED',
+  'ENTRY_CANCELLED',
   'ENTRY_CHECKED_IN',
   'ENTRY_CALLED',
   'ENTRY_RECALLED',

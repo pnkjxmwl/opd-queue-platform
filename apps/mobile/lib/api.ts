@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import type { ApiError } from '@opd/contracts';
 import { useAuth } from './auth';
 
@@ -49,6 +49,41 @@ export function useApi<T>(path: string, enabled = true, refetchMs?: number) {
       }
 
       return res.json() as Promise<T>;
+    },
+  });
+}
+
+/**
+ * A write. Returns a TanStack mutation, so a screen gets `isPending` and `error`
+ * without inventing its own loading state (docs/Rules.md 9).
+ *
+ * Errors carry the server's message, which is written to be shown to a patient and
+ * contains no internals. A rejected command must be SURFACED, never swallowed - the
+ * server is the only thing that decides whether a join or a cancel is allowed, and
+ * a screen that silently ignores its answer is the failure docs/CLAUDE.md 9 names.
+ */
+export function useApiPost<TBody, TResult>(path: string) {
+  const { authedFetch } = useAuth();
+
+  return useMutation<TResult, Error, TBody>({
+    mutationFn: async (body: TBody): Promise<TResult> => {
+      let res: Response;
+      try {
+        res = await authedFetch(path, { method: 'POST', body: JSON.stringify(body ?? {}) });
+      } catch {
+        throw new Error('You appear to be offline. Check your connection and try again.');
+      }
+
+      if (!res.ok) {
+        const parsed = (await res.json().catch(() => null)) as ApiError | null;
+        const error = new Error(parsed?.error.message ?? 'Something went wrong. Please try again.');
+        // The CODE is what a screen should branch on, never the message
+        // (docs/Rules.md 7). Attached rather than parsed again at each call site.
+        (error as Error & { code?: string }).code = parsed?.error.code;
+        throw error;
+      }
+
+      return res.json() as Promise<TResult>;
     },
   });
 }

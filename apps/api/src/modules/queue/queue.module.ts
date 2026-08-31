@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { QueueController } from './queue.controller';
 import { QueueService } from './queue.service';
+import { ReservationSweeper } from './reservation-sweeper';
 import { ConfigModule } from '../config/config.module';
 
 /**
@@ -15,7 +16,7 @@ import { ConfigModule } from '../config/config.module';
 @Module({
   imports: [ConfigModule],
   controllers: [QueueController],
-  providers: [QueueService],
-  exports: [QueueService],
+  providers: [QueueService, ReservationSweeper],
+  exports: [QueueService, ReservationSweeper],
 })
 export class QueueModule {}

@@ -3,6 +3,7 @@ import { FlatList, StyleSheet, Text, View } from 'react-native';
 import type { Paginated, SessionCard } from '@opd/contracts';
 import { useApi } from '../../../../lib/api';
 import { MoreNote, PAGE, QueryState, SessionCardView } from '../../../../lib/discovery';
+import { bookingStateFor, useMyActiveEntries } from '../../../../lib/visits';
 import { theme } from '../../../../theme';
 
 /**
@@ -16,6 +17,8 @@ import { theme } from '../../../../theme';
 export default function DepartmentSessions() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  // What this account already holds, for every card on the page at once.
+  const myBookings = useMyActiveEntries();
 
   const sessions = useApi<Paginated<SessionCard>>(`/departments/${id}/sessions?limit=${PAGE}`);
   const first = sessions.data?.items[0];
@@ -40,6 +43,10 @@ export default function DepartmentSessions() {
           <SessionCardView
             card={item}
             onPress={() => router.push({ pathname: '/session/[id]', params: { id: item.id } })}
+            onJoin={() => router.push(`/join?sessionId=${item.id}`)}
+            onOpenToken={(entryId) => router.push(`/visit/${entryId}`)}
+            // One request for the whole list, sliced per card - never one per card.
+            booking={bookingStateFor(myBookings.bySession.get(item.id))}
           />
         )}
         ItemSeparatorComponent={Gap}

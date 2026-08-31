@@ -227,9 +227,11 @@ Big **Scan QR** button (opens camera) as the primary action; a manual "Search to
 
 ### 5.9 Navigation
 - **Mobile:** bottom tab bar (Home/Discover · My Visits · Profile), active tint teal.
-  - **As built (Phase 3):** two tabs — **Discover** (`compass`) and **Profile** (`user`). **My Visits
-    arrives with Phase 5**, when there are tokens to list; a tab that leads nowhere is worse than an
-    absent one. Each tab owns its own stack so the bar stays visible on detail screens — without that
+  - **As built (Phase 5):** three tabs — **Discover** (`compass`), **My Visits** (`clipboard`) and
+    **Profile** (`user`). My Visits was deliberately absent until Phase 5, when there were finally
+    tokens to list; a tab that leads nowhere is worse than an absent one. Its token screen is
+    `visit/[id]` rather than a bare `[id]`, which would have been a root-level catch-all shadowing
+    `/location` and `/doctors`. Each tab owns its own stack so the bar stays visible on detail screens — without that
     a patient four levels deep has no way back to the top but repeated back-taps.
   - Discover **is** home. There is no separate home screen: it opens on the hospitals in the
     remembered city (see §5.10).

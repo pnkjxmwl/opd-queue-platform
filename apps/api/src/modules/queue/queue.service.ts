@@ -60,6 +60,12 @@ export interface LockedSession {
   status: SessionStatus;
   doctorPresence: DoctorPresence;
   tokenPrefix: string;
+  /**
+   * Read under the lock so the amount a join charges cannot change between the
+   * decision and the Razorpay order. The fee NEVER comes from a request
+   * (docs/Rules.md 9) and this row is the only place it is read from.
+   */
+  feePaise: number;
   scheduledStart: Date;
   scheduledEnd: Date;
   registrationClosedAt: Date | null;
@@ -260,6 +266,7 @@ async function lockSession(
            status::text            AS status,
            "doctorPresence"::text  AS "doctorPresence",
            "tokenPrefix",
+           "feePaise",
            "scheduledStart",
            "scheduledEnd",
            "registrationClosedAt",
