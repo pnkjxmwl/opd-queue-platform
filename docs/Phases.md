@@ -28,7 +28,7 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 | ☑ | 2 — Hospital Config + Admin + Seed | L | 5–7 | 4 | `phase-2-done` |
 | ☑ | 3 — Discovery | M | 3–4 | 4 | `phase-3-done` |
 | ☑ | 4 — Queue Engine | XL | 8–12 | 4 (with care) | `phase-4-done` |
-| ☐ | 5 — Join + Payment → Token | L | 5–7 | 3 | `phase-5-done` |
+| ☑ | 5 — Join + Payment → Token | L | 5–7 | 3 | `phase-5-done` |
 | ☐ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
 | ☐ | 7 — Realtime + ETA | L | 5–7 | 4 | `phase-7-done` |
 | ☐ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
