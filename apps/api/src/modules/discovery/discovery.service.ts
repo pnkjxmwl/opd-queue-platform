@@ -18,6 +18,9 @@ import type {
   SessionDetail,
 } from '@opd/contracts';
 import { PrismaService } from '../../prisma/prisma.service';
+import { registrationGate } from '../../common/registration';
+import { HOLDS_A_SLOT } from '../queue/state-machine';
+import { QueuePolicyService } from '../config/queue-policy.service';
 import { NotFoundError } from '../../common/errors';
 import { dateColumnFromString, dateColumnToString, istToday } from '../../common/ist';
 
@@ -69,23 +72,20 @@ type SessionRow = Prisma.OPDSessionGetPayload<{ include: typeof SESSION_INCLUDE 
 /**
  * Whether the server would accept a join right now (docs/PRD.md 8.12).
  *
- * Phase 3 knows only the session-local half of the rule. The three policy limits -
- * ETA overrun, cutoffMinsBeforeEnd and maxOnlineTokens - are ANDed in by Phase 5,
- * because all three need queue data that does not exist until Phase 4.
+ * **Phase 5 moved this rule out of this file.** It lives in
+ * `common/registration.ts` now and is shared with the JOIN command, because the
+ * button and the write have to agree: a card saying Open over a session the server
+ * then refuses is worse than a card saying Closed. That function is pure, so all
+ * this module adds is the data it needs - the hospital's policy, and how many online
+ * tokens are already held.
  *
- * **ACTIVE was added by Phase 4, and it made this rule more permissive - which the
- * Phase-3 note here said would never happen.** That note was written when nothing
- * could move a session out of OPEN_FOR_REGISTRATION, so the ACTIVE case had never
- * been exercised. It can now: the first call-next activates the session
- * (docs/PROGRESS.md, Phase 4 Wave 1). A running clinic must still accept joins -
- * docs/PRD.md 8.12 closes registration on ETA overrun, the token cap, the cutoff or
- * a manual close, and never because the doctor started seeing people. Leaving this
- * alone would have closed every clinic the moment it opened its doors.
+ * Still advisory (docs/Rules.md 1): the answer can change between this read and the
+ * join, which is exactly why the join re-runs it under the session lock.
+ *
+ * One historical note kept because it is a trap: ACTIVE belongs in the open set. The
+ * first `call-next` activates a session, so leaving it out would close every clinic
+ * the moment it opened its doors.
  */
-const isRegistrationOpen = (row: SessionRow, now: Date): boolean =>
-  (row.status === 'OPEN_FOR_REGISTRATION' || row.status === 'ACTIVE') &&
-  row.registrationClosedAt === null &&
-  row.scheduledEnd > now;
 
 /**
  * The patient-facing read model: cities, hospitals, departments, doctors and the
@@ -105,7 +105,10 @@ const isRegistrationOpen = (row: SessionRow, now: Date): boolean =>
  */
 @Injectable()
 export class DiscoveryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly policies: QueuePolicyService,
+  ) {}
 
   // -------------------------------------------------------------------------
   // Cities
@@ -310,10 +313,11 @@ export class DiscoveryService {
     });
     if (!row) throw new NotFoundError('Session not found');
 
-    const snapshots = await this.snapshots([row.id]);
+    const now = new Date();
+    const snapshots = await this.snapshots([row], now);
 
     return {
-      ...toCardDto(row, snapshots.get(row.id)!, new Date()),
+      ...toCardDto(row, snapshots.get(row.id)!),
       hospitalArea: row.hospital.area,
       hospitalAddress: row.hospital.address,
       doctorDefaultConsultMins: row.currentProvider.defaultConsultMins,
@@ -341,10 +345,10 @@ export class DiscoveryService {
     ]);
 
     const now = new Date();
-    const snapshots = await this.snapshots(rows.map((row) => row.id));
+    const snapshots = await this.snapshots(rows, now);
 
     return {
-      items: rows.map((row) => toCardDto(row, snapshots.get(row.id)!, now)),
+      items: rows.map((row) => toCardDto(row, snapshots.get(row.id)!)),
       total,
       limit: query.limit,
       offset: query.offset,
@@ -408,12 +412,13 @@ export class DiscoveryService {
    *
    * Phase 7 fills `joinNowEtaFrom`/`To` from the ETA engine; no call site changes.
    */
-  private async snapshots(sessionIds: string[]): Promise<Map<string, QueueSnapshot>> {
+  private async snapshots(rows: SessionRow[], now: Date): Promise<Map<string, QueueSnapshot>> {
+    const sessionIds = rows.map((row) => row.id);
     const empty = (): QueueSnapshot => ({
       nowServingToken: null,
       checkedInCount: 0,
       bookedNotArrivedCount: 0,
-      // Overwritten per row by toCardDto - the session-local half of PRD 8.12.
+      // Filled below, by the same gate the JOIN command uses (docs/PRD.md 8.12).
       registrationOpen: false,
       joinNowEtaFrom: null,
       joinNowEtaTo: null,
@@ -435,7 +440,7 @@ export class DiscoveryService {
     // stale by the time it reaches a phone; paying an interactive transaction on the
     // hottest read path in the product to align two numbers nobody can perceive
     // would be the wrong trade.
-    const [counts, serving] = await Promise.all([
+    const [counts, serving, held] = await Promise.all([
       this.prisma.queueEntry.groupBy({
         by: ['sessionId', 'status'],
         where: { sessionId: { in: sessionIds }, status: { in: [...COUNTED_STATUSES] } },
@@ -447,6 +452,20 @@ export class DiscoveryService {
       this.prisma.queueEntry.findMany({
         where: { sessionId: { in: sessionIds }, status: { in: ['CALLED', 'IN_CONSULTATION'] } },
         select: { sessionId: true, tokenLabel: true },
+      }),
+      // Online bookings holding a slot, for maxOnlineTokens. Grouped across the
+      // whole page, never one query per card. A lapsed unpaid hold is excluded
+      // whether or not the sweeper has reached it - the column frees the slot.
+      this.prisma.queueEntry.groupBy({
+        by: ['sessionId'],
+        where: {
+          sessionId: { in: sessionIds },
+          type: 'ONLINE',
+          status: { in: [...HOLDS_A_SLOT] },
+          NOT: { status: 'RESERVED', reservationExpiresAt: { lte: now } },
+        },
+        orderBy: { sessionId: 'asc' },
+        _count: { _all: true },
       }),
     ]);
 
@@ -463,6 +482,37 @@ export class DiscoveryService {
     for (const row of serving) {
       const snapshot = snapshots.get(row.sessionId);
       if (snapshot !== undefined) snapshot.nowServingToken = row.tokenLabel;
+    }
+
+    const heldBySession = new Map(held.map((group) => [group.sessionId, group._count._all]));
+
+    // One policy read per HOSPITAL on the page rather than per card - a page of
+    // session cards is usually one or two hospitals.
+    const policies = new Map(
+      await Promise.all(
+        [...new Set(rows.map((row) => row.hospitalId))].map(
+          // read, NOT ensure: this module writes nothing, and `ensure` inserts a
+          // row on first use - which would let a patient browsing create one.
+          async (id) => [id, await this.policies.read(id)] as const,
+        ),
+      ),
+    );
+
+    for (const row of rows) {
+      const snapshot = snapshots.get(row.id);
+      const policy = policies.get(row.hospitalId);
+      if (snapshot === undefined || policy === undefined) continue;
+      snapshot.registrationOpen = registrationGate({
+        status: row.status,
+        registrationClosedAt: row.registrationClosedAt,
+        scheduledEnd: row.scheduledEnd,
+        policy: {
+          cutoffMinsBeforeEnd: policy.cutoffMinsBeforeEnd,
+          maxOnlineTokens: policy.maxOnlineTokens,
+        },
+        onlineTokensHeld: heldBySession.get(row.id) ?? 0,
+        now,
+      }).open;
     }
 
     return snapshots;
@@ -505,7 +555,9 @@ const toDoctorDto = (row: DoctorRow): PublicDoctor => ({
   hospitalCity: row.hospital.city,
 });
 
-const toCardDto = (row: SessionRow, snapshot: QueueSnapshot, now: Date): SessionCard => ({
+// No `now` any more: the only thing that needed a clock was registrationOpen, and
+// that moved to the shared gate in snapshots(). A pure row -> card mapping again.
+const toCardDto = (row: SessionRow, snapshot: QueueSnapshot): SessionCard => ({
   id: row.id,
 
   hospitalId: row.hospital.id,
@@ -528,5 +580,5 @@ const toCardDto = (row: SessionRow, snapshot: QueueSnapshot, now: Date): Session
   doctorPresence: row.doctorPresence,
 
   feePaise: row.feePaise,
-  snapshot: { ...snapshot, registrationOpen: isRegistrationOpen(row, now) },
+  snapshot,
 });

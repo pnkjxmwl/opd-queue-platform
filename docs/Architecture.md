@@ -182,9 +182,16 @@ QueueEntry         id, hospitalId, sessionId, patientId, accountId?,
                    #  - `requeuedAt` is what "move to end" means (PRD 8.8)
                    # estWindowStart/End arrive with the ETA engine in Phase 7.
 
-Payment            id, hospitalId, queueEntryId, accountId, amount, currency,
+Payment            id, hospitalId, queueEntryId(unique), accountId, amountPaise, currency,
                    status(CREATED|PENDING|SUCCESS|FAILED|REFUNDED|PARTIALLY_REFUNDED),
-                   razorpayOrderId, razorpayPaymentId, razorpaySignature, idempotencyKey
+                   razorpayOrderId(unique), razorpayPaymentId(unique), razorpaySignature,
+                   refundedPaise
+                   -- AS BUILT (Phase 5): no `idempotencyKey`. Joins serialise on the
+                   -- Phase-4 session lock, so a retried join finds the caller's own live
+                   -- reservation and returns the same order; the lock already does what
+                   -- the key was for. `queueEntryId` doubles as the Razorpay `receipt`.
+                   -- `razorpayPaymentId` UNIQUE is the replay guard: a duplicate
+                   -- payment.captured hits the constraint and is treated as success.
 Refund             id, hospitalId, paymentId, amount, status, razorpayRefundId, reason
 
 Consultation       id, hospitalId, queueEntryId, patientId, doctorId,
@@ -252,6 +259,12 @@ Phase 4 fills the counts and Phase 7 the window. Adding a field is safe, renamin
 breaks a shipped mobile app.
 
 ### 6.3 Join & payment (patient)
+**As built (Phase 5): `:id`, not `:sessionId`.** The parameter NAME is what makes the
+global `TenantGuard` engage, and a patient has no `HospitalStaff` membership in the hospital
+they are booking at - so `/sessions/:sessionId/join` would 403 every patient. The hospital is
+still resolved from the session row, never from the request. This is the mirror image of the
+Phase-4 command routes, which use `:sessionId` deliberately.
+
 ```
 POST /sessions/:id/join            → creates RESERVED entry + Razorpay order
 POST /webhooks/razorpay            → payment.captured → confirm entry, assign token (idempotent)
@@ -392,7 +405,16 @@ client → Razorpay Checkout → pays (test mode)
 POST /webhooks/razorpay  (payment.captured)
    → verify signature
    → idempotent on razorpayOrderId (duplicate webhooks = no-op)
-   → tx: Payment=SUCCESS, QueueEntry → CONFIRMED/VIRTUAL_WAITING, assign tokenNumber
+   → tx: Payment=SUCCESS, QueueEntry → CONFIRMED  (+ issue checkInCode)
+     -- AS BUILT (Phase 5): the tokenNumber is assigned at JOIN, not here. Reserving a
+     -- slot IS holding the number; `QueueEntry.tokenNumber` is NOT NULL behind
+     -- unique(sessionId, tokenNumber), and confirm-time assignment would need that
+     -- column nullable, weakening the constraint that stops two staff colliding. The
+     -- cost is a GAP in the token sequence when a checkout is abandoned - honest,
+     -- since PRD 8.1 makes the token a label and never a position.
+     -- A capture for a hold that already lapsed REINSTATES it (the webhook wins: the
+     -- money moved and the number was never reused). If the session is over there is
+     -- no queue to rejoin, so it is auto-refunded instead.
    → cancel reservation-expiry job
    → emit realtime + enqueue push "Your token is A027"
 ```
@@ -415,7 +437,7 @@ POST /webhooks/razorpay  (payment.captured)
 
 | Job | Trigger | Purpose |
 |---|---|---|
-| `reservation-expiry` | on join | Release token slot if payment not completed in TTL. |
+| `reservation-expiry` | 60s sweep | Marks lapsed unpaid holds CANCELLED. **As built (Phase 5): not BullMQ.** `QueueEntry.reservationExpiresAt` is what frees the slot - every rule that counts bookings ignores a RESERVED entry past that instant, so a session never oversells even if no worker runs. The sweep only writes down what is already true, and calls the domain command to do it. Phase 8 owns worker infrastructure and may replace it. |
 | `grace-expiry` | on call-next | Drive recall → skip → requeue for no-shows. |
 | `eta-tick` | periodic per active session | Refresh ETA as time passes / doctor idle. |
 | `registration-cutoff` | periodic | Auto-close registration when ETA would exceed session end / cap hit. |

@@ -2952,3 +2952,845 @@ Paste this whole block into a fresh session.
 
 *(Phase 3 was designed to run in parallel with Phase 4 and is now done, so Phase 4 has no competition
 for attention. Phases 5, 6 and 7 all depend on it.)*
+
+---
+
+## 2026-08-31 - Phase 5 Wave 1: the payment contract and schema  ·  P5-CONTRACT-01 + P5-DB-01
+
+Contract and schema for join -> pay -> token. Nothing is implemented yet; this is the frozen
+surface Wave 2 builds against. **141 tests still pass, 16/16 tasks, 0 cached** - Wave 1 adds no
+behaviour, so an unchanged test count is the correct result, not a missing one.
+
+### Two decisions the user made before a line was written
+
+**A thin fetch client instead of the `razorpay` SDK.** `CLAUDE.md` 2 lists the SDK in the locked
+stack, so this needed approval rather than a quiet swap. Order creation and refund are one POST
+each; the webhook signature is `node:crypto` HMAC over the raw bytes, which we must hand-roll
+regardless because no SDK can see the body before Nest's parser does. The deciding argument was
+testing: a fake client is an object literal, where the SDK would need mocking.
+
+**A `reservationExpiresAt` column instead of a BullMQ delayed job.** `Architecture.md` 11 plans a
+job per reservation, but **Phase 8 is the phase that builds worker infrastructure** - kill switches,
+stable `jobId`s, the "workers call commands, never write rows" rule - and `reservation-expiry` is
+listed there *again*. Pulling that forward for one job would have been Phase 8 arriving early with
+none of its discipline.
+
+The column is also simply better at the job. **It is what releases the slot, not a worker.** Every
+rule that counts people in a session treats a RESERVED entry past that instant as not holding a
+place, so the slot frees at exactly the right moment even with no scheduler running and no clock
+skew between a scheduler and the database. A sweeper only writes down what is already true, and
+`END_SESSION` already maps RESERVED -> CANCELLED as a backstop.
+
+### Two divergences from locked docs, stated rather than smuggled
+
+**The token number is assigned at JOIN, not at webhook confirm.** `Architecture.md` 10 says
+"tx: Payment=SUCCESS, QueueEntry -> CONFIRMED, assign tokenNumber". Three reasons it moved:
+`QueueEntry.tokenNumber` is NOT NULL with `unique(sessionId, tokenNumber)`, so a RESERVED row needs
+one anyway; "slot reservation" in `PRD.md` 10 *means* holding the number; and confirm-time
+assignment would need the column nullable, which weakens the constraint that stops two receptionists
+colliding. The cost is gaps in the token sequence when a checkout is abandoned - which is honest,
+since `PRD.md` 8.1 says the token is a label and never a position. **`Architecture.md` 10 must be
+updated in Wave 2.**
+
+**No `idempotencyKey` column.** `Architecture.md` 5.1 lists one on `Payment`. It would have been
+redundant: joins serialise on the Phase-4 session lock, so a retried join *sees* the caller's own
+live reservation and returns the same order. The lock already does what the key was for, and
+`queueEntryId` doubles as the Razorpay `receipt` for Phase 8's reconcile worker. One fewer column
+that can drift out of agreement with the row beside it.
+
+### The rule for the race Phases.md said to decide now
+
+A payment captured for a reservation that just expired: **the webhook always wins - reinstate.**
+The money moved, the patient has a receipt, and their token number was never handed to anyone else,
+so reinstating is a status change and nothing more. Auto-refund only when reinstating is impossible
+because there is no queue left to be in (session COMPLETED / CANCELLED / ENDED_EARLY). Wave 2 owes
+this a named test; `WebhookAck.handled` carries `REINSTATED` precisely so the path is observable
+rather than inferred from a status.
+
+### Things deliberately NOT added
+
+- **No `ENTRY_RESERVATION_EXPIRED` event.** An expired hold *is* a cancellation, and `actorType`
+  already distinguishes a person from the sweeper - exactly as it does for a skip. The
+  `QueueEventType` doc comment promised three new values and got three: `ENTRY_RESERVED`,
+  `ENTRY_CONFIRMED`, `ENTRY_CANCELLED`.
+- **No refund events on the queue timeline.** `QueueEvent` is the *queue's* history. A refund is
+  money, and lives in `Refund` + `AuditLog`.
+- **No new error code for "Razorpay not configured".** That is a misconfigured server, not a domain
+  outcome: it throws, the filter maps it to INTERNAL_ERROR, and pino logs the detail.
+
+### Why the patient shapes are separate from the console's
+
+`MyQueueEntry` is a new shape rather than a reuse of `QueueEntryView`, because the console shape
+carries a patient name per row and a patient screen must never be built from it (`Rules.md` 8,
+DPDP). It also carries different *numbers*: `checkedInAheadCount` is "ahead of YOU", where
+`QueueSnapshot.checkedInCount` is the session total. Only the first answers the question the patient
+is actually asking, and `Design.md` 5.6 asks for both ahead-counts by name.
+
+`cancellable` and `refundPctIfCancelledNow` are advisory in exactly the way `registrationOpen`
+already is: the app says "cancel now - full refund" without reimplementing the policy, and the
+server still decides at cancel time because the free window can close in between.
+
+### Razorpay is optional at boot, on purpose
+
+All three `RAZORPAY_*` vars default to empty and the API still starts. Failing boot would stop
+anyone running discovery or the queue engine just because they have no gateway account.
+`paymentsConfigured()` in `config/env.ts` is the single check - one place, so a half-configured
+environment (a key but no webhook secret) reads as OFF rather than accepting payments it can never
+verify.
+
+### Surprises and costs
+
+- **Trap 20 fired again, with a different culprit.** `prisma generate` hit the EPERM rename, and the
+  process holding the DLL was the *real* API (`node dist/main.js`), not orphaned vitest workers.
+  The module-scan diagnosis found it in one command where trap 8's kill-by-port reflex would have
+  been right by accident this time and wrong the last. **Scan by loaded module, always.**
+- Killing it then left a Windows filesystem lock, so the next `nest build` failed with
+  `ENOTEMPTY: rmdir dist/modules/queue`. Deleting `dist` and rebuilding cleared it. Not a new trap,
+  but worth knowing it looks like a build bug and is not one.
+- The user's phone was live-polling the session screen while all this happened. Killing the API and
+  then running the suite (trap 23) broke it for a few minutes. Restored: truncate-all -> seed ->
+  restart, verified with `/health`.
+
+### Verified
+
+- `prisma migrate deploy` applied `20260831160000_phase5_payments`.
+- **`migrate diff --exit-code` -> "No difference detected."** (trap 7, read as words not exit code -
+  trap 19). The `ADD VALUE ... BEFORE 'ENTRY_CHECKED_IN'` ordering is what keeps it quiet.
+- `turbo run lint typecheck test build --force` -> **16/16, 0 cached, 141 tests**.
+- Dev database re-seeded and the API answering on :3000.
+
+### Next
+
+Wave 1 is on the table for review before Wave 2 starts - the gate that caught three real problems in
+Phase 2's contract. Wave 2 is BE-1 (join + webhook) ∥ BE-2 (expiry sweep, `/me/queue-entries`,
+cancel + refund) ∥ MOB (join -> Checkout -> token card, My Visits). `P5-INFRA-01` is the user's:
+Razorpay test keys and a tunnel, which gate only the device checkpoint, not the build.
+
+---
+
+## 2026-08-31 - Phase 5 Wave 2: join, webhook, expiry, cancel and the patient's token card  ·  P5-BE-01..04 + P5-MOB-01,02
+
+A patient can now book a place, pay for it, and hold a token with a QR code - and none of that is
+decided by the client. **209 tests, 16/16 tasks, 0 cached** (178 API + 31 contracts; was 141).
+
+### The five commands the state machine gained
+
+`JOIN`, `CONFIRM_PAYMENT`, `REINSTATE`, `CANCEL_ENTRY`, `EXPIRE_RESERVATION`. Two are worth arguing
+about:
+
+**`REINSTATE` is separate from `CONFIRM_PAYMENT` even though both land on CONFIRMED.** It is the only
+transition in the product that leaves a TERMINAL state, so it is named, audited under its own action,
+and unreachable by accident: a manually cancelled entry cannot be resurrected by a stray webhook just
+because its status happens to match. The test that used to assert "terminal is terminal" now names its
+two exceptions explicitly instead of being loosened, so a THIRD way to touch a terminal entry fails it.
+
+**`EXPIRE_RESERVATION` accepts RESERVED and nothing else.** docs/Rules.md 9 says releasing a slot must
+not affect a paid entry; a narrow transition table makes that structurally true rather than a property
+of whatever `where` clause the sweeper happens to have.
+
+### The ordering that everything else follows from
+
+Join commits the reservation BEFORE calling Razorpay, because an HTTP call inside the session
+transaction would hold the lock every other command in that clinic is queued behind. The failure mode
+that buys is an entry with no order - which lapses on its own. **Self-healing beats atomic here**, and
+that is the whole reason the entry is created first.
+
+The webhook is the opposite: `applyPaymentConfirmation` (queue's write) and the `Payment` update
+(payments' write) run in ONE `runCommand` transaction. Anything else has a state where the patient has
+paid and has no token, or has a token we have no record of paying for. The module boundary survives
+because each module writes only its own tables through the same `ctx.tx` - the queue keeps ownership of
+the entry.
+
+### Four defects found while building, three of them mine
+
+1. **`RazorpayClient` was not DI-constructible.** Its optional `Env` constructor parameter is an
+   `Object` to Nest, which could not resolve it. **This broke every OTHER e2e suite while the payment
+   tests stayed green**, because those override the provider with a fake. Fixed with a `useFactory`.
+   The lesson is that a fake can hide a wiring bug from the very tests written to find it - the signal
+   came from the seven suites that had nothing to do with payments.
+2. **`(visits)/[id].tsx` would have been a root-level catch-all.** In a route GROUP a bare `[id]` sits
+   at the root of the URL space and shadows every other top-level path - `/location` and `/doctors`
+   included. Moved to `visit/[id]`, matching `session/[id]` in the discover stack. Caught by reading
+   the route tree, not by typecheck, which was perfectly happy.
+3. **`/patients` returns a bare array, and I typed it as `Paginated<Patient>`.** It compiles, then
+   reads `.items` off an array at runtime, so every account would have looked as if it had no patient
+   profiles and **no booking could ever have started**. It is the one documented unpaginated endpoint
+   and the existing profile screen already had it right. Typecheck cannot catch a lie about a response
+   shape; reading the controller can.
+4. **Three of my own tests were wrong, not the code.** The free-cancellation test sat exactly ON the
+   120-minute boundary, so it was decided by how long the test took to run. The token-cap test used
+   `updateMany` on a `QueuePolicy` row that is created lazily and therefore did not exist, matching
+   zero rows and silently testing nothing. And I asserted a 400 for a client-sent amount when Zod
+   simply STRIPS unknown keys - the rewritten test asserts the order was created for the session fee,
+   which is the property that actually matters.
+
+### A constraint I did not know about caught the fifth
+
+Moving a session's start without its end violated `OPDSession_end_after_start`. Worth recording
+because it is the argument for database constraints in one line: the check fired on a test fixture
+years before it could ever have fired on real data.
+
+### Razorpay Checkout runs in a WebView, because Expo Go cannot load a native module
+
+`react-native-razorpay` is a native module and the SDK is pinned to Expo 54 deliberately (trap 5), so
+using it would mean a development build before anything could be tested on the user's device.
+Checkout's own web script in a `react-native-webview` is the supported path and is the same
+Razorpay-hosted flow. Three dependencies added: `react-native-webview`, `react-native-svg` and
+`react-native-qrcode-svg` (the last is named in docs/CLAUDE.md 2's stack), all pinned by
+`expo install` to SDK-54-compatible versions.
+
+**The app never creates the token.** On checkout success it does exactly one thing: start re-reading
+`/me/queue-entries` until the SERVER says CONFIRMED. After 90 seconds it stops and says "we are still
+confirming" rather than "payment failed", because the payment DID succeed and the webhook will land.
+
+### registrationOpen now means what PRD 8.12 says - and is shared
+
+The rule moved out of `discovery.service.ts` into `common/registration.ts`, and the JOIN command runs
+the SAME function under the session lock. The button and the write cannot disagree, which was the
+point. Three of the four mechanisms are live: manual close, `cutoffMinsBeforeEnd`, `maxOnlineTokens`.
+
+**`cutoffOnEtaOverrun` is NOT implemented and is not silently ignored** - it is an explicit `etaOverrun`
+term that is always false until Phase 7 fills it, so it can only ever make the gate stricter later,
+never accidentally permissive now. The HANDOFF said Phase 5 would AND in all three policy limits; it
+ANDs in two, because the third needs an ETA engine that does not exist yet.
+
+### Left deliberately undone
+
+- **No `GET /me/queue-entries/:id`.** The active list is small, carries every field the token card
+  needs, and is already cached under one query key - so both screens share one request instead of an
+  endpoint gaining a single reader.
+- **A refund that fails at the gateway stays PENDING with no gateway id.** Not retried here: that is
+  precisely the row Phase 8's payment-reconcile worker looks for. Failing the request instead would
+  tell a patient their cancellation did not work when it did.
+- **No rate limiting on the webhook.** Phase 9's list, and it must never throttle legitimate Razorpay
+  retries (docs/Rules.md 10).
+
+### Verified
+
+- `turbo run lint typecheck test build --force` -> **16/16, 0 cached, 209 tests**.
+- The four done-whens docs/Phases.md names by name: amount from the session not the client, valid
+  webhook issues the token, **a replayed webhook makes no second token and no error**, bad signature
+  rejected. Plus unpaid-released/paid-untouched, crash recovery, and cancel-to-refund at both policy
+  tiers.
+- The expiry-vs-late-webhook race has its own test and returns `REINSTATED`, so the decision recorded
+  in Wave 1 is observable rather than inferred.
+- Dev database re-seeded.
+
+### Still blocked on the user
+
+`RAZORPAY_WEBHOOK_SECRET` and a public tunnel (`P5-INFRA-01`). The API keys are in `.env`;
+`paymentsConfigured()` requires all three, so **join is deliberately disabled until the webhook secret
+is set** - taking money we cannot verify is worse than not taking it. Nothing else is blocked: the
+whole flow is tested against a fake whose signature check is the real HMAC.
+
+---
+
+## 2026-08-31 - The Join button vanished exactly when it became tappable  ·  found by the user on a device
+
+The user tapped through to book and reported first "the join button is greyed out", then, after a
+fix, "theres no join button". Both were real, and they were two different bugs.
+
+### Bug 1 - a disabled control that could never become enabled
+
+`SessionCardView` rendered `<JoinButton registrationOpen={...} />` with no `onPress`. Before Phase 5
+that was honest, because joining did not exist. Once it did, the card's button stayed grey over a
+session the server was happily accepting bookings for. **A disabled button must mean "not now", never
+"not built"** - left alone it reads as a broken app. `SessionCardView` now takes `onJoin` and both
+list screens pass it, so a patient can book straight from the card.
+
+### Bug 2 - spreading `pressable()` after `style` silently discards the style
+
+```tsx
+style={[styles.joinButton, live && styles.joinButtonLive]}
+{...(live ? pressable(theme.radius.full) : {})}   // <- wins, and wipes the line above
+```
+
+`pressable()` in `lib/ui.tsx` returns BOTH `android_ripple` and `style`. JSX takes the last spread of
+a prop, so its `style` replaced the button's own - dropping height, minWidth, backgroundColor and
+flexDirection. The button rendered as an invisible sliver.
+
+**The tell was in which buttons survived.** Disabled ones spread `{}` and looked fine; only the LIVE
+one lost its styling. So the control disappeared precisely when it became usable - the one state a
+developer reading the diff is least likely to be looking at, and the only state that matters.
+
+Fixed by using the pattern the codebase already had: **feedback on the `Pressable`, visuals on an
+inner `View`**, exactly as `SessionCardView` and every other call site does. A grep confirmed no other
+site had made the same mistake - all five spread `pressable()` onto a Pressable carrying no `style` of
+its own.
+
+### Trap, for the list
+
+24. **`{...pressable()}` and a `style` prop on the same element cannot coexist.** `pressable()`
+    returns a `style` function, and the later JSX spread wins. Put press feedback on the `Pressable`
+    and visual styling on a child `View`. Typecheck and lint both pass either way; the only symptom is
+    an element that renders with no size.
+
+### What this cost, and what it says
+
+Nothing automated could have caught either one. `apps/mobile` has no test script, so lint + typecheck
++ bundle is the whole automated story, and all three were green through both bugs. **That is now five
+Phase-3/5 mobile defects found by a human looking at a screen, and zero found by a machine.** The
+budget-a-device-walkthrough rule in the handoff keeps earning its place.
+
+---
+
+## 2026-08-31 - Card pays, netbanking "fails": the client was waiting for a message that never comes
+
+The user paid successfully with a card (**B004, real payment id `pay_TWP0l1wFWUbnW2`**) and then
+reported netbanking failing. It was not failing. The client was.
+
+### The design flaw
+
+`join.tsx` only started polling the server once Checkout fired its `handler` callback. That works for
+a card, which completes inside the page. **Netbanking and UPI-intent do not complete inside the page** -
+they navigate away to a bank, or hand off to another app entirely - and the callback goes with the page
+that owned it. The money can move and the app never hears a thing.
+
+Fixed by inverting it: **poll from the moment checkout OPENS, not when Checkout says it is done.** The
+webhook is the source of truth either way (docs/Rules.md 1.4), so the client has no business waiting on
+the gateway's UI to tell it anything. This now works for every payment method, including ones Razorpay
+adds later.
+
+This is the same rule the architecture already stated, applied one level further out. I had written
+"the client never creates the token" and then still let the client decide *when to go and look*.
+
+### Two things the WebView also needed
+
+- **`setSupportMultipleWindows={false}`.** Netbanking reaches the bank through `window.open`. On
+  Android react-native-webview defaults this to TRUE, which creates a window that is never displayed:
+  the sheet sits there doing nothing and reads as a failed payment.
+- **`onShouldStartLoadWithRequest` handing non-http schemes to `Linking`.** UPI-intent opens
+  `upi://` / `phonepe://`. A WebView cannot load those and dies on the URL; the OS can.
+
+Plus a loading spinner and an `onError`, because a blank white sheet is the worst possible failure
+mode for a payment screen.
+
+### Closing the sheet no longer means "cancelled"
+
+If Checkout ever left our origin, a bank or a payment app was involved and money may already have
+moved. Dismissing now goes to "confirming" and asks the server, instead of telling the patient their
+payment was not completed - which could have been a flat lie with their money already gone.
+
+### A smaller one found while reviewing
+
+`payment.failed` acked as `handled: 'CONFIRMED'`. Nothing was confirmed. The ack is what a human reads
+in a log when a payment goes missing, so it must not say the opposite of what happened. Added
+`PAYMENT_FAILED` to `WebhookAck`.
+
+### What the failed attempts proved
+
+B002 and B003 are both `entry CANCELLED / payment FAILED`. That is **real Razorpay traffic**: the
+`payment.failed` webhooks reached the tunnel, their signatures verified, the payments were recorded
+failed, and the sweeper then released the unpaid holds. Two of the three subscribed events confirmed
+against the live gateway rather than a fake.
+
+Also worth recording: `4111 1111 1111 1111` is an **international** Visa, and a new Razorpay account
+has international payments disabled by default, so the account correctly refuses it. The test-mode
+paths that work on a fresh Indian account are UPI `success@razorpay` and the domestic card
+`5267 3181 8797 5449`. My original instructions named the wrong card.
+
+### Known gap
+
+`setSupportMultipleWindows` is **Android-only**. On iOS, WKWebView drops `window.open` unless
+`onOpenWindow` is handled, so netbanking will likely need that prop before an iOS build. Not written
+now, deliberately: it is untestable on this machine and untested payment code is worse than a recorded
+gap.
+
+---
+
+## 2026-08-31 - "Why does it still say Join after I have booked?"  ·  asked by the user, on a device
+
+Straight after paying, the session screen and its card still offered a plain **Join**. Tapping it
+produced a `409 ALREADY_IN_QUEUE` rendered as an error. The user also spotted the subtlety that makes
+this more than a label change: **you must still be able to book for someone else**, because a family
+shares one account.
+
+### The server was already right
+
+`join.ts` scopes its check to `(session, patient)`, not to the account:
+
+```ts
+const existing = await findExistingEntry(ctx, input.patientId);
+if (existing !== null && existing.status !== 'RESERVED') throw new AlreadyInQueueError(existing.id);
+```
+
+So booking a second family member into a session you are already in has been permitted all along. This
+was a UI gap only - no server, contract, schema or migration change.
+
+### Where the answer comes from, and where it deliberately does not
+
+The client joins two responses it already holds: `/me/queue-entries?scope=active` (each entry carries
+`sessionId`) and `/patients`. **No new request** - `useMyActiveEntries()` uses the same path, and
+therefore the same TanStack cache entry, as the My Visits tab and the token card.
+
+**The discovery response deliberately does NOT carry the booking.** `SessionCard` is impersonal by
+design and docs/Phases.md Phase 9 plans to CACHE discovery; adding a per-account field would make
+every response caller-specific and destroy that, for a fact the client can derive itself. Joining two
+server responses for rendering is not the client deciding queue state (docs/Rules.md 1).
+
+### The states
+
+| Situation | Card | Detail screen |
+|---|---|---|
+| No entry | `Join` | `Join` |
+| `RESERVED` (unpaid hold) | `Finish payment` | `Finish payment` |
+| Anything else | `Booked · A027` -> token | `View your token` |
+| Booked, a profile free, registration open | - | plus `Book for someone else` |
+
+`reserved` outranks `booked` on purpose: an unfinished payment is the thing that needs acting on, and
+burying it behind a token they have not paid for is how a hold quietly lapses. `Finish payment` routes
+back through join, which **resumes the same Razorpay order** rather than opening a second.
+
+A cancelled booking reverts to `Join` for free, from both ends: `ACTIVE_STATUSES` excludes CANCELLED
+so it leaves the client's list, and `HOLDS_A_SLOT` excludes it so the server permits re-booking.
+
+The picker now marks already-booked profiles unselectable, which makes the 409 **unreachable rather
+than merely handled** - and auto-select counts only SELECTABLE profiles, or it would auto-pick someone
+the server is about to refuse and dead-end the screen.
+
+### A cycle I created and then removed
+
+`lib/discovery.tsx` briefly imported `bookingStateFor` as a VALUE from `lib/visits.tsx`, which imports
+`Pill` back from `discovery`. A real runtime cycle - it would have worked today only because both are
+called during render rather than at module evaluation, which is luck, not design. Removed by having
+the card take a resolved `BookingState` prop instead of computing one: only the TYPE now crosses, and
+type imports are erased at compile time. The card also stays presentational, which is what it was.
+
+Typecheck and lint were both perfectly happy with the cycle.
+
+### Trap, for the list
+
+25. **A `import { thing }` between two lib modules that already import from each other is a runtime
+    cycle Metro will not warn about.** It resolves fine while every use is inside a component render
+    and breaks the day one moves to module scope. `import type` is free; a value import is not. Check
+    the other direction before adding one.
+
+### Cost I inflicted again
+
+Ran the FULL suite to verify a mobile-only change, which TRUNCATEs the dev database (trap 11/23) and
+wiped the user's account and their four tokens mid-session. **When only `apps/mobile` changed, verify
+with `--filter=@opd/mobile`** - lint + typecheck is the entire automated story for that app anyway, so
+the API suite adds nothing but damage. Re-seeded; the user has to sign up again.
+
+### Verified
+
+- `turbo run lint typecheck test build --force` -> **16/16, 0 cached, 209 tests**.
+- `payments.e2e.test.ts` already pins the server rule this UI reflects ("refuses a second booking for a
+  patient who has already paid"), so no new backend test was warranted.
+- Device walkthrough is the real check and is outstanding.
+
+---
+
+## 2026-08-31 - I repeated trap 24 within two hours, so it is now a build check
+
+The user: *"for book someone else it looks so bad bro"*. It did. The cause was **the trap I had
+documented earlier the same session**, in code I wrote after documenting it:
+
+```jsx
+style={styles.secondary}
+{...pressable(theme.radius.md)}   // spread wins, styles.secondary silently discarded
+```
+
+So the action rendered with no padding, no centring, no min-height - bare text hanging under the bar.
+Typecheck and eslint were both green, exactly as they were the first time.
+
+### The check
+
+`apps/mobile/scripts/check-pressable-style.cjs`, wired into the mobile `lint` script beside the
+existing `generate-router-types.cjs`. It fails the build on any element carrying BOTH a `style` prop
+and a spread `pressable()`.
+
+**Proven, not assumed:** it was run against a deliberately re-broken `lib/ui.tsx` and failed with
+`lib/ui.tsx:132 <Pressable>`, then passed once restored. A check nobody has watched fail is not a
+check. `eslint.config.mjs` needed `console` and `process` added to the existing `scripts/**/*.cjs`
+globals block.
+
+Documenting a trap plainly did not stop me repeating it two hours later. **A rule that only lives in
+prose is a rule that gets broken.** This is the first mobile bug class with an automated signal, and
+`apps/mobile` had none before.
+
+### The layout, separately
+
+The bar was also genuinely badly composed, independent of the style bug: "Book for someone else" sat
+in a SECOND `View` outside the bar's top border, so it read as a detached strip. Rebuilt as one
+column container:
+
+- **Not booked** - fee on the left, compact `Join` on the right (unchanged).
+- **Booked** - one FULL-WIDTH primary button, because the token is the only thing the patient came
+  back for and a chip in the corner under-serves it.
+- **Book for someone else** - now inside the same surface, under a hairline divider, with a
+  `user-plus` icon and the fee spelled out so the second charge is not a surprise.
+
+### Cost avoided this time
+
+Verified with `--filter=@opd/mobile` rather than the full suite, so the dev database survived - the
+lesson from the previous entry, applied. Lint + typecheck + build: 4/4, 0 cached.
+
+---
+
+## 2026-08-31 - Phase 5 review before close-out: three defects found by re-reading my own code
+
+The user asked for a review pass before closing the phase. Three real defects, one of which moves
+money. **180 tests, 16/16, 0 cached** (was 178).
+
+### 1. A concurrent double-cancel raised THREE refunds  ·  money bug
+
+`cancel()` read the payment OUTSIDE the transaction and then created a `Refund` inside it whether or
+not the cancellation had changed anything. Two taps in flight at once both saw `status: SUCCESS`
+before either committed, and both wrote a refund.
+
+Fixed twice over, because either alone would have been enough and money deserves both:
+- `applyCancellation` now returns `{ entry, changed }`, and the caller does nothing with money when
+  `changed` is false.
+- The payment is re-read INSIDE the transaction, under the session lock, so `refundedPaise` and
+  `status` cannot be stale.
+
+**The first version of this test passed against the buggy code**, which is the part worth
+remembering. I wrote it as three SEQUENTIAL cancels - and a sequential second request re-reads the
+payment at the top of `cancel()` and already sees it refunded, so it never touched the race at all. It
+only reproduced once rewritten as `Promise.all([cancel(), cancel(), cancel()])`, exactly the shape
+`queue-lock.e2e.test.ts` uses. Against the original code it then failed with
+**"expected [ …(3) ] to have a length of 1 but got 3"**.
+
+A regression test that has never been watched fail is not a regression test. This one now has been,
+against a faithfully reconstructed version of the bug.
+
+### 2. The patient READ path was inserting rows into hospital config
+
+`discovery.service.ts` and the `/me/queue-entries` projection both called
+`QueuePolicyService.ensure()`, which CREATES a `QueuePolicy` row on first use. `discovery` is
+documented in this very file as "writes nothing" - so a stranger browsing a hospital could insert a
+row into its configuration.
+
+Added `QueuePolicyService.read()`: same answer, no side effect - an absent row means the defaults,
+which is exactly what `ensure` would have written. `ensure` remains correct where a command is about
+to ACT on the policy (`runCommand`, `cancel`). Pinned by a test that deletes the policy row, browses,
+and asserts the row is still absent while the cards still answer correctly.
+
+### 3. `raiseRefund` assigned `refundedPaise` instead of incrementing it
+
+Latent rather than live: it only runs on a freshly captured payment where the running total is zero.
+But an assignment silently erases an earlier partial refund the day that stops being true, and that is
+money. Now `{ increment }`.
+
+### Checked and found correct
+
+- Amount always from the locked session row; `JoinRequest` has no amount field and Zod strips
+  unknown keys (pinned by a test asserting the ORDER, not a 400).
+- `razorpayPaymentId` UNIQUE is the replay guard, and a P2002 is treated as success.
+- `EXPIRE_RESERVATION` accepts RESERVED and nothing else, so the sweeper structurally cannot touch a
+  paid entry.
+- Tenancy: join verifies the patient belongs to the caller's account; cancel and my-visits are scoped
+  by `accountId`. Both have negative tests.
+- The webhook verifies the amount and currency against the order before confirming.
+- No `QueueEntry` is written outside a Phase-4 domain command.
+
+### Known gaps carried out of Phase 5
+
+- **iOS netbanking is untested and probably needs `onOpenWindow`.** `setSupportMultipleWindows` is
+  Android-only. Not written blind - untested payment code is worse than a recorded gap.
+- **`cutoffOnEtaOverrun` is not implemented.** An explicit always-false `etaOverrun` term in
+  `common/registration.ts`, so Phase 7 fills it in one line and it can only ever get stricter.
+- **A COMPLETED / NO_SHOW / RESCHEDULED entry lets the app offer "Join"** while the server refuses
+  with ALREADY_IN_QUEUE. Covering it costs a second request on every discovery screen for a rare case
+  the server already handles with a clear message.
+- **A zero-fee session cannot be joined.** Razorpay rejects a zero-amount order, so join would 500
+  and leave a hold that lapses on its own. No such session exists - `PRD.md` 10 requires payment -
+  but a free government OPD would need this.
+- **The webhook is unthrottled** (Phase 9 list), and must never throttle legitimate Razorpay retries.
+- **A refund whose gateway call fails stays PENDING with no `razorpayRefundId`** - exactly the row
+  Phase 8's payment-reconcile worker looks for.
+- **The cloudflared quick tunnel gets a new hostname on every restart**, silently breaking the
+  registered webhook. It already happened once mid-session. An ngrok static domain would end it.
+
+### Not ticked, on purpose
+
+`P5-MOB-01` and `P5-MOB-02` stay open until the user's device walkthrough passes. Card payment to
+token is confirmed; **kill-before-token recovery is not**, and that is half of MOB-01's done-when.
+The handoff records ticking four mobile subtasks on a typecheck once and having to un-tick them -
+lint and typecheck are not evidence that a screen works.
+
+`P5-INFRA-01` is ticked: real `payment.captured` and `payment.failed` webhooks reached the tunnel and
+verified against the user's own secret.
+
+---
+
+## 2026-08-31 - Netbanking, the second attempt: Razorpay's own API said what my guess did not
+
+The user, after my first fix: *"somehow its still failing for netbanking... it works for card but not
+for this please look this issue seriously"*. They were right, and my first fix was aimed at the wrong
+half of the problem.
+
+### Asking the gateway instead of guessing
+
+`GET https://api.razorpay.com/v1/payments` with the account's own keys, and the pattern was immediate:
+
+| method | leaves the page? | status |
+|---|---|---|
+| card | no | **captured** |
+| netbanking | yes | `created` x5 |
+| wallet | yes | `created` |
+
+`created` means Razorpay opened the payment and the bank step **never happened** - not that the bank
+declined. Every method needing a redirect was stuck at exactly the same point, and the only in-page
+method worked. (Two `netbanking captured` rows also showed up, from 22 Aug - a different session of
+the user's, which proves netbanking is fine on the account.)
+
+**Reading the gateway's own records took one request and settled in seconds what I had been
+theorising about for two rounds.** Do that first next time.
+
+### Why the first fix was not enough
+
+`setSupportMultipleWindows={false}` makes `window.open` NAVIGATE - but react-native-webview still
+returns **null** to JavaScript. Checkout reads null as "popup blocked" and aborts with "payment
+failed, please use another method", which is the message the user saw. I fixed the navigation and
+missed the return value.
+
+### Redirect mode
+
+`redirect: true` + `callback_url` makes Checkout navigate the top window instead of opening one, so
+no popup is ever needed. It applies to cards too, which costs nothing: this screen stopped depending
+on Checkout's `handler` when it started polling the server from the moment the sheet opens.
+
+The callback needs a REAL public address - the gateway has to accept it and a phone has to load it -
+so the server supplies it (`PUBLIC_BASE_URL` -> `JoinResponse.callbackUrl`), the client intercepts it
+rather than loading it, and `GET /webhooks/checkout-complete` serves a plain "you can close this"
+page as the safety net for a missed interception.
+
+**That page decides nothing.** Razorpay appends payment ids to the callback and every one of them is
+ignored - the token still comes from the signature-verified webhook, because a query string is not a
+signature.
+
+### Caught before it shipped
+
+My first version generated `${base}/checkout-complete` while Nest had mapped the route under the
+controller prefix as **`/webhooks/checkout-complete`**. Every redirect would have 404'd. Found by
+reading the router's own `Mapped {...}` log line rather than trusting the path I had written, then
+fixed by having the client use the server's `callbackUrl` so the two cannot drift apart at all.
+
+Verified through the tunnel: the callback page loads publicly, and a real join now returns
+`callbackUrl: https://<tunnel>/webhooks/checkout-complete`.
+
+### Trap, for the list
+
+26. **A WebView cannot host Razorpay Checkout's default popup flow.** `window.open` returns null even
+    with `setSupportMultipleWindows={false}`, and Checkout reads that as a blocked popup. Use
+    `redirect: true` with a real `callback_url`. The symptom is method-shaped: anything completing
+    in-page works, anything needing a bank or another app silently never starts, and Razorpay's
+    payments API shows them stuck at `created`.
+
+**180 tests, 16/16, 0 cached.** Device retest outstanding - this is the second blind fix to the same
+flow, and only the phone can settle it.
+
+---
+
+## 2026-08-31 - The Pay button did nothing at all, silently
+
+*"now the clicking the pay button is not working bro"*. It was not working, and it had no way of
+telling anyone.
+
+```js
+const startPayment = () => {
+  if (patientId === null) return;   // <- looks live, does nothing
+```
+
+`patientId` is set by an effect that preselected a profile only when there was **exactly one
+selectable** one. Two unbooked profiles, or - far more likely here - a single profile that had
+ALREADY booked this session, and nothing was selected. So the primary action on a payment screen
+rendered fully enabled and swallowed every tap.
+
+I introduced the narrower condition in the "already booked" change, to stop it preselecting a patient
+the server would refuse. That part was right; not covering the case where the result is NO selection
+was not.
+
+### Fixed in three places, because one was not the real problem
+
+1. **Preselect the first selectable profile**, not only a lone one. Booking for yourself is the
+   overwhelmingly common case and the choice is one tap to change.
+2. **`Button` gained `disabled`, distinct from `pending`.** The component could previously only be
+   busy, so a screen's options were a button that lies about spinning or one that looks live and
+   ignores you. `pending` means "wait"; `disabled` means "you still have to do something" - slate
+   fill, muted label, no spinner.
+3. **The label says which.** "Choose who is visiting" when nothing is selected, "Everyone here is
+   already booked" when there is nobody left to choose - instead of an inert "Pay Rs.600".
+
+### The lesson, which is not about this button
+
+An early `return` inside an `onPress` is a silent failure by construction: the guard is invisible to
+the person tapping. **If a handler can decline to act, the control must show that before it is
+tapped.** Swept the rest of the app for the same shape - the only other instances are `useEffect`
+guards and an `onCancel` behind a button that cannot render without its entry, so neither is
+reachable by a user.
+
+Lint, typecheck and build were all green through this, as they were for trap 24 and trap 26. Three
+device-only defects in one session, all in `apps/mobile`, which still has no test script.
+
+**4/4 mobile tasks, 0 cached.**
+
+---
+
+## 2026-08-31 - My Visits showed one token instead of the list  ·  two causes, one of them a route collision
+
+*"the my visits have a bug now, it shows like the token only, not the screen... if multiple tokens
+are there"*.
+
+### Cause 1 - the tab was parked on a token
+
+Booking pushes `join` onto the **(visits)** tab's stack and then `router.replace`s it with
+`visit/[id]`. So after paying, that tab's stack top IS a token card, and tapping My Visits showed
+that one token forever. With two bookings there was no route to the second without pressing back. A
+tab called "My Visits" has to show the visits.
+
+Fixed with a `tabPress` listener that navigates to the list. **Deliberately without
+`preventDefault()`**: the default tab switch still runs and this only pops back on top of it, so if
+the navigate ever stops working the tab opens on the wrong screen - today's bug - instead of becoming
+a tab that does nothing. A fix whose failure mode is worse than the bug is not a fix.
+
+### Cause 2 - `(visits)/index.tsx` and `(discover)/index.tsx` both claimed `/`
+
+Every segment above them is a route GROUP, so an `index` in either resolves to the same `/`. **The
+generated route table shows exactly one `/`** - which is how this is visible at all, and the same
+place the bare-`[id]` catch-all showed up earlier in this phase. I had introduced the second one when
+building the tab and not looked.
+
+Renamed to `visits.tsx`, so the list owns `/visits` and `/` unambiguously belongs to Discover, with
+`unstable_settings = { initialRouteName: 'visits' }` so a deep link straight to a token still has the
+list beneath it to go back to.
+
+### The check that keeps paying out
+
+`apps/mobile/scripts/generate-router-types.cjs` runs inside `typecheck` (trap 14). Reading its output
+is what turned "two files that look fine" into "only one `/` exists". **Grep the generated route
+table after adding any screen** - it is the only place a path collision is visible, and neither
+typecheck nor lint says a word about it.
+
+**4/4 mobile, 0 cached.**
+
+---
+
+## 2026-08-31 - Netbanking confirmed working, with a clean before/after from the gateway
+
+The user confirmed the flow works. Razorpay's payments API shows why, without anyone having to take
+that on trust:
+
+```
+22:29:35  netbanking  created     <- popup flow, never reached the bank
+22:28:44  netbanking  created
+22:29:17  wallet      created
+22:47:02  netbanking  captured    <- redirect mode
+22:47:52  netbanking  captured    <- redirect mode
+```
+
+Same account, same device, same session; the only thing between them is `redirect: true` plus a real
+`callback_url`. Both captures produced tokens - **B002 and B003, CONFIRMED / payment SUCCESS**.
+
+**B001 is CANCELLED with its payment still CREATED**: an abandoned hold that the reservation sweeper
+released on its own, unprompted, in the background. P5-BE-03's done-when observed in the wild rather
+than only in a test.
+
+### What is now confirmed on a real device
+
+- card -> token, netbanking -> token, both via the webhook
+- a replayed webhook makes no second token (proven earlier through the tunnel)
+- multiple tokens per account, listed
+- the booked/`Finish payment` states, and booking a second patient into the same session
+- an unpaid hold expiring and freeing its slot
+
+### Still unconfirmed, and both are done-when clauses
+
+- **kill the app before the token arrives -> recovers** (half of P5-MOB-01)
+- **cancel + refund on the device** (half of P5-MOB-02)
+
+Both boxes stay unticked until those run. The temptation to round up is exactly what the handoff
+warns about - four mobile subtasks were once ticked on a typecheck and had to be un-ticked.
+
+---
+
+## 2026-08-31 - P5-MOB-02 ticked: cancel + refund confirmed on a device, and the third webhook event with it
+
+The user cancelled one booking. The row tells the whole story:
+
+```
+B002 | CANCELLED | PARTIALLY_REFUNDED | paid 60000 | refunded 30000
+     | Refund 30000 | PROCESSED | rfnd_TWSXGENtQQ9Bzt
+     | "Cancelled by patient (50% per hospital policy)"
+```
+
+Everything the policy asks for: the **50% late tier** because that session started well over
+`freeCancellationMins` ago, `PARTIALLY_REFUNDED` rather than `REFUNDED` because half the money stayed,
+and the refund reaching **PROCESSED** with a real gateway id - which means the `refund.processed`
+webhook arrived and was handled.
+
+**All three subscribed events are now proven against live Razorpay traffic**, not fakes:
+`payment.captured`, `payment.failed`, `refund.processed`.
+
+`P5-MOB-02` ticked - both halves of its done-when ("list active/past; cancel") are confirmed on the
+device.
+
+### One clause left in the phase
+
+`P5-MOB-01`: "test pay -> token" is confirmed twice over (card and netbanking); **"kill pre-token ->
+recovers" has never been run.** That is the whole of what stands between here and the integration
+checkpoint.
+
+---
+
+## 2026-08-31 - Phase 5 complete: the integration checkpoint passed on a device
+
+The user killed the app before the token screen appeared and reopened it. **B004 was waiting in My
+Visits - CONFIRMED, payment SUCCESS, QR issued** - a token created while the phone was dead, by a
+webhook the app never heard about. That is the architectural claim of this phase, made visible.
+
+`P5-MOB-01` ticked, and with it every box in the phase.
+
+### The whole phase, verified on real gateway traffic
+
+| Claim | Evidence |
+|---|---|
+| join -> pay -> token | B003 (card), B004 (netbanking) |
+| replay makes no second token | 4 identical webhooks through the tunnel; 1 entry, 1 event |
+| bad signature rejected | forged POST -> 400, nothing issued |
+| amount from the session, never the client | order raised for the session fee with `amountPaise: 1` in the body |
+| unpaid released, paid untouched | B001 CANCELLED by the sweeper, unprompted |
+| cancel -> refund per policy | B002 -> 50% late tier -> PROCESSED with a gateway refund id |
+| crash recovery | B004, app killed pre-token |
+
+All three subscribed events proven live: `payment.captured`, `payment.failed`, `refund.processed`.
+
+### Trap, and it will bite again
+
+27. **A cloudflared quick tunnel gets a NEW hostname on every restart, and the Razorpay webhook you
+    registered keeps pointing at the dead one.** Nothing fails loudly: the API is healthy, the app
+    works, payments capture at the gateway - and no token is ever issued, because the confirmation
+    never arrives. It looks exactly like a broken webhook handler.
+
+    It already happened once mid-session. **Before any payment testing, check the tunnel host still
+    matches what is registered in Razorpay** (`curl <host>/health`), and if the tunnel was restarted,
+    re-register the URL and update `PUBLIC_BASE_URL` in `apps/api/.env` - redirect-mode checkout reads
+    its `callback_url` from there, so a stale value breaks netbanking a second, separate way.
+
+    An ngrok free static domain ends this permanently and is worth the ten minutes for any session
+    longer than an afternoon.
+
+### What Phase 5 cost, and where the defects came from
+
+Nine device-visible defects. **Every single one was found by a human looking at a screen**, and lint,
+typecheck and build were green through all of them:
+
+- the Join button vanishing exactly when it became tappable (trap 24)
+- "Book for someone else" rendering unpadded - trap 24 again, two hours after I documented it
+- `calendarDate` printing `undefined NaN undefined` for an ISO instant
+- netbanking silently never starting (trap 26)
+- the Pay button silently doing nothing
+- My Visits parked on a single token
+- `(visits)/index.tsx` colliding with `/`
+- a bare `[id]` becoming a root catch-all
+- `/patients` typed as paginated when it returns an array
+
+Three now have automated signals that did not exist before: the `check-pressable-style.cjs` build
+check, and the generated route table read as evidence rather than a build artifact.
+
+The two that mattered MOST were found by re-reading my own code, not by testing: a **concurrent
+double-cancel raising three refunds**, and the patient read path **inserting rows into hospital
+config**. Neither would ever have shown up on a screen.
+

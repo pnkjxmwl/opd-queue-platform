@@ -26,11 +26,28 @@ export function istRange(startIso: string, endIso: string): string {
   return `${istClock(startIso)}–${istClock(endIso)}`;
 }
 
-/** "2026-08-30" as "Sun 30 Aug". Used for a date that is not today. */
+/**
+ * "Sun 30 Aug", from EITHER a calendar date ("2026-08-30") or a UTC instant.
+ *
+ * It accepts both on purpose. It used to take only the date-only form, and passing
+ * an instant produced the string `"2026-08-31T11:27:30.000ZT00:00:00.000Z"` - an
+ * Invalid Date whose parts render as **"undefined NaN undefined"** rather than
+ * throwing. That reached a device. A formatter that silently prints `undefined` for
+ * a plausible input is a trap, and the fix belongs here rather than at each caller,
+ * because every caller would otherwise have to remember which shape it holds.
+ *
+ * An instant is converted to IST BEFORE the date is read: a session at 19:30 UTC is
+ * the next day in Mumbai, and showing the UTC day would be off by one all evening -
+ * every evening, which is exactly when an OPD clinic runs.
+ */
 export function calendarDate(date: string): string {
   const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const at = new Date(`${date}T00:00:00.000Z`);
+  // A date-only string is pinned to UTC midnight so it can never shift a day; an
+  // instant is shifted into IST so the day is the one the patient is living in.
+  const at = /^\d{4}-\d{2}-\d{2}$/.test(date)
+    ? new Date(`${date}T00:00:00.000Z`)
+    : istShifted(date);
   return `${days[at.getUTCDay()]} ${at.getUTCDate()} ${months[at.getUTCMonth()]}`;
 }
 

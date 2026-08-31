@@ -3,6 +3,7 @@ import type { QueueEntryStatus, SessionStatus } from '@opd/contracts';
 import {
   ELIGIBLE_TO_CALL,
   ENTRY_STATUSES,
+  JOIN_INITIAL_STATUS,
   QUEUE_COMMANDS,
   SESSION_STATUSES,
   WALK_IN_INITIAL_STATUS,
@@ -33,6 +34,26 @@ type Triple = [QueueCommand, QueueEntryStatus, QueueEntryStatus];
 
 /** Every legal entry transition in the product, written out independently. */
 const EXPECTED_LEGAL: Triple[] = [
+  // Join and pay (Phase 5). A hold becomes a booking only via the verified webhook.
+  ['CONFIRM_PAYMENT', 'RESERVED', 'CONFIRMED'],
+  // Razorpay retries; a replayed webhook must be a silent no-op, not a 409.
+  ['CONFIRM_PAYMENT', 'CONFIRMED', 'CONFIRMED'],
+  // The one transition in the product that leaves a terminal state, on purpose:
+  // a payment captured for a hold that had just lapsed. See REINSTATE.
+  ['REINSTATE', 'CANCELLED', 'CONFIRMED'],
+
+  // Withdrawing. Allowed up to CALLED and no further.
+  ['CANCEL_ENTRY', 'RESERVED', 'CANCELLED'],
+  ['CANCEL_ENTRY', 'CONFIRMED', 'CANCELLED'],
+  ['CANCEL_ENTRY', 'VIRTUAL_WAITING', 'CANCELLED'],
+  ['CANCEL_ENTRY', 'CHECKED_IN', 'CANCELLED'],
+  ['CANCEL_ENTRY', 'READY', 'CANCELLED'],
+  // Idempotent: a double-tap on Cancel must not be an error.
+  ['CANCEL_ENTRY', 'CANCELLED', 'CANCELLED'],
+
+  // The sweeper. RESERVED and nothing else - a paid entry is untouchable.
+  ['EXPIRE_RESERVATION', 'RESERVED', 'CANCELLED'],
+
   // Arrival. docs/PRD.md 8.4 - a late check-in becomes eligible, it does not
   // re-token and does not go to the back.
   ['CHECK_IN', 'CONFIRMED', 'CHECKED_IN'],
@@ -91,10 +112,10 @@ describe('entry state machine (P4-BE-01)', () => {
   });
 
   it('covers every command and every status, so a new one cannot slip through untested', () => {
-    expect(QUEUE_COMMANDS).toHaveLength(13);
+    expect(QUEUE_COMMANDS).toHaveLength(18);
     expect(ENTRY_STATUSES).toHaveLength(12);
-    // 13 x 12 pairs considered; only these are legal.
-    expect(EXPECTED_LEGAL).toHaveLength(21);
+    // 18 x 12 pairs considered; only these are legal.
+    expect(EXPECTED_LEGAL).toHaveLength(31);
   });
 
   it('walks the PRD 7.3 happy path end to end', () => {
@@ -133,17 +154,47 @@ describe('entry state machine (P4-BE-01)', () => {
     expect(() => nextEntryStatus('START_CONSULTATION', 'CHECKED_IN')).toThrow();
   });
 
-  it('leaves terminal entries alone for every command except end-of-session bookkeeping', () => {
+  it('leaves terminal entries alone, with exactly two named exceptions', () => {
+    // Phase 5 weakened this property, and the exceptions are written out here rather
+    // than the loop being loosened - so a THIRD way to touch a terminal entry fails
+    // this test instead of quietly joining the family.
     const terminal: QueueEntryStatus[] = ['COMPLETED', 'CANCELLED', 'NO_SHOW', 'RESCHEDULED'];
     for (const from of terminal) {
       for (const command of QUEUE_COMMANDS) {
         if (command === 'END_SESSION') {
           // Maps to itself: ending a session must not resurrect a finished visit.
           expect(nextEntryStatus(command, from)).toBe(from);
+        } else if (command === 'REINSTATE' && from === 'CANCELLED') {
+          // The webhook wins: a payment captured for a hold that had just lapsed.
+          expect(nextEntryStatus(command, from)).toBe('CONFIRMED');
+        } else if (command === 'CANCEL_ENTRY' && from === 'CANCELLED') {
+          // Idempotency, not resurrection - it stays exactly where it was.
+          expect(nextEntryStatus(command, from)).toBe('CANCELLED');
         } else {
-          expect(() => nextEntryStatus(command, from)).toThrow(InvalidQueueTransitionError);
+          expect(() => nextEntryStatus(command, from), key(command, from)).toThrow(
+            InvalidQueueTransitionError,
+          );
         }
       }
+    }
+  });
+
+  it('can never resurrect anything except a cancellation', () => {
+    // REINSTATE is the only door out of a terminal state, and CANCELLED is the only
+    // room it opens. A no-show or a completed visit is finished, full stop.
+    for (const from of ['COMPLETED', 'NO_SHOW', 'RESCHEDULED'] as QueueEntryStatus[]) {
+      expect(() => nextEntryStatus('REINSTATE', from)).toThrow(InvalidQueueTransitionError);
+    }
+  });
+
+  it('never lets the sweeper touch an entry that was paid for', () => {
+    // docs/Rules.md 9: "releasing a slot must not affect a paid entry". RESERVED is
+    // the only status that has not been paid for, so it is the only one here.
+    for (const from of ENTRY_STATUSES) {
+      if (from === 'RESERVED') continue;
+      expect(() => nextEntryStatus('EXPIRE_RESERVATION', from), from).toThrow(
+        InvalidQueueTransitionError,
+      );
     }
   });
 
@@ -167,6 +218,8 @@ describe('entry state machine (P4-BE-01)', () => {
     expect(isEligibleToCall('CALLED')).toBe(false);
     // docs/PRD.md 8.6 - a walk-in is present by definition, so it is callable at once.
     expect(isEligibleToCall(WALK_IN_INITIAL_STATUS)).toBe(true);
+    // ...and an unpaid hold is not callable however the queue is sorted (PRD 10).
+    expect(isEligibleToCall(JOIN_INITIAL_STATUS)).toBe(false);
   });
 });
 
@@ -174,6 +227,11 @@ describe('entry state machine (P4-BE-01)', () => {
 
 /** Which session statuses accept each command - again written out independently. */
 const EXPECTED_SESSION_ACCEPTS: Record<QueueCommand, SessionStatus[]> = {
+  JOIN: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
+  CONFIRM_PAYMENT: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
+  REINSTATE: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
+  CANCEL_ENTRY: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
+  EXPIRE_RESERVATION: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
   CHECK_IN: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
   CALL_NEXT: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
   START_CONSULTATION: ['ACTIVE'],

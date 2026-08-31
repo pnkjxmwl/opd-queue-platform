@@ -1,11 +1,12 @@
-import { Stack, useLocalSearchParams } from 'expo-router';
-import { RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
-import type { SessionDetail } from '@opd/contracts';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import type { Patient, SessionDetail } from '@opd/contracts';
 import { useApi } from '../../../../lib/api';
 import { Icon } from '../../../../lib/icon';
 import { JoinButton, PresencePill, QueryState, SessionStatusPill } from '../../../../lib/discovery';
 import { calendarDate, istRange, rupees } from '../../../../lib/format';
-import { Avatar, SectionLabel } from '../../../../lib/ui';
+import { Avatar, Button, SectionLabel, pressable } from '../../../../lib/ui';
+import { bookingStateFor, useMyActiveEntries } from '../../../../lib/visits';
 import { theme } from '../../../../theme';
 
 /**
@@ -41,8 +42,20 @@ const LIVE_QUEUE_POLL_MS = 10_000;
 
 export default function Session() {
   const { id } = useLocalSearchParams<{ id: string }>();
+  const router = useRouter();
   const session = useApi<SessionDetail>(`/sessions/${id}`, true, LIVE_QUEUE_POLL_MS);
   const data = session.data;
+
+  // What this account already holds here, and whether anyone is left to book for.
+  // Both are server data; joining them is rendering, not a queue decision.
+  const myBookings = useMyActiveEntries();
+  const patients = useApi<Patient[]>('/patients');
+  const mine = myBookings.bySession.get(id);
+  const booking = bookingStateFor(mine);
+  const bookedPatientIds = new Set((mine ?? []).map((entry) => entry.patientId));
+  const unbookedProfiles = (patients.data ?? []).filter(
+    (person) => !bookedPatientIds.has(person.id),
+  ).length;
 
   return (
     <View style={styles.screen}>
@@ -69,14 +82,74 @@ export default function Session() {
         {data ? <SessionBody detail={data} /> : null}
       </ScrollView>
 
-      {/* docs/Design.md 9: the primary action stays thumb-reachable at the bottom. */}
+{/*
+        docs/Design.md 9: the primary action stays thumb-reachable at the bottom.
+
+        ONE container for every state. The "book for someone else" action used to sit
+        in a second View below this bar, which read as two disconnected strips - and
+        it also hit trap 24 (a `style` prop next to a spread `pressable()`), so it
+        rendered with none of its own padding at all.
+      */}
       {data ? (
         <View style={styles.bar}>
-          <View>
-            <Text style={styles.barLabel}>Consultation fee</Text>
-            <Text style={styles.fee}>{rupees(data.feePaise)}</Text>
-          </View>
-          <JoinButton registrationOpen={data.snapshot.registrationOpen} />
+          {booking.kind === 'none' ? (
+            // Nothing booked: the fee is the context, Join is the action.
+            <View style={styles.barRow}>
+              <View>
+                <Text style={styles.barLabel}>Consultation fee</Text>
+                <Text style={styles.fee}>{rupees(data.feePaise)}</Text>
+              </View>
+              <JoinButton
+                registrationOpen={data.snapshot.registrationOpen}
+                onJoin={() => router.push(`/join?sessionId=${id}`)}
+              />
+            </View>
+          ) : (
+            // Already holding a place: the token is the only thing they came back
+            // for, so it gets the whole width rather than a chip in a corner.
+            <Button
+              title={
+                booking.kind === 'reserved'
+                  ? 'Finish payment'
+                  : `View your token · ${booking.entry.tokenLabel}`
+              }
+              icon={booking.kind === 'reserved' ? 'clock' : 'check-circle'}
+              onPress={() =>
+                router.push(
+                  booking.kind === 'reserved'
+                    ? `/join?sessionId=${id}`
+                    : `/visit/${booking.entry.id}`,
+                )
+              }
+            />
+          )}
+
+          {/*
+            Booking a SECOND patient into a session you are already in is allowed -
+            the server's check is scoped to (session, patient), not to the account -
+            so a family can hold two tokens. Shown only when there is genuinely
+            someone left to book for AND the server still says registration is open,
+            because an action that leads to a refusal is worse than no action.
+
+            Only on this screen, never on the cards: a list has no room to explain a
+            second action, and the card is itself a tap target.
+          */}
+          {booking.kind === 'booked' && unbookedProfiles > 0 && data.snapshot.registrationOpen ? (
+            <Pressable
+              onPress={() => router.push(`/join?sessionId=${id}`)}
+              accessibilityRole="button"
+              accessibilityLabel="Book this session for another patient"
+              {...pressable(theme.radius.md)}
+            >
+              {/* Feedback on the Pressable, visuals on the View (trap 24). */}
+              <View style={styles.secondary}>
+                <Icon name="user-plus" size={16} color={theme.color.primary} />
+                <Text style={styles.secondaryText}>
+                  Book for someone else · {rupees(data.feePaise)}
+                </Text>
+              </View>
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
     </View>
@@ -199,16 +272,30 @@ const styles = StyleSheet.create({
   lineValue: { ...theme.font.h3, color: theme.color.text, fontVariant: ['tabular-nums'] },
 
   bar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    // A column, so the primary action and the quieter one below it read as one
+    // surface rather than two stacked bars.
     paddingHorizontal: theme.space[4],
     paddingTop: theme.space[3],
     paddingBottom: theme.space[3],
     backgroundColor: theme.color.surface,
     borderTopWidth: 1,
     borderTopColor: theme.color.border,
+    gap: theme.space[3],
   },
+  barRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  secondary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: theme.space[2],
+    // A hairline INSIDE the bar, so the two actions are visibly related but ranked.
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: theme.color.border,
+    paddingTop: theme.space[3],
+    // docs/Design.md 9: 44x44 minimum, even for a quiet action.
+    minHeight: 44,
+  },
+  secondaryText: { ...theme.font.label, color: theme.color.primary },
   barLabel: { ...theme.font.overline, color: theme.color.textMuted },
   fee: { ...theme.font.h1, color: theme.color.primary, fontVariant: ['tabular-nums'] },
 });

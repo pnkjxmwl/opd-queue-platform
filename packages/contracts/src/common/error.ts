@@ -39,6 +39,19 @@ export const ErrorCode = z.enum([
    * the session should be ended or the doctor marked present again.
    */
   'DOCTOR_HAS_LEFT',
+  // join + payment (Phase 5)
+  /**
+   * The session will not accept a join right now (docs/PRD.md 8.12): closed
+   * manually, past its cutoff, or at its online-token cap. Distinct from
+   * INVALID_QUEUE_TRANSITION because the patient's answer is "try another session",
+   * not "something went wrong" - and `details.reason` says which limit bit.
+   */
+  'REGISTRATION_CLOSED',
+  /**
+   * This patient already holds a paid place in this session. The app opens the
+   * existing token instead of taking money twice.
+   */
+  'ALREADY_IN_QUEUE',
 ]);
 
 export type ErrorCode = z.infer<typeof ErrorCode>;

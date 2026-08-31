@@ -1,6 +1,5 @@
 // OPD Queue Platform - core schema (Phases 0-4).
-// Models here follow docs/Architecture.md 5.1. Payment models arrive in Phase 5 -
-// do not add them early.
+// Models here follow docs/Architecture.md 5.1. Payments arrived in Phase 5.
 //
 // docs/Rules.md 5:
 //   - every tenant-scoped table has hospitalId and is indexed on it
@@ -34,6 +33,7 @@ model Account {
   doctor        Doctor?
   refreshTokens RefreshToken[]
   queueEntries  QueueEntry[]
+  payments      Payment[]
 }
 
 /// The person actually receiving care - the account holder or a family member.
@@ -110,6 +110,8 @@ model Hospital {
   queueEvents   QueueEvent[]
   consultations Consultation[]
   auditLogs     AuditLog[]
+  payments      Payment[]
+  refunds       Refund[]
 
   @@index([city])
   @@index([status])
@@ -393,6 +395,15 @@ model QueueEntry {
   /// QueuePolicy.recallAttempts (docs/PRD.md 8.8); never hardcoded in a command.
   recallCount Int @default(0)
 
+  /// When an unpaid RESERVED hold lapses (docs/PRD.md 10). Null for every entry
+  /// that never needed one - a walk-in, and anything already paid for.
+  ///
+  /// **This column, not a job, is what releases the slot.** Every rule that counts
+  /// people in a session treats a RESERVED entry past this instant as not holding a
+  /// place, so the slot frees at exactly the right moment even if no worker is
+  /// running. The sweeper only writes down what is already true.
+  reservationExpiresAt DateTime?
+
   joinedAt         DateTime  @default(now())
   checkedInAt      DateTime?
   /// Set when a skipped patient is put back in the pool (docs/PRD.md 8.8,
@@ -416,6 +427,7 @@ model QueueEntry {
   account      Account?      @relation(fields: [accountId], references: [id], onDelete: SetNull)
   events       QueueEvent[]
   consultation Consultation?
+  payment      Payment?
 
   @@unique([sessionId, tokenNumber])
   @@index([hospitalId])
@@ -517,6 +529,91 @@ model Consultation {
   /// The ETA blend: this doctor's all-time average and today's running average.
   @@index([doctorId, endedAt])
   @@index([patientId])
+}
+
+// ---------------------------------------------------------------------------
+// Payments (Phase 5) - docs/Architecture.md 10, docs/Rules.md 9
+// ---------------------------------------------------------------------------
+
+/// One patient's payment for one place in a queue.
+///
+/// **Financial history: append-only in spirit.** Rows here are corrected with a
+/// compensating `Refund`, never edited into a different story and never deleted
+/// (docs/Phases.md Phase 5, "if it goes wrong"). `status` does advance, because it
+/// tracks a real external lifecycle, but the Razorpay ids that prove what happened
+/// are written once.
+///
+/// `amountPaise` is derived from `OPDSession.feePaise` at join time and is stored
+/// so a later fee change cannot rewrite what someone actually paid.
+model Payment {
+  id           String @id @default(uuid())
+  hospitalId   String
+  /// One order per reservation. A retry re-uses this order rather than creating a
+  /// second one, which is what stops a flaky connection charging someone twice.
+  queueEntryId String @unique
+  /// Who paid. Always an app account - a walk-in pays at the desk and has no row here.
+  accountId    String
+
+  amountPaise Int
+  currency    String        @default("INR")
+  status      PaymentStatus @default(CREATED)
+
+  razorpayOrderId   String  @unique
+  /// **The replay guard.** A duplicate `payment.captured` hits this constraint, and
+  /// the handler treats the violation as success rather than an error - which is
+  /// exactly what docs/Phases.md asks for: an application check loses that race, a
+  /// unique index does not (docs/Rules.md 5).
+  razorpayPaymentId String? @unique
+  /// The HMAC on the webhook we accepted. Evidence of what was verified, not a
+  /// credential: it is a signature OVER a public payload and grants nothing.
+  razorpaySignature String?
+
+  /// Sum of every refund raised. Kept here so "how much is left" needs no aggregate
+  /// on the cancel path, and so PARTIALLY_REFUNDED has a number behind it.
+  refundedPaise Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  hospital Hospital   @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  entry    QueueEntry @relation(fields: [queueEntryId], references: [id], onDelete: Restrict)
+  /// Restrict, unlike QueueEntry.account: an account with money against it cannot be
+  /// deleted out from under its own payment record.
+  account  Account    @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  refunds  Refund[]
+
+  @@index([hospitalId])
+  @@index([accountId])
+  /// The reservation sweeper and Phase 8's payment-reconcile both scan by status.
+  @@index([status])
+}
+
+/// One refund raised against one payment.
+///
+/// Separate rows rather than a field on Payment because a payment can be refunded
+/// more than once (partial, then the rest) and because a refund has its OWN
+/// asynchronous lifecycle - `PENDING` means Razorpay accepted the request, not that
+/// the patient has their money back.
+model Refund {
+  id         String @id @default(uuid())
+  hospitalId String
+  paymentId  String
+
+  amountPaise      Int
+  status           RefundStatus @default(PENDING)
+  razorpayRefundId String?      @unique
+  /// Why, in words, for the patient and for the audit trail. Never optional: a
+  /// refund with no reason is unanswerable three months later.
+  reason           String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  hospital Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  payment  Payment  @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@index([hospitalId])
+  @@index([paymentId])
 }
 
 // ---------------------------------------------------------------------------
@@ -633,8 +730,11 @@ enum ActorType {
 
 /// The append-only queue timeline. One value per thing that can happen, not one per
 /// endpoint: actorType is what distinguishes a human skip from the grace-expiry job.
-/// Phase 5 adds the join/payment events as an additive ALTER TYPE.
+/// Phase 5 added the join/payment events as an additive ALTER TYPE.
 enum QueueEventType {
+  ENTRY_RESERVED
+  ENTRY_CONFIRMED
+  ENTRY_CANCELLED
   ENTRY_CHECKED_IN
   ENTRY_CALLED
   ENTRY_RECALLED
@@ -651,4 +751,21 @@ enum QueueEventType {
   SESSION_RESUMED
   SESSION_ENDED
   DOCTOR_PRESENCE_CHANGED
+}
+
+/// docs/PRD.md 10. Deliberately NOT merged into QueueEntryStatus - see the note on
+/// PaymentStatus in packages/contracts/src/enums/payment.ts.
+enum PaymentStatus {
+  CREATED
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum RefundStatus {
+  PENDING
+  PROCESSED
+  FAILED
 }

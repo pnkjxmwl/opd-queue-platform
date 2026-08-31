@@ -103,15 +103,27 @@ export function Button({
   title,
   onPress,
   pending,
+  disabled,
   variant = 'primary',
   icon,
 }: {
   title: string;
   onPress: () => void;
+  /** Busy: shows a spinner and blocks taps. */
   pending?: boolean;
+  /**
+   * Not ready: blocks taps and LOOKS blocked, with no spinner.
+   *
+   * Distinct from `pending` because they mean different things to the person
+   * looking at it - "wait" versus "you still have to do something". Without this,
+   * a screen's only options were a button that lies about being busy or one that
+   * looks live and silently does nothing when tapped.
+   */
+  disabled?: boolean;
   variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
   icon?: IconName;
 }) {
+  const inert = pending === true || disabled === true;
   const fill =
     variant === 'primary'
       ? theme.color.primary
@@ -131,25 +143,29 @@ export function Button({
   return (
     <Pressable
       onPress={onPress}
-      disabled={pending}
+      disabled={inert}
       accessibilityRole="button"
-      accessibilityState={{ disabled: !!pending }}
+      accessibilityState={{ disabled: inert }}
       {...pressable()}
     >
       <View
         style={[
           styles.button,
           // docs/Design.md 5.1: disabled is a slate fill, not a faded primary.
-          { backgroundColor: pending ? theme.color.border : fill },
+          { backgroundColor: inert ? theme.color.border : fill },
           variant === 'secondary' && styles.buttonOutline,
         ]}
       >
-        {pending ? (
+        {pending === true ? (
           <ActivityIndicator color={theme.color.textMuted} />
         ) : (
           <>
-            {icon ? <Icon name={icon} size={18} color={fg} /> : null}
-            <Text style={[styles.buttonText, { color: fg }]}>{title}</Text>
+            {icon ? <Icon name={icon} size={18} color={disabled === true ? theme.color.textMuted : fg} /> : null}
+            <Text
+              style={[styles.buttonText, { color: disabled === true ? theme.color.textMuted : fg }]}
+            >
+              {title}
+            </Text>
           </>
         )}
       </View>

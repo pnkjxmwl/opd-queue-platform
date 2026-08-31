@@ -33,6 +33,11 @@ import {
  * The string values are what `AuditLog.action` records, so they must stay stable.
  */
 export type QueueCommand =
+  | 'JOIN'
+  | 'CONFIRM_PAYMENT'
+  | 'REINSTATE'
+  | 'CANCEL_ENTRY'
+  | 'EXPIRE_RESERVATION'
   | 'CHECK_IN'
   | 'CALL_NEXT'
   | 'START_CONSULTATION'
@@ -48,6 +53,11 @@ export type QueueCommand =
   | 'PRESENCE';
 
 export const QUEUE_COMMANDS: readonly QueueCommand[] = [
+  'JOIN',
+  'CONFIRM_PAYMENT',
+  'REINSTATE',
+  'CANCEL_ENTRY',
+  'EXPIRE_RESERVATION',
   'CHECK_IN',
   'CALL_NEXT',
   'START_CONSULTATION',
@@ -102,6 +112,34 @@ export const ELIGIBLE_TO_CALL: readonly QueueEntryStatus[] = ['CHECKED_IN', 'REA
 export const isEligibleToCall = (status: QueueEntryStatus): boolean =>
   ELIGIBLE_TO_CALL.includes(status);
 
+/**
+ * Statuses that consume one of the session's online token slots
+ * (`QueuePolicy.maxOnlineTokens`, docs/PRD.md 8.12).
+ *
+ * Everything except CANCELLED, which is the deliberate rule: **a cancelled booking
+ * and a lapsed unpaid hold free their slot, and nothing else does.** A no-show still
+ * consumed a booking - the cap limits how many people the clinic accepted, not how
+ * many turned up - and handing their place to someone else after the fact would
+ * quietly overbook a session that had already closed.
+ *
+ * An expired RESERVED entry is still RESERVED until the sweeper writes to it, so the
+ * caller pairs this with a `reservationExpiresAt > now` filter; the column, not a
+ * job, is what frees the slot.
+ */
+export const HOLDS_A_SLOT: readonly QueueEntryStatus[] = [
+  'RESERVED',
+  'CONFIRMED',
+  'VIRTUAL_WAITING',
+  'CHECKED_IN',
+  'READY',
+  'CALLED',
+  'IN_CONSULTATION',
+  'COMPLETED',
+  'NO_SHOW',
+  'SKIPPED',
+  'RESCHEDULED',
+];
+
 /** Nothing further can happen to an entry in one of these. */
 export const TERMINAL_ENTRY_STATUSES: readonly QueueEntryStatus[] = [
   'COMPLETED',
@@ -125,6 +163,71 @@ const ENTRY_TRANSITIONS: Record<
   QueueCommand,
   Partial<Record<QueueEntryStatus, QueueEntryStatus>>
 > = {
+  /**
+   * Creates the entry, so it has no `from` - same shape as WALK_IN below. A join is
+   * born RESERVED (see JOIN_INITIAL_STATUS): the slot is held, nothing is paid for,
+   * and nobody may be called from it.
+   */
+  JOIN: {},
+
+  /**
+   * The signature-verified webhook, and the ONLY thing that turns a hold into a
+   * booking (docs/Rules.md 1.4). CONFIRMED -> CONFIRMED is the duplicate-webhook
+   * no-op: Razorpay retries, and a replay must be silent rather than a 409 that
+   * turns one successful payment into a retry storm.
+   */
+  CONFIRM_PAYMENT: {
+    RESERVED: 'CONFIRMED',
+    CONFIRMED: 'CONFIRMED',
+  },
+
+  /**
+   * A payment captured for a hold that had already lapsed.
+   *
+   * Deliberately its own command rather than another row in CONFIRM_PAYMENT, even
+   * though the destination is the same. This is the one transition in the product
+   * that leaves a TERMINAL state, so it is named, audited under its own action, and
+   * impossible to reach by accident - a manually cancelled entry cannot be
+   * resurrected by a stray webhook just because the status happens to match.
+   *
+   * The rule it implements: the webhook wins. The money moved and the token number
+   * was never handed to anyone else, so giving the slot back is a status change.
+   * When there is no queue left to rejoin - the session is over - the session
+   * machine below refuses this and the caller refunds instead.
+   */
+  REINSTATE: {
+    CANCELLED: 'CONFIRMED',
+  },
+
+  /**
+   * The patient withdraws (docs/PRD.md 6.1). Allowed right up to being CALLED and
+   * no further: once the doctor is waiting, the honest records are skip and no-show,
+   * not a cancellation.
+   *
+   * CHECKED_IN is included even though they are standing in the building - people
+   * get called away, and forcing that to become a NO_SHOW would put a false fact in
+   * the data to save one table row. What it costs them is decided by
+   * QueuePolicy.cancellationRules, not by this table.
+   */
+  CANCEL_ENTRY: {
+    RESERVED: 'CANCELLED',
+    CONFIRMED: 'CANCELLED',
+    VIRTUAL_WAITING: 'CANCELLED',
+    CHECKED_IN: 'CANCELLED',
+    READY: 'CANCELLED',
+    CANCELLED: 'CANCELLED',
+  },
+
+  /**
+   * An unpaid hold ran out. Only ever from RESERVED - anything already paid for is
+   * untouchable by the sweeper, which is the property docs/Rules.md 9 asks for
+   * ("releasing a slot must not affect a paid entry") and the one this narrow row
+   * makes structurally true rather than a matter of the caller's `where` clause.
+   */
+  EXPIRE_RESERVATION: {
+    RESERVED: 'CANCELLED',
+  },
+
   /**
    * docs/PRD.md 8.4 - a late check-in simply becomes eligible; it does NOT get a new
    * token and does not go to the back. Its position among the checked-in pool falls
@@ -214,6 +317,14 @@ const ENTRY_TRANSITIONS: Record<
 export const WALK_IN_INITIAL_STATUS: QueueEntryStatus = 'CHECKED_IN';
 
 /**
+ * docs/PRD.md 10 - joining holds a slot; paying is what books it.
+ *
+ * A RESERVED entry is deliberately NOT in ELIGIBLE_TO_CALL, so an unpaid hold can
+ * never be handed to a doctor no matter how the queue is sorted.
+ */
+export const JOIN_INITIAL_STATUS: QueueEntryStatus = 'RESERVED';
+
+/**
  * The legal next status, or a typed rejection.
  *
  * Returning the same status is a legal no-op; callers should compare and skip the
@@ -252,6 +363,15 @@ export function canApplyToEntry(command: QueueCommand, from: QueueEntryStatus): 
  * session is history.
  */
 const SESSION_ACCEPTS: Record<QueueCommand, readonly SessionStatus[]> = {
+  // A running clinic still takes bookings and still takes payment for them
+  // (docs/PRD.md 8.12 closes registration on its own limits, never on ACTIVE).
+  JOIN: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
+  CONFIRM_PAYMENT: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
+  // Refused once the session is over, which is what routes a too-late payment to a
+  // refund instead of into a queue that no longer exists.
+  REINSTATE: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
+  CANCEL_ENTRY: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
+  EXPIRE_RESERVATION: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
   CHECK_IN: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
   CALL_NEXT: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
   START_CONSULTATION: ['ACTIVE'],

@@ -739,7 +739,7 @@ Let real patients join and pay to get into this queue (Phase 5).
 **Goal:** Patient reserves → pays (test) → gets a token, reliably and idempotently.
 **Prerequisites:** Phase 4 (confirm/token path), Phase 3 (patient reaches a session).
 **Size:** `L` · ~5–7 focused days · up to 3 parallel agents
-**Status:** ☐ not started → tick in §0 when the integration checkpoint passes
+**Status:** ☑ done — integration checkpoint passed on a device 2026-08-31
 
 ### 📦 What you'll have after this phase
 Real tokens. A patient can join a session, pay with a Razorpay **test** card, and receive a token (with a QR)
@@ -766,15 +766,15 @@ POST /queue-entries/:id/cancel     — cancel per policy (may refund)
 
 | ID | Task | Stream | Wave | Deps | Test / Done-when |
 |---|---|---|---|---|---|
-| ☐ P5-CONTRACT-01 | Payment/join/webhook DTOs | CONTRACT | 1 | — | compiles |
-| ☐ P5-DB-01 | Payment, Refund, reservation fields; migration | DB | 1 | — | applies; index on orderId |
-| ☐ P5-INFRA-01 | Webhook tunnel + test keys via env | INFRA | 1 | — | Razorpay test dashboard reaches local webhook |
-| ☐ P5-BE-01 | join: RESERVED entry + server-side order + idempotency key + expiry job | BE | 2 | Wave 1 | amount = session fee (not client); entry RESERVED |
-| ☐ P5-BE-02 | webhook: verify signature + idempotent confirm → token | BE | 2 | P5-BE-01 | valid → token; **replay = no dup**; bad signature rejected |
-| ☐ P5-BE-03 | reservation-expiry worker | BE | 2 | P5-BE-01 | unpaid released; paid untouched |
-| ☐ P5-BE-04 | my-queue-entries + cancel + refund | BE | 2 | P5-BE-02 | crash-recovery; cancel→refund per policy |
-| ☐ P5-MOB-01 | Join UI → Razorpay Checkout → **token card** (Design 5.6) | MOB | 2 | Wave 1 | test pay → token; kill pre-token → recovers |
-| ☐ P5-MOB-02 | My-visits list + cancel | MOB | 2 | Wave 1 | list active/past; cancel |
+| ☑ P5-CONTRACT-01 | Payment/join/webhook DTOs | CONTRACT | 1 | — | compiles |
+| ☑ P5-DB-01 | Payment, Refund, reservation fields; migration | DB | 1 | — | applies; index on orderId |
+| ☑ P5-INFRA-01 | Webhook tunnel + test keys via env | INFRA | 1 | — | Razorpay test dashboard reaches local webhook |
+| ☑ P5-BE-01 | join: RESERVED entry + server-side order + idempotency key + expiry job | BE | 2 | Wave 1 | amount = session fee (not client); entry RESERVED |
+| ☑ P5-BE-02 | webhook: verify signature + idempotent confirm → token | BE | 2 | P5-BE-01 | valid → token; **replay = no dup**; bad signature rejected |
+| ☑ P5-BE-03 | reservation-expiry worker | BE | 2 | P5-BE-01 | unpaid released; paid untouched |
+| ☑ P5-BE-04 | my-queue-entries + cancel + refund | BE | 2 | P5-BE-02 | crash-recovery; cancel→refund per policy |
+| ☑ P5-MOB-01 | Join UI → Razorpay Checkout → **token card** (Design 5.6) | MOB | 2 | Wave 1 | test pay → token; kill pre-token → recovers |
+| ☑ P5-MOB-02 | My-visits list + cancel | MOB | 2 | Wave 1 | list active/past; cancel |
 
 **Parallelization:** Wave 2 BE (01–04) ∥ MOB (01–02).
 **Integration checkpoint:** full join→pay→token on a device; duplicate-webhook + crash-recovery green.
@@ -1350,7 +1350,7 @@ Keep the *narrative* (what you built, what you decided, what broke) in **PROGRES
 | 2 |  |  |  |  |  |
 | 3 |  |  |  |  |  |
 | 4 |  |  |  |  |  |
-| 5 |  |  |  |  |  |
+| 5 | 2026-08-31 | 2026-08-31 | ~1 | `phase-5-done` | a WebView cannot host Razorpay's popup flow — every method needing a bank sat at `created` while card worked, and only the gateway's own payments API showed it; two route collisions (`/` and a bare `[id]`) that neither lint nor typecheck sees |
 | 6 |  |  |  |  |  |
 | 7 |  |  |  |  |  |
 | 8 |  |  |  |  |  |

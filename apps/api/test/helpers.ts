@@ -30,12 +30,25 @@ class TenantProbeController {
 @Module({ imports: [AppModule], controllers: [TenantProbeController] })
 class TestAppModule {}
 
-export async function createTestApp(): Promise<{
+/**
+ * `overrides` swaps a provider for a fake - used by the payment tests to stand in
+ * for Razorpay. Nothing else may be faked: the database, the guards and the queue
+ * engine are all real, because they are what the tests are actually about.
+ */
+export async function createTestApp(
+  overrides: { provide: unknown; useValue: unknown }[] = [],
+): Promise<{
   app: INestApplication;
   prisma: PrismaService;
 }> {
-  const moduleRef = await Test.createTestingModule({ imports: [TestAppModule] }).compile();
-  const app = moduleRef.createNestApplication();
+  let builder = Test.createTestingModule({ imports: [TestAppModule] });
+  for (const override of overrides) {
+    builder = builder.overrideProvider(override.provide).useValue(override.useValue);
+  }
+  const moduleRef = await builder.compile();
+  // rawBody: true to match main.ts - without it the webhook signature test would
+  // exercise a code path that does not exist in production.
+  const app = moduleRef.createNestApplication({ rawBody: true });
   app.useGlobalFilters(new AllExceptionsFilter());
   await app.init();
   return { app, prisma: app.get(PrismaService) };

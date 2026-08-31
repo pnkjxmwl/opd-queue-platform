@@ -4,6 +4,7 @@ import type { Paginated, PublicDoctor, SessionCard } from '@opd/contracts';
 import { useApi } from '../../../../lib/api';
 import { Icon } from '../../../../lib/icon';
 import { MoreNote, PAGE, QueryState, SessionCardView } from '../../../../lib/discovery';
+import { bookingStateFor, useMyActiveEntries } from '../../../../lib/visits';
 import { Avatar, SectionLabel } from '../../../../lib/ui';
 import { theme } from '../../../../theme';
 
@@ -17,6 +18,8 @@ import { theme } from '../../../../theme';
 export default function Doctor() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  // What this account already holds, for every card on the page at once.
+  const myBookings = useMyActiveEntries();
 
   const doctor = useApi<PublicDoctor>(`/doctors/${id}`);
   const sessions = useApi<Paginated<SessionCard>>(`/doctors/${id}/sessions?limit=${PAGE}`);
@@ -64,6 +67,10 @@ export default function Doctor() {
           <SessionCardView
             card={item}
             onPress={() => router.push({ pathname: '/session/[id]', params: { id: item.id } })}
+            onJoin={() => router.push(`/join?sessionId=${item.id}`)}
+            onOpenToken={(entryId) => router.push(`/visit/${entryId}`)}
+            // One request for the whole list, sliced per card - never one per card.
+            booking={bookingStateFor(myBookings.bySession.get(item.id))}
           />
         )}
         ItemSeparatorComponent={Gap}

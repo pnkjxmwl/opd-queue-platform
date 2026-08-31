@@ -40,6 +40,34 @@ const EnvSchema = z.object({
     .string()
     .default('')
     .transform((v) => v.split(',').map((s) => s.trim()).filter(Boolean)),
+
+  // Razorpay, test mode for MVP (docs/PRD.md 10, docs/Rules.md 9).
+  //
+  // All three default to empty so the API still BOOTS without them. That is
+  // deliberate: everything except join and the webhook works without Razorpay, and
+  // failing boot would stop a contributor running discovery or the queue engine at
+  // all just because they have no gateway account. `paymentsConfigured()` below is
+  // the single check, and join fails loudly with a real message when it is false.
+  RAZORPAY_KEY_ID: z.string().default(''),
+  RAZORPAY_KEY_SECRET: z.string().default(''),
+  /// Set in the Razorpay dashboard when registering the webhook URL. This is what
+  /// the inbound signature is verified against, and it is NOT the API secret.
+  RAZORPAY_WEBHOOK_SECRET: z.string().default(''),
+
+  /**
+   * The publicly reachable origin of THIS api, e.g. the dev tunnel.
+   *
+   * Razorpay's redirect mode sends the patient's browser back here after they pay,
+   * so it has to be a real address the gateway will accept and a phone can reach -
+   * `localhost` and a LAN ip are neither. Empty falls back to a sentinel the app
+   * intercepts locally, which works but leaves the redirect target unresolvable.
+   */
+  PUBLIC_BASE_URL: z.string().default(''),
+
+  /// How long an unpaid reservation holds its slot. Ten minutes is comfortably more
+  /// than a UPI round trip on a bad connection and short enough that an abandoned
+  /// checkout does not block a real patient for the rest of the clinic.
+  RESERVATION_TTL_SEC: z.coerce.number().int().positive().default(600),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -68,4 +96,19 @@ export function env(): Env {
 /** Test seam - lets a test reset the memoised value. */
 export function resetEnvCache(): void {
   cached = undefined;
+}
+
+/**
+ * Whether this deployment can take money.
+ *
+ * One place, so no handler invents its own idea of "configured" and so a
+ * half-configured environment (a key but no webhook secret) is treated as OFF
+ * rather than accepting payments it can never verify.
+ */
+export function paymentsConfigured(config: Env = env()): boolean {
+  return (
+    config.RAZORPAY_KEY_ID !== '' &&
+    config.RAZORPAY_KEY_SECRET !== '' &&
+    config.RAZORPAY_WEBHOOK_SECRET !== ''
+  );
 }
