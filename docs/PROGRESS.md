@@ -2702,9 +2702,9 @@ gives it something to show. Phases.md says 3 and 4 can run in parallel.)*
 
 ---
 
-# 📌 HANDOFF v3 — read this first in a new session
+# 📌 HANDOFF v3 — SUPERSEDED by HANDOFF v4 at the very bottom
 
-*Supersedes HANDOFF v2. The two handoffs above are history; this one is the brief.*
+*History. Read HANDOFF v4 instead.*
 
 ## 1. Where the project actually stands
 
@@ -3793,4 +3793,173 @@ check, and the generated route table read as evidence rather than a build artifa
 The two that mattered MOST were found by re-reading my own code, not by testing: a **concurrent
 double-cancel raising three refunds**, and the patient read path **inserting rows into hospital
 config**. Neither would ever have shown up on a screen.
+
+---
+
+# 📌 HANDOFF v4 — read this first in a new session
+
+*Supersedes v2 and v3. Those are history; this is the brief.*
+
+## 1. Where the project stands
+
+| Phase | State |
+|---|---|
+| 0 — Foundation | ✅ `phase-0-done` |
+| 1 — Identity & Tenancy | ✅ `phase-1-done` |
+| 2 — Hospital Config + Admin + Seed | ✅ `phase-2-done` |
+| 3 — Discovery + mobile UI | ✅ `phase-3-done` |
+| 4 — Queue Engine | ✅ `phase-4-done` |
+| 5 — Join + Payment → Token | ✅ `phase-5-done` (merged `e1b8eb5`, PR #4) |
+| 6 — Operational UIs (doctor + staff consoles) | ☐ next |
+
+`main` is clean and green. **180 tests**, `turbo run lint typecheck test build --force` → 16/16, 0
+cached. All six tags verified as ancestors of `main` with `merge-base --is-ancestor`.
+
+**A patient can now book, pay and hold a token with a QR code, end to end, on a real device.** What
+they cannot do is get checked in — nobody can scan that QR yet, and no doctor has a screen. That is
+Phase 6.
+
+## 2. To look at it yourself
+
+```bash
+docker compose up -d
+pnpm --filter @opd/api seed        # the test suite TRUNCATEs the dev database
+pnpm --filter @opd/api start       # :3000
+pnpm --filter @opd/mobile dev -- --clear
+```
+
+**Before any payment testing, read trap 28 below.** It has cost this project a whole debugging round
+already and it fails completely silently.
+
+## 3. Traps — the ones that have actually cost time
+
+Traps 1–23 are in HANDOFF v3 and all still hold. The ones that matter most in daily work:
+**1** (a green turbo result can lie — verify with `--force`), **7** (`migrate reset`/`migrate dev` do
+not work here; hand-write the SQL and prove it with `migrate diff --exit-code`), **11/23** (the e2e
+suite TRUNCATEs the dev database), **12** (Express matches route SHAPE, and the parameter NAME decides
+whether TenantGuard engages), **16** (the phone needs the Wi-Fi adapter's IPv4, not a Hyper-V one).
+
+Added by Phase 5:
+
+24. **`{...pressable()}` and a `style` prop on the same element cannot coexist.** `pressable()`
+    returns a `style` function and the later JSX spread wins, so the element renders with no size.
+    Feedback on the `Pressable`, visuals on a child `View`. **Now a build check** —
+    `apps/mobile/scripts/check-pressable-style.cjs`, wired into the mobile `lint` script.
+
+25. **A value import between two lib modules that already import from each other is a runtime cycle
+    Metro will not warn about.** It works while every use is inside a render and breaks the day one
+    moves to module scope. `import type` is free; a value import is not.
+
+26. **A WebView cannot host Razorpay Checkout's default popup flow.** `window.open` returns null even
+    with `setSupportMultipleWindows={false}`, and Checkout reads that as a blocked popup. Use
+    `redirect: true` with a real `callback_url`. The symptom is method-shaped: anything completing
+    in-page works, anything needing a bank silently never starts, and Razorpay's payments API shows
+    them stuck at `created`.
+
+27. **`ALTER TYPE ... ADD VALUE ... BEFORE 'x'`** keeps pg_enum's order matching schema.prisma, which
+    is what keeps `migrate diff` quiet after an additive enum change.
+
+28. **A cloudflared quick tunnel gets a NEW hostname on every restart, and the Razorpay webhook you
+    registered keeps pointing at the dead one.** Nothing fails loudly: the API is healthy, the app
+    works, payments capture at the gateway — and **no token is ever issued**, because the
+    confirmation never arrives. It looks exactly like a broken webhook handler, and it already cost
+    one debugging round mid-session.
+
+    Before any payment testing:
+    ```bash
+    curl https://<host>.trycloudflare.com/health     # is the registered host still alive?
+    ```
+    If the tunnel restarted: re-register the URL in the Razorpay dashboard **and** update
+    `PUBLIC_BASE_URL` in `apps/api/.env`, because redirect-mode checkout reads its `callback_url`
+    from there — a stale value breaks netbanking a second, separate way.
+
+    **An ngrok free static domain ends this permanently** and is worth ten minutes for any session
+    longer than an afternoon.
+
+29. **Two screens can silently claim the same route.** `(visits)/index.tsx` and
+    `(discover)/index.tsx` both resolved to `/`, and a bare `[id]` in a route group becomes a
+    root-level catch-all shadowing every top-level path. Neither lint nor typecheck says a word.
+    **Grep the generated route table after adding any screen** — it is the only place a collision is
+    visible.
+
+## 4. Decisions that constrain future work
+
+Phases 0–4 decisions still hold. Added by Phase 5:
+
+- **The token number is assigned at JOIN, not at payment confirm** (divergence from
+  `Architecture.md` 10, recorded there). Abandoned checkouts leave GAPS in the token sequence. That
+  is deliberate — a token is a label, never a position.
+- **`unique(razorpayPaymentId)` is the replay guard.** A duplicate capture hits the constraint and is
+  treated as success. Do not replace it with an application check.
+- **`reservationExpiresAt`, not a job, frees a slot.** Every rule that counts bookings must keep
+  ignoring a lapsed hold. Phase 8 may replace the sweeper; it must not become the mechanism.
+- **`registrationOpen` lives in `common/registration.ts`** and is shared by the read path and the
+  JOIN command so the button and the write cannot disagree. `cutoffOnEtaOverrun` is an explicit
+  always-false `etaOverrun` term — **Phase 7 fills it in one line**.
+- **`QueuePolicyService.read()` for reads, `ensure()` only when about to act.** `ensure` INSERTS.
+- **Checkout runs in redirect mode and the server supplies `callbackUrl`.** Never hardcode it in the
+  client.
+- **`POST /sessions/:id/join` uses `:id`, not `:sessionId`** — a patient has no staff membership, so
+  the tenant-scoped parameter name would 403 every one of them.
+
+## 5. Known gaps carried forward
+
+Everything in HANDOFF v3 §5 still applies. Added by Phase 5:
+
+- **iOS netbanking is untested and probably needs `onOpenWindow`** — `setSupportMultipleWindows` is
+  Android-only. Deliberately not written blind.
+- **A COMPLETED / NO_SHOW / RESCHEDULED entry lets the app offer "Join"** while the server refuses
+  with ALREADY_IN_QUEUE. Costs a second request per discovery screen to fix; the server already
+  refuses correctly with a clear message.
+- **A zero-fee session cannot be joined** — Razorpay rejects a zero-amount order. No such session
+  exists, but a free government OPD would need it.
+- **The webhook is unthrottled** (Phase 9), and must never throttle legitimate Razorpay retries.
+- **A refund whose gateway call fails stays PENDING with no `razorpayRefundId`** — exactly the row
+  Phase 8's payment-reconcile worker looks for.
+- **`apps/mobile` still has no test script.** Lint + typecheck + the two build checks are the entire
+  automated story. **Nine device-visible defects in Phase 5, every one found by a human looking at a
+  screen**, with lint and typecheck green through all of them.
+
+## 6. Prompt for the next session
+
+> Continue building the **OPD Queue Platform** — a multi-tenant OPD queue app for Indian hospitals
+> (`C:\Projects\New folder`). Patients join a doctor's live queue remotely, watch a dynamic ETA, and
+> arrive only when their turn is near. **The queue is the product.**
+>
+> **Read first, in this order:** `CLAUDE.md` → `docs/PROGRESS.md` starting at **📌 HANDOFF v4** at the
+> very bottom (v2 and v3 above it are marked superseded) → `docs/Phases.md` **Phase 6** in full.
+> `docs/Rules.md` wins on any conflict.
+>
+> **State:** Phases 0–5 are complete, merged and tagged (`phase-0-done` … `phase-5-done`). `main` is
+> green, the working tree is clean, CI passes on a clean runner. 180 tests. A patient can browse,
+> book, pay with Razorpay test mode and hold a token with a QR code — verified end to end on a real
+> device. Nobody can scan that QR yet and no doctor has a screen; that is Phase 6.
+>
+> **Next is Phase 6 — Operational UIs (doctor + staff consoles).** Wave 1 is the signed QR scheme plus
+> check-in validation (`P6-CONTRACT-01` + `P6-BE-01`); Wave 2 is four independent web routes.
+> **Show me the Wave 1 diff and wait before starting Wave 2** — that review has caught real problems
+> in every phase so far.
+>
+> **Phase 5 left Phase 6 two hooks, both marked in the code:**
+> - `QueueEntry.checkInCode` is currently 24 random bytes — opaque and unguessable, but **not
+>   signed**. Phase 6 owns the signing scheme, and a tampered code must be rejected without a
+>   database lookup.
+> - `POST /sessions/:sessionId/check-in` already accepts `{ checkInCode | tokenNumber }` and is
+>   idempotent. The scanner is what is missing, not the command.
+>
+> **Standing rules — every one came from something that actually went wrong:**
+> - Verify with `pnpm exec turbo run lint typecheck test build --force`. **A cached green has lied
+>   five times.** When only `apps/mobile` changed, use `--filter=@opd/mobile` — the API suite
+>   TRUNCATEs the dev database and has wiped a live device session twice.
+> - **Every list endpoint paginates.** `GET /patients` is the one documented exception.
+> - **Append to `docs/PROGRESS.md` as you go** — what you did, what you decided, **why**, and what you
+>   rejected. Failures and surprises are the most valuable entries. Append-only. Tick the ☐ in
+>   `docs/Phases.md`, and **only when the done-when genuinely passes** — mobile boxes need a device.
+> - **Never commit, branch, push or tag unless I ask.** When I do: branch → PR → squash merge → and
+>   **tag after the merge**.
+> - If the build must diverge from `PRD.md` / `Architecture.md` / `Design.md`, **say so and update
+>   that doc**.
+>
+> **Budget a device walkthrough into anything touching a screen.** Give me exact steps with expected
+> values, never "check it works".
 
