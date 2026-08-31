@@ -166,14 +166,21 @@ OPDSession         id, hospitalId, departmentId,
                    doctorPresence(NOT_PRESENT|PRESENT|ON_BREAK|LEFT),
                    queuePolicyId, tokenPrefix, fee, version
 
-QueueEntry         id, hospitalId, sessionId, patientId, accountId,
+QueueEntry         id, hospitalId, sessionId, patientId, accountId?,
                    tokenNumber, tokenLabel(e.g. "A027"),
-                   type(ONLINE|WALK_IN|FOLLOW_UP|PRIORITY|EMERGENCY),
+                   type(ONLINE|WALK_IN|FOLLOW_UP),          # provenance, immutable
+                   priority(NORMAL|PRIORITY|EMERGENCY), priorityAt,   # audited escalation
                    status(RESERVED|CONFIRMED|VIRTUAL_WAITING|CHECKED_IN|READY|CALLED|
                           IN_CONSULTATION|COMPLETED|CANCELLED|NO_SHOW|SKIPPED|RESCHEDULED),
-                   priorityRank, checkInCode(signed),
-                   joinedAt, checkedInAt, calledAt, consultStartedAt, completedAt,
-                   estWindowStart, estWindowEnd
+                   checkInCode(signed), recallCount, requeuedAt,
+                   joinedAt, checkedInAt, calledAt, consultStartedAt, completedAt
+                   # As built in Phase 4, three deliberate changes from the sketch above:
+                   #  - escalation is its own field, so `type` records how the entry
+                   #    arrived and is never overwritten (PRD 8.5)
+                   #  - `priorityAt` replaces `priorityRank`: a timestamp needs no
+                   #    management and orders two emergencies by when they happened
+                   #  - `requeuedAt` is what "move to end" means (PRD 8.8)
+                   # estWindowStart/End arrive with the ETA engine in Phase 7.
 
 Payment            id, hospitalId, queueEntryId, accountId, amount, currency,
                    status(CREATED|PENDING|SUCCESS|FAILED|REFUNDED|PARTIALLY_REFUNDED),
@@ -253,19 +260,26 @@ POST /queue-entries/:id/cancel     → cancel per policy (may trigger refund)
 ```
 
 ### 6.4 Queue domain commands (doctor / staff — RBAC-guarded)
+
+**These routes use `:sessionId`, not `:id`, and the name is load-bearing.** `TenantGuard`
+is global and resolves the caller's hospital from a route parameter; Phase 4 taught it to
+accept `:sessionId` by reading the hospital off the session row. Patient-facing discovery
+keeps `:id` for the opposite reason — it must stay un-scoped. Renaming either parameter
+silently flips that route's security posture (see trap 12 in PROGRESS.md).
+
 ```
-POST /sessions/:id/check-in            body: { checkInCode | tokenNumber }   (QR or manual)
-POST /sessions/:id/call-next
-POST /sessions/:id/start-consultation
-POST /sessions/:id/complete-consultation
-POST /sessions/:id/skip
-POST /sessions/:id/no-show
-POST /sessions/:id/pause  |  /resume
-POST /sessions/:id/end
-POST /sessions/:id/presence            body: { presence }
-POST /sessions/:id/walk-in             body: { patient info }
-POST /sessions/:id/priority            body: { entryId, reason }  (audited)
-POST /sessions/:id/requeue             body: { entryId }
+POST /sessions/:sessionId/check-in     body: { checkInCode | tokenNumber }   (QR or manual)
+POST /sessions/:sessionId/call-next
+POST /sessions/:sessionId/start-consultation      body: { entryId }
+POST /sessions/:sessionId/complete-consultation   body: { entryId }
+POST /sessions/:sessionId/skip                    body: { entryId, reason? }
+POST /sessions/:sessionId/no-show                 body: { entryId }
+POST /sessions/:sessionId/pause  |  /resume
+POST /sessions/:sessionId/end
+POST /sessions/:sessionId/presence     body: { presence }
+POST /sessions/:sessionId/walk-in      body: { patientId | name, dob?, gender? }
+POST /sessions/:sessionId/priority     body: { entryId, priority, reason }  (audited)
+POST /sessions/:sessionId/requeue      body: { entryId }
 ```
 
 ### 6.5 Admin config (RBAC: ADMIN)
@@ -310,8 +324,9 @@ Why this shape:
 - **Append-only `QueueEvent`** gives the accountable timeline *and* the raw data the ETA engine learns from.
 
 ### 7.1 Call-order logic
-- Eligible to be called = entries in `CHECKED_IN`/`READY` state.
-- Order among eligible = `priorityRank` then `tokenNumber` (fairness = booking order), except `EMERGENCY` which is inserted at the front.
+- Eligible to be called = entries in `CHECKED_IN`/`READY` state. (`READY` is reserved and unreachable in v1 — see the note on `QueueEntryStatus` in `packages/contracts`.)
+- Order among eligible = `priority` desc, then `priorityAt`, then `requeuedAt` (nulls first), then `tokenNumber`. Fairness is booking order; EMERGENCY sorts to the front, and anyone requeued sorts behind everyone who was not.
+- Nothing else may call a patient: `call-next` also refuses while another entry is CALLED or IN_CONSULTATION, while the queue is paused, and while doctor presence is LEFT.
 - The doctor never idles for not-yet-arrived patients (`VIRTUAL_WAITING` are not eligible).
 - Walk-ins: created already `CHECKED_IN`, appended at the current max token.
 
@@ -391,7 +406,7 @@ POST /webhooks/razorpay  (payment.captured)
 
 - **Patients:** email/password (Argon2/bcrypt hash) or Google OAuth → JWT access (short) + refresh (rotating).
 - **Doctor/staff/admin:** same account system, but authority comes from their `HospitalStaff` membership (`hospitalId` + `role` + `permissions`).
-- **Guards pipeline:** `JwtGuard` (authn) → `RolesGuard` (role/permission) → `TenantGuard` (hospital scoping).
+- **Guards pipeline:** `JwtGuard` (authn) → `TenantGuard` (hospital scoping) → `RolesGuard` (role/permission). All three are global; `TenantGuard` engages on a `:hospitalId` **or** `:sessionId` route parameter and passes through otherwise, so a new hospital-scoped route is protected by naming its parameter, with no decorator to forget.
 - **Rule:** no sensitive endpoint relies on the client hiding data; the backend authorizes every request against the caller's membership.
 
 ---

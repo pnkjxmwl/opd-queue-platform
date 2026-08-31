@@ -11,6 +11,7 @@ import type {
   Paginated,
   PublicDepartment,
   PublicDoctor,
+  QueueEntryStatus,
   QueueSnapshot,
   SessionCard,
   SessionCardQuery,
@@ -70,11 +71,19 @@ type SessionRow = Prisma.OPDSessionGetPayload<{ include: typeof SESSION_INCLUDE 
  *
  * Phase 3 knows only the session-local half of the rule. The three policy limits -
  * ETA overrun, cutoffMinsBeforeEnd and maxOnlineTokens - are ANDed in by Phase 5,
- * because all three need queue data that does not exist until Phase 4. Widening
- * this is safe; it can only ever get stricter, never more permissive.
+ * because all three need queue data that does not exist until Phase 4.
+ *
+ * **ACTIVE was added by Phase 4, and it made this rule more permissive - which the
+ * Phase-3 note here said would never happen.** That note was written when nothing
+ * could move a session out of OPEN_FOR_REGISTRATION, so the ACTIVE case had never
+ * been exercised. It can now: the first call-next activates the session
+ * (docs/PROGRESS.md, Phase 4 Wave 1). A running clinic must still accept joins -
+ * docs/PRD.md 8.12 closes registration on ETA overrun, the token cap, the cutoff or
+ * a manual close, and never because the doctor started seeing people. Leaving this
+ * alone would have closed every clinic the moment it opened its doors.
  */
 const isRegistrationOpen = (row: SessionRow, now: Date): boolean =>
-  row.status === 'OPEN_FOR_REGISTRATION' &&
+  (row.status === 'OPEN_FOR_REGISTRATION' || row.status === 'ACTIVE') &&
   row.registrationClosedAt === null &&
   row.scheduledEnd > now;
 
@@ -388,29 +397,94 @@ export class DiscoveryService {
   /**
    * Live queue numbers for a page of sessions.
    *
-   * ponytail: QueueEntry does not exist until Phase 4, so every count is zero and
-   * both ETA bounds are null. This is the ONE place those numbers are produced -
-   * Phase 4 replaces the body with a single groupBy over QueueEntry.status keyed by
-   * sessionId, Phase 7 fills the window from the ETA engine, and every card and
-   * detail response is filled at once with no call site touched.
+   * **The ONE place per-card queue numbers are produced**, and the hottest read path
+   * in the product. Two queries per PAGE - never one per card, which is the N+1
+   * docs/Phases.md names as this module's standing risk:
+   *
+   *   1. one `groupBy` over `QueueEntry.status`, keyed by sessionId, for the counts
+   *   2. one small lookup for the token being served, which is at most one row per
+   *      session because `call-next` refuses to call anyone while a patient is
+   *      still CALLED or IN_CONSULTATION
+   *
+   * Phase 7 fills `joinNowEtaFrom`/`To` from the ETA engine; no call site changes.
    */
   private async snapshots(sessionIds: string[]): Promise<Map<string, QueueSnapshot>> {
-    return new Map(
-      sessionIds.map((id) => [
-        id,
-        {
-          nowServingToken: null,
-          checkedInCount: 0,
-          bookedNotArrivedCount: 0,
-          // Overwritten per row by toCardDto - the session-local half of PRD 8.12.
-          registrationOpen: false,
-          joinNowEtaFrom: null,
-          joinNowEtaTo: null,
-        },
-      ]),
-    );
+    const empty = (): QueueSnapshot => ({
+      nowServingToken: null,
+      checkedInCount: 0,
+      bookedNotArrivedCount: 0,
+      // Overwritten per row by toCardDto - the session-local half of PRD 8.12.
+      registrationOpen: false,
+      joinNowEtaFrom: null,
+      joinNowEtaTo: null,
+    });
+
+    const snapshots = new Map(sessionIds.map((id) => [id, empty()]));
+    if (sessionIds.length === 0) return snapshots;
+
+    // Two plain reads rather than one $transaction([...]).
+    //
+    // Typing, first: a groupBy inside the array form loses its row shape and
+    // `_count._all` stops existing - the same failure as trap 13 in
+    // docs/PROGRESS.md, from the same cause (the literal no longer drives the
+    // inference). Awaited directly, it keeps its type with no cast.
+    //
+    // And consistency is not worth buying here: the two queries can land either side
+    // of a call-next, so a card may show a token whose count moved a moment ago.
+    // This is a projection of a queue that changes every few seconds and is already
+    // stale by the time it reaches a phone; paying an interactive transaction on the
+    // hottest read path in the product to align two numbers nobody can perceive
+    // would be the wrong trade.
+    const [counts, serving] = await Promise.all([
+      this.prisma.queueEntry.groupBy({
+        by: ['sessionId', 'status'],
+        where: { sessionId: { in: sessionIds }, status: { in: [...COUNTED_STATUSES] } },
+        // Prisma requires an orderBy once more than one field is grouped by. It has
+        // no effect on the folding below; it is here to satisfy the overload.
+        orderBy: [{ sessionId: 'asc' }, { status: 'asc' }],
+        _count: { _all: true },
+      }),
+      this.prisma.queueEntry.findMany({
+        where: { sessionId: { in: sessionIds }, status: { in: ['CALLED', 'IN_CONSULTATION'] } },
+        select: { sessionId: true, tokenLabel: true },
+      }),
+    ]);
+
+    for (const group of counts) {
+      const snapshot = snapshots.get(group.sessionId);
+      if (snapshot === undefined) continue;
+      if (PRESENT_STATUSES.includes(group.status)) {
+        snapshot.checkedInCount += group._count._all;
+      } else {
+        snapshot.bookedNotArrivedCount += group._count._all;
+      }
+    }
+
+    for (const row of serving) {
+      const snapshot = snapshots.get(row.sessionId);
+      if (snapshot !== undefined) snapshot.nowServingToken = row.tokenLabel;
+    }
+
+    return snapshots;
   }
 }
+
+/**
+ * The two honest numbers from docs/PRD.md 4.2, and the exact statuses
+ * `QueueSnapshot` in packages/contracts says each one covers.
+ *
+ * `checkedInCount` is people physically here and not yet finished - including the
+ * one currently CALLED, who is still ahead of you. `bookedNotArrivedCount` is people
+ * who may or may not turn up (docs/PRD.md 8.9), which is exactly why they are
+ * counted separately rather than folded in: collapsing the two is what makes a queue
+ * app feel like it is lying.
+ *
+ * RESERVED is in neither. An unpaid hold is not a booking, and showing it would
+ * inflate the queue with people who never joined it.
+ */
+const PRESENT_STATUSES: QueueEntryStatus[] = ['CHECKED_IN', 'READY', 'CALLED'];
+const AWAITED_STATUSES: QueueEntryStatus[] = ['CONFIRMED', 'VIRTUAL_WAITING'];
+const COUNTED_STATUSES: QueueEntryStatus[] = [...PRESENT_STATUSES, ...AWAITED_STATUSES];
 
 type DoctorRow = Prisma.DoctorGetPayload<{
   include: {

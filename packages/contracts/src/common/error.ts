@@ -23,6 +23,22 @@ export const ErrorCode = z.enum([
   'NOT_CHECKED_IN',
   'TENANT_MISMATCH',
   'PAYMENT_NOT_VERIFIED',
+  // queue engine (Phase 4). Deliberately few: a client only needs a distinct code
+  // where it shows a DIFFERENT message or offers a different action. Everything
+  // else - a command against the wrong entry state, or against a session that has
+  // ended - is INVALID_QUEUE_TRANSITION with the states in `details`.
+  /** call-next with nobody checked in. The console says "nobody has arrived yet". */
+  'NO_ELIGIBLE_PATIENT',
+  /** A call-next while the queue is paused. The console says "resume first". */
+  'QUEUE_PAUSED',
+  /** The hospital's QueuePolicy forbids this action (walk-ins or priority off). */
+  'POLICY_FORBIDS',
+  /**
+   * call-next while the doctor is marked as having LEFT. Distinct from QUEUE_PAUSED
+   * because the fix is different: a paused queue is resumed, a departed doctor means
+   * the session should be ended or the doctor marked present again.
+   */
+  'DOCTOR_HAS_LEFT',
 ]);
 
 export type ErrorCode = z.infer<typeof ErrorCode>;

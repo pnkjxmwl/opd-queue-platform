@@ -15,3 +15,4 @@ export * from './auth/dto';
 export * from './patients/dto';
 export * from './config/dto';
 export * from './discovery/dto';
+export * from './queue/dto';

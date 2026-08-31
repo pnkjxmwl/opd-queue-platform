@@ -1,6 +1,6 @@
-// OPD Queue Platform - core schema (Phases 0-2).
-// Models here follow docs/Architecture.md 5.1. Queue-entry and payment models arrive
-// in their own phases (4, 5) - do not add them early.
+// OPD Queue Platform - core schema (Phases 0-4).
+// Models here follow docs/Architecture.md 5.1. Payment models arrive in Phase 5 -
+// do not add them early.
 //
 // docs/Rules.md 5:
 //   - every tenant-scoped table has hospitalId and is indexed on it
@@ -33,12 +33,19 @@ model Account {
   memberships   HospitalStaff[]
   doctor        Doctor?
   refreshTokens RefreshToken[]
+  queueEntries  QueueEntry[]
 }
 
 /// The person actually receiving care - the account holder or a family member.
 model Patient {
   id        String          @id @default(uuid())
-  accountId String
+  /// The account that owns this profile - null for a WALK-IN patient registered at
+  /// reception, who has no app account at all (docs/PRD.md 6.3). Making this
+  /// nullable is cheaper and more honest than the alternatives: inventing a shell
+  /// Account per walk-in, attributing the patient to the receptionist's account
+  /// (a lie in the data), or splitting a walk-in's name onto QueueEntry so the same
+  /// person is modelled two different ways depending on how they arrived.
+  accountId String?
   name      String
   dob       DateTime?
   gender    Gender?
@@ -47,7 +54,9 @@ model Patient {
   createdAt DateTime        @default(now())
   updatedAt DateTime        @updatedAt
 
-  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  account       Account?       @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  queueEntries  QueueEntry[]
+  consultations Consultation[]
 
   @@index([accountId])
 }
@@ -96,6 +105,11 @@ model Hospital {
   schedules   DoctorSchedule[]
   sessions    OPDSession[]
   queuePolicy QueuePolicy?
+
+  queueEntries  QueueEntry[]
+  queueEvents   QueueEvent[]
+  consultations Consultation[]
+  auditLogs     AuditLog[]
 
   @@index([city])
   @@index([status])
@@ -176,6 +190,9 @@ model Doctor {
   sessionsAsOriginal OPDSession[]     @relation("SessionOriginalDoctor")
   /// Sessions this doctor is actually running right now.
   sessionsAsProvider OPDSession[]     @relation("SessionProvider")
+  /// Consultations this doctor ACTUALLY performed - the provider, not the booked
+  /// doctor, because this is the row the ETA engine learns durations from.
+  consultations      Consultation[]
 
   @@index([hospitalId])
   @@index([departmentId])
@@ -270,9 +287,9 @@ model QueuePolicy {
 /// `status` and `doctorPresence` are independent by design (docs/PRD.md 8.10): a
 /// doctor being late, on a break, or gone never changes the session's status.
 model OPDSession {
-  id            String  @id @default(uuid())
-  hospitalId    String
-  departmentId  String
+  id           String  @id @default(uuid())
+  hospitalId   String
+  departmentId String
   /// Provenance: set when generated from a schedule, null when created by hand.
   scheduleId   String?
 
@@ -297,6 +314,14 @@ model OPDSession {
   feePaise             Int
   /// Set when staff manually close registration (PRD 8.12, third mechanism).
   registrationClosedAt DateTime?
+  /// Set while the queue is paused, cleared on resume (docs/PRD.md 6.2).
+  ///
+  /// A nullable timestamp rather than a SessionStatus value: a paused session is
+  /// still ACTIVE - it has not ended and it still accepts joins and check-ins - so
+  /// adding PAUSED to the status enum would force every existing status check to
+  /// learn a new value in order to keep behaving the same. It also records WHEN,
+  /// which a status cannot, and it matches registrationClosedAt directly above.
+  pausedAt             DateTime?
   /// Bumped by Phase-4 commands so clients can drop a stale realtime snapshot.
   version              Int       @default(0)
   createdAt            DateTime  @default(now())
@@ -308,6 +333,9 @@ model OPDSession {
   originalDoctor  Doctor          @relation("SessionOriginalDoctor", fields: [originalDoctorId], references: [id], onDelete: Restrict)
   currentProvider Doctor          @relation("SessionProvider", fields: [currentProviderDoctorId], references: [id], onDelete: Restrict)
 
+  entries QueueEntry[]
+  events  QueueEvent[]
+
   /// Idempotency for generate-from-schedule, as a DATABASE constraint rather than an
   /// application check - staff will double-click, and an application check loses that
   /// race (docs/Phases.md, docs/Rules.md 5).
@@ -316,6 +344,179 @@ model OPDSession {
   @@index([hospitalId, status])
   @@index([departmentId])
   @@index([scheduleId])
+}
+
+// ---------------------------------------------------------------------------
+// Queue engine (Phase 4) - docs/Architecture.md 7
+// ---------------------------------------------------------------------------
+
+/// One patient's place in one session's queue.
+///
+/// `tokenNumber` is an immutable booking-order LABEL, not the call order
+/// (docs/PRD.md 8.1). The effective call order is computed on every read from
+/// status + priority + priorityAt + tokenNumber and is deliberately NOT stored:
+/// a stored order is wrong the instant anyone checks in, is skipped, or is escalated.
+model QueueEntry {
+  id         String  @id @default(uuid())
+  hospitalId String
+  sessionId  String
+  patientId  String
+  /// The account that booked. Null for a walk-in registered at reception.
+  accountId  String?
+
+  /// Unique within the session by DATABASE constraint, not an application check -
+  /// two staff registering a walk-in at the same instant is a race an application
+  /// check loses (docs/Rules.md 5).
+  tokenNumber Int
+  /// tokenPrefix + zero-padded tokenNumber, e.g. "A027". Denormalised because it is
+  /// on every card and notification, and the prefix can be edited afterwards.
+  tokenLabel  String
+
+  /// How the entry got here. Provenance, and never rewritten - see the note on
+  /// QueueEntryType in packages/contracts/src/enums/queue.ts.
+  type       QueueEntryType
+  /// Audited escalation (docs/PRD.md 8.7), independent of `type`.
+  priority   QueueEntryPriority @default(NORMAL)
+  /// When `priority` was last raised. Breaks ties between two emergencies in the
+  /// order they were escalated; null whenever priority is NORMAL.
+  priorityAt DateTime?
+
+  /// No default: an online join starts RESERVED and a walk-in starts CHECKED_IN, so
+  /// a default would be wrong half the time. Every creator states it.
+  status QueueEntryStatus
+
+  /// Signed, opaque QR reference (docs/Rules.md 10) - no PII, not enumerable.
+  /// Issued with the token (Phase 5); the signing scheme itself is Phase 6.
+  checkInCode String? @unique
+
+  /// Times this entry was called and did not appear. Compared against
+  /// QueuePolicy.recallAttempts (docs/PRD.md 8.8); never hardcoded in a command.
+  recallCount Int @default(0)
+
+  joinedAt         DateTime  @default(now())
+  checkedInAt      DateTime?
+  /// Set when a skipped patient is put back in the pool (docs/PRD.md 8.8,
+  /// RequeueBehavior.END_OF_QUEUE). It is what "move to end" MEANS in a model where
+  /// the call order is computed and the token number is immutable: requeued entries
+  /// sort after everyone who has not been requeued, then among themselves by when
+  /// they were requeued. Without it, a skipped patient with an early token is
+  /// offered to the doctor again immediately - the loop the grace period exists to
+  /// stop. Null for everyone who has never been skipped.
+  requeuedAt       DateTime?
+  calledAt         DateTime?
+  consultStartedAt DateTime?
+  completedAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  hospital     Hospital      @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  session      OPDSession    @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  patient      Patient       @relation(fields: [patientId], references: [id], onDelete: Restrict)
+  account      Account?      @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  events       QueueEvent[]
+  consultation Consultation?
+
+  @@unique([sessionId, tokenNumber])
+  @@index([hospitalId])
+  /// The call-order scan and the per-card status groupBy both key off this.
+  @@index([sessionId, status])
+  @@index([accountId])
+  @@index([patientId])
+}
+
+/// The append-only queue timeline (docs/Rules.md 5, 7).
+///
+/// Never updated and never deleted - a mistake is corrected with a compensating
+/// event, not an edit. There is intentionally no `updatedAt`: a column nothing may
+/// change should not exist. This is also the raw data the ETA engine learns from.
+model QueueEvent {
+  id         String  @id @default(uuid())
+  hospitalId String
+  sessionId  String
+  /// Null for session-level events (paused, ended, presence changed).
+  entryId    String?
+
+  type      QueueEventType
+  /// Who acted. actorId is the Account id, and is null only when actorType is
+  /// SYSTEM (a background job).
+  actorType ActorType
+  actorId   String?
+
+  /// Event-specific payload - the from/to states, a reason, a recall attempt number.
+  /// Json because the useful detail differs per event type and none of it is queried.
+  metadata Json @default("{}")
+
+  createdAt DateTime @default(now())
+
+  hospital Hospital    @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  session  OPDSession  @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  entry    QueueEntry? @relation(fields: [entryId], references: [id], onDelete: Restrict)
+
+  @@index([sessionId, createdAt])
+  @@index([hospitalId, createdAt])
+  @@index([entryId])
+}
+
+/// Who did what, when, and why (docs/Rules.md 1.7). Append-only, like QueueEvent.
+///
+/// Separate from QueueEvent on purpose: QueueEvent is the queue's own timeline and
+/// is read by patients and the ETA engine, while this is the accountability record
+/// and covers actions with no queue at all (config edits, staff invitations). The
+/// same action writes one of each.
+model AuditLog {
+  id         String  @id @default(uuid())
+  /// Null for platform-level actions that belong to no tenant.
+  hospitalId String?
+
+  actorType ActorType
+  actorId   String?
+
+  /// The command name, e.g. "queue.callNext".
+  action     String
+  entityType String
+  entityId   String
+  /// Required by the caller for actions docs/PRD.md 8.7 says must carry one.
+  reason     String?
+  metadata   Json    @default("{}")
+
+  createdAt DateTime @default(now())
+
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: SetNull)
+
+  @@index([hospitalId, createdAt])
+  @@index([entityType, entityId])
+}
+
+/// One completed consultation. Written by complete-consultation, and the source the
+/// ETA engine learns real durations from (docs/Architecture.md 8).
+model Consultation {
+  id           String @id @default(uuid())
+  hospitalId   String
+  queueEntryId String @unique
+  patientId    String
+  /// The doctor who ACTUALLY saw the patient - the session's current provider, not
+  /// the booked doctor (docs/PRD.md 8.11). Attributing a substitute's timings to the
+  /// absent doctor would poison both doctors' averages.
+  doctorId     String
+
+  startedAt   DateTime
+  endedAt     DateTime
+  /// Denormalised endedAt - startedAt. The ETA engine averages this on the hot path
+  /// and should not compute an interval per row to do it.
+  durationSec Int
+
+  createdAt DateTime @default(now())
+
+  hospital Hospital   @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  entry    QueueEntry @relation(fields: [queueEntryId], references: [id], onDelete: Restrict)
+  patient  Patient    @relation(fields: [patientId], references: [id], onDelete: Restrict)
+  doctor   Doctor     @relation(fields: [doctorId], references: [id], onDelete: Restrict)
+
+  @@index([hospitalId])
+  /// The ETA blend: this doctor's all-time average and today's running average.
+  @@index([doctorId, endedAt])
+  @@index([patientId])
 }
 
 // ---------------------------------------------------------------------------
@@ -385,4 +586,69 @@ enum OrderingStrategy {
 enum RequeueBehavior {
   END_OF_QUEUE
   NO_REQUEUE
+}
+
+/// docs/PRD.md 7.3. READY is reserved and unreachable in v1 - see the note in
+/// packages/contracts/src/enums/queue.ts. Legal transitions live in the Phase-4
+/// state machine, never here.
+enum QueueEntryStatus {
+  RESERVED
+  CONFIRMED
+  VIRTUAL_WAITING
+  CHECKED_IN
+  READY
+  CALLED
+  IN_CONSULTATION
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+  SKIPPED
+  RESCHEDULED
+}
+
+/// How an entry got into the queue. Immutable provenance. docs/PRD.md 8.5 lists
+/// PRIORITY/EMERGENCY here too; this build keeps them in QueueEntryPriority so an
+/// escalated walk-in is still recorded as a walk-in.
+enum QueueEntryType {
+  ONLINE
+  WALK_IN
+  FOLLOW_UP
+}
+
+/// Audited escalation. docs/PRD.md 8.7.
+enum QueueEntryPriority {
+  NORMAL
+  PRIORITY
+  EMERGENCY
+}
+
+/// Who performed an action. SYSTEM is a background job and the only value whose
+/// actor id is null.
+enum ActorType {
+  PATIENT
+  STAFF
+  DOCTOR
+  SYSTEM
+}
+
+/// The append-only queue timeline. One value per thing that can happen, not one per
+/// endpoint: actorType is what distinguishes a human skip from the grace-expiry job.
+/// Phase 5 adds the join/payment events as an additive ALTER TYPE.
+enum QueueEventType {
+  ENTRY_CHECKED_IN
+  ENTRY_CALLED
+  ENTRY_RECALLED
+  ENTRY_CONSULTATION_STARTED
+  ENTRY_CONSULTATION_COMPLETED
+  ENTRY_SKIPPED
+  ENTRY_NO_SHOW
+  ENTRY_REQUEUED
+  ENTRY_PRIORITY_CHANGED
+  ENTRY_RESCHEDULED
+  WALK_IN_ADDED
+  SESSION_ACTIVATED
+  SESSION_PAUSED
+  SESSION_RESUMED
+  SESSION_ENDED
+  DOCTOR_PRESENCE_CHANGED
 }

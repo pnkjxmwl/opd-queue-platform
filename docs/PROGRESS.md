@@ -1956,6 +1956,460 @@ phone, including the rebuilt UI and the avatar-to-Profile tap.
 
 ---
 
+## 2026-08-31 - Phase 4 Wave 1: the queue contract and schema  ·  P4-CONTRACT-01 + P4-DB-01
+
+**Did:** Froze the Phase-4 contract and applied the schema behind it. `packages/contracts` gains four
+enums beside the existing `QueueEntryStatus` (`QueueEntryType`, `QueueEntryPriority`, `ActorType`,
+`QueueEventType`), a `QueueEntryView` / `QueueCommandResult` read pair, and one request DTO per domain
+command in `src/queue/dto.ts`; `common/error.ts` gains three codes. Prisma gains `QueueEntry`,
+`QueueEvent`, `AuditLog` and `Consultation`, plus two changes to existing tables. Migration
+`20260831120000_phase4_queue_engine` is hand-written, applied with `migrate deploy`, and proved with
+`migrate diff --exit-code` -> **"No difference detected."**
+
+No engine code was written. The state machine and the lock skeleton are Wave 2 and start only after
+this diff is reviewed.
+
+**Decided:**
+
+- **`READY` stays in the enum and stays unreachable.** PRD 7.3 puts it between `CHECKED_IN` and
+  `CALLED`, but nothing in the product distinguishes them - `CALLED` already means "your turn, come
+  in". A meaningful `READY` would have to mean "eligible and next", which is recomputed on every queue
+  change: exactly the stored call order Phases.md forbids. No Phase-4 command writes it. It is kept
+  because the eligibility predicate is `{CHECKED_IN, READY}` precisely as Architecture 7.1 specifies,
+  so a later phase can give it meaning without touching call-order logic - and because removing a value
+  from a shipped contract breaks an installed app. Rejected: deleting it (breaks the contract), and
+  inventing a use for it (a stored order by another name).
+
+- **Escalation is its own field, not a value of `type`.** PRD 8.5 lists `PRIORITY`/`EMERGENCY` inside
+  the entry-type enum. Split here into `QueueEntryType` = `ONLINE|WALK_IN|FOLLOW_UP` (immutable
+  provenance) and `QueueEntryPriority` = `NORMAL|PRIORITY|EMERGENCY` (audited, set by the `priority`
+  command). Why: with one enum, escalating a walk-in stops it being recorded as a walk-in - which
+  silently corrupts the walk-in-vs-online volumes PRD 6.4 asks for and erases the fact that an `ONLINE`
+  entry has a payment behind it (Phase 5 refunds). It is the same shape the schema already uses for
+  substitution, `originalDoctorId` kept beside `currentProviderDoctorId` for the same reason: never
+  overwrite the fact of how something started. **This is a deliberate divergence from a locked PRD rule
+  and is flagged for the Wave 1 review;** reverting it before Wave 2 is one enum and one migration.
+
+- **`priorityAt` instead of `priorityRank`.** Architecture 5.1 lists an integer rank. A timestamp needs
+  no management, orders two emergencies by when they were escalated, and is audit-useful. Order is
+  `priority` desc, then `priorityAt`, then `tokenNumber`, computed on every read.
+
+- **`Patient.accountId` is now nullable.** A walk-in registered at reception has no app account at all
+  (PRD 6.3), and the column was `NOT NULL`, so the walk-in command had nowhere to put the patient.
+  Rejected: a shell `Account` per walk-in (junk rows in the global auth table), attributing the patient
+  to the receptionist's account (a lie in the data that would surface in that account's patient list),
+  and holding a walk-in's name on `QueueEntry` (the same person modelled two different ways depending
+  on how they arrived, and it spreads nullability into `Consultation`). Widening a constraint applies to
+  existing rows without touching them.
+
+- **Pause is `OPDSession.pausedAt`, not a `SessionStatus` value.** A paused session is still `ACTIVE`:
+  it has not ended, and it still accepts joins and check-ins. A new status value would force every
+  existing status check to learn it just to keep behaving the same, and would make "was this session
+  active?" reporting harder. A nullable timestamp also records *when*, and matches
+  `registrationClosedAt` directly above it in the same model.
+
+- **Commands name their entry explicitly** (`entryId` on start/complete/skip/no-show/requeue/priority)
+  rather than inferring "whoever is `CALLED`". A console showing a stale patient then gets a rejection
+  instead of silently completing the wrong person - the failure mode that actually matters in a room
+  with a queue outside the door. `call-next` takes no body, because a client naming the next patient
+  would be deciding call order (Rules 1).
+
+- **Three new error codes, not twelve.** `NO_ELIGIBLE_PATIENT`, `QUEUE_PAUSED`, `POLICY_FORBIDS` - the
+  only cases where a console shows a different message or offers a different action. Everything else
+  (a command against the wrong entry state, or against a session that has ended) is
+  `INVALID_QUEUE_TRANSITION` with the states in `details`.
+
+- **`QueueEvent` and `AuditLog` stay separate tables.** `QueueEvent` is the queue's own timeline, read
+  by patients and by the ETA engine; `AuditLog` is the accountability record and covers actions with no
+  queue at all (config edits, staff invitations). Most queue commands write one of each. Neither has an
+  `updatedAt` column - a column nothing may change should not exist.
+
+- **`Consultation` is written once, at complete**, with `startedAt`/`endedAt`/`durationSec` all non-null,
+  and is attributed to the **current provider**, not the booked doctor. Attributing a substitute's
+  timings to the absent doctor would poison both doctors' ETA averages. `durationSec` is denormalised
+  because the ETA engine averages it on the hot path. Index `(doctorId, endedAt)` is exactly the
+  all-time-average and today's-average blend Architecture 8 describes.
+
+- **Deferred on purpose:** `estWindowStart`/`estWindowEnd` on `QueueEntry` (Architecture 5.1 lists them;
+  they are Phase 7's, and Rules 15.8 says stay in your phase), and the signing scheme behind
+  `checkInCode` (the column exists so the check-in command can accept a code from day one; Phase 6 signs
+  it).
+
+**Surprises:**
+
+1. **`Patient.accountId` being `NOT NULL` blocks walk-ins outright.** Nothing in PRD, Architecture or
+   Phases mentions it, and it is invisible until you try to write the walk-in command in Wave 3 - by
+   which point the schema is merged and four agents are running. Found only by tracing the command
+   against the real schema rather than the model sketch in Architecture 5.1.
+
+2. **Phase 4 will break discovery's `registrationOpen` unless it is widened.** `isRegistrationOpen()` in
+   `discovery.service.ts` requires `status === 'OPEN_FOR_REGISTRATION'`. Phase 4 has no start-session
+   command, so the first `call-next` is what moves a session to `ACTIVE` - and the moment it does, every
+   running clinic reports registration closed, which is wrong: PRD 8.12 closes registration on ETA
+   overrun, the token cap, the cutoff, or a manual close, never on the doctor starting. Wave 3 must
+   widen it to `{OPEN_FOR_REGISTRATION, ACTIVE}`. **This contradicts the Phase-3 note that
+   `registrationOpen` "can only ever get stricter"** - that note was written when nothing could make a
+   session `ACTIVE`, so the rule was only ever half-tested. Recorded here rather than fixed now: it is
+   a Wave 3 change and it belongs with the command that causes it.
+
+3. **PRD 8.9 and Phases P4-BE-05 appear to disagree about end-session** - "remaining become `NO_SHOW`"
+   versus "remaining -> `RESCHEDULED`". They are describing different people. Resolution for the
+   transition table: entries that never arrived (`CONFIRMED`/`VIRTUAL_WAITING`) -> `NO_SHOW` (PRD 8.9);
+   entries that were present and simply never got seen (`CHECKED_IN`) -> `RESCHEDULED` (PRD 8.11, doctor
+   leaves early). Someone who showed up and was not seen is not a no-show, and refunds follow from that
+   distinction.
+
+4. **`prisma migrate reset` is described as "free in dev" in three places in Phases.md** (§A.9, and the
+   Phase 4 and Phase 5 rollback notes) while PROGRESS trap 7 records that it does not work in this
+   environment at all. Docs lose to evidence: all four mentions now say recreate-the-database +
+   `migrate deploy` + seed, and name trap 7.
+
+5. **The shadow database did not exist**, so the `migrate diff` proof from trap 7 failed with `P1003`
+   before it compared anything - and `--exit-code` still reported success through the pipe, which is
+   exactly the kind of false green trap 1 warns about. `CREATE DATABASE opd_shadow` once, then it
+   passes. Worth doing on any fresh machine before trusting that command.
+
+6. **Phases.md put the queue engine at `apps/api/src/queue/`**, which contradicts CLAUDE.md 3,
+   Architecture 4.1 and every module already in the repo. That path was about to go verbatim into four
+   Wave 3 agent prompts. Corrected to `apps/api/src/modules/queue/` in all three places.
+
+7. **`prisma generate` dies with `EPERM: rename ... query_engine-windows.dll.node`** while ANY node
+   process has the Prisma client loaded - and the holders here were **orphaned vitest workers**
+   (`tinypool`) left behind by a previous session, which nothing in the project surfaces. Trap 8's
+   reflex (kill whatever is on :3000) is the wrong instrument and cost a dev server for nothing: the API
+   was not the holder. Find them by loaded module instead -
+   `Get-Process node | ... $_.Modules | Where FileName -like '*query_engine-windows.dll.node'` - kill
+   those, delete the accumulated `.tmp*` files next to the engine, then generate. Also: a background
+   `a | tail && b` runs `b` even when `a` fails, because the pipeline's status is `tail`'s. That is
+   how a failed generate still started a full test run underneath this diagnosis.
+
+**Next:** the Wave 1 diff review. Wave 2 (`P4-BE-01` state machine + `P4-BE-02` lock/audit skeleton) is
+one agent, sequential, and starts only after that review - and the transition table it builds has to
+settle the end-session split in surprise 3 explicitly rather than leaving it to the command files.
+
+---
+
+## 2026-08-31 - Phase 4 Wave 2: the state machine and the lock skeleton  ·  P4-BE-01 + P4-BE-02
+
+**Did:** Built the two things every Wave-3 command depends on, in
+`apps/api/src/modules/queue/`:
+
+- `state-machine.ts` - pure, table-driven, no Prisma and no clock. Two independent
+  machines (entry and session) plus the eligibility predicate, the walk-in initial state,
+  and the paused-command list.
+- `queue.service.ts` - `runCommand()`, which opens the interactive transaction, takes
+  `SELECT ... FOR UPDATE` on the session row, checks tenancy, asks the state machine,
+  runs the command's handler, bumps `OPDSession.version`, and writes the `QueueEvent` +
+  `AuditLog` pair - all in one transaction.
+- `state-machine.test.ts` (16 unit tests) and `test/queue-lock.e2e.test.ts` (7 against a
+  real Postgres). `QueueModule` registered in `app.module.ts`; five queue error classes
+  added to `common/errors.ts`.
+
+No command endpoints. Those are Wave 3, one file each.
+
+**Decided:**
+
+- **The lock lives in `runCommand`, not in the commands.** docs/Phases.md names "one
+  command forgets `FOR UPDATE`" as the phase's defining risk, and the honest fix is not
+  discipline - it is making the mistake unrepresentable. A command is a handler that
+  receives an already-locked session; it never opens a transaction and never takes a
+  lock, so it cannot forget one. Same argument for the version bump: `runCommand` writes
+  it, so no command can omit it.
+
+- **A missing key in the transition table means illegal.** No default branch, no
+  catch-all. `Partial<Record<from, to>>` per command, and `undefined` throws
+  `InvalidQueueTransitionError`. A value mapping to its own key is a legal NO-OP, which
+  is how idempotency is expressed - `CHECK_IN` on `CHECKED_IN` succeeds, because staff
+  double-scan a QR code and a 409 there would be a bug report.
+
+- **Two machines, and presence is not one.** Entry and session are independent
+  (docs/PRD.md 8.10). Doctor presence is deliberately NOT modelled as a machine: any
+  presence may follow any other, because a human walking out of a room is a fact to
+  record, not a transition to validate. Rejecting `PRESENT -> LEFT -> PRESENT` would be
+  the system telling a hospital its own day did not happen.
+
+- **`PRESENCE` is accepted from `SCHEDULED`,** the only command that is. A doctor in the
+  room at 09:45 for a 10:00 clinic is real, and refusing to record it would push staff
+  toward opening the session early just to log presence - which would corrupt the thing
+  that actually matters.
+
+- **The first `call-next` is what makes a session `ACTIVE`.** Phase 4's endpoint list has
+  no start-session command, and the doctor calling the first patient *is* the session
+  starting. A separate "Start session" button whose only job is to be forgotten would
+  leave every real session sitting in `OPEN_FOR_REGISTRATION`.
+
+- **Pause blocks exactly one command: `CALL_NEXT`.** Joins, check-ins and walk-ins
+  continue while the doctor is on a break, because people keep arriving at a reception
+  desk regardless and turning them away is a worse product than a longer queue.
+
+- **`record()` writes the `QueueEvent` and the `AuditLog` together,** from one call, so
+  the timeline and the accountability trail cannot drift apart (docs/Rules.md 1.7). Both
+  are inside the transaction, so a handler that throws leaves neither: an action that did
+  not happen must not be recorded as if it did. There is a test for exactly that.
+
+- **`entryInSession()` instead of a bare `findUnique` by id.** Six Wave-3 commands take
+  an `entryId` from a request body, which is attacker-controlled; fetching by id alone is
+  how one hospital's console reaches another's queue. The helper is on the context so the
+  safe form is also the convenient one.
+
+- **The unit test carries its own copy of both tables.** 21 legal entry transitions and
+  the session-accepts map, written out independently, asserted in both directions across
+  all 13x12 pairs. A test that derived its expectations from the table under test would
+  pass no matter what the table said; this one fails if the machine is widened by a
+  single entry, which is what makes the table a safety property rather than a comment.
+
+- **Realtime has a seam, not an implementation.** `runCommand` collects the events and
+  Phase 7 emits them *after* `$transaction` resolves. Nothing is emitted now, and nothing
+  may ever be emitted from inside the transaction - a rollback that has already told a
+  patient they were called is the ghost-update failure docs/Phases.md Phase 7 warns about.
+
+**Surprises:**
+
+1. **The concurrency test was flaky the first time I wrote it,** and passed anyway - the
+   worst kind. It asserted that command A won the lock race, which held on the first run
+   (867ms) and would have failed roughly whenever B got the connection first. The second
+   run after the fix took 374ms, which is B winning: the race genuinely goes both ways on
+   this machine. Rewritten to assert **non-interleaving** rather than order - the claim
+   actually under test - so it is deterministic whoever wins.
+
+2. **The lock test was then proved to fail without the lock.** Commenting out `FOR UPDATE`
+   and re-running gives `expected 1 to be 2`: both transactions read version 0, the
+   classic lost update. Worth doing once for any test whose whole value is catching
+   something that is currently absent - a green concurrency test that cannot go red is
+   just a slow no-op.
+
+3. **`resetDb` in `test/helpers.ts` does not name the four new tables and does not need
+   to.** `TRUNCATE ... CASCADE` truncates every table with a foreign key into the named
+   ones, which covers `QueueEntry`, `QueueEvent`, `Consultation` and `AuditLog`. Left
+   alone deliberately; if a future queue table has no FK to `Hospital` or `OPDSession` it
+   will silently survive the reset, which is the thing to remember rather than the list.
+
+**Next:** Wave 3 - the twelve commands, one file each under
+`apps/api/src/modules/queue/commands/`, plus `call-order.ts` and the scenario/concurrency
+suite. Two things the commands must inherit rather than reinvent: the discovery
+`registrationOpen` widening recorded in the Wave 1 entry (the first `call-next` now really
+does make sessions `ACTIVE`, so that bug is live the moment `call-next` ships), and
+`ELIGIBLE_TO_CALL` as the single definition of callable.
+
+---
+
+## 2026-08-31 - Phase 4 Wave 3: the twelve commands, call order and the scenario suite  ·  P4-BE-03..06 + P4-TEST-01
+
+**Did:** The engine itself. Under `apps/api/src/modules/queue/`:
+
+- `commands/` - one file per command: `check-in`, `call-next`, `start-consultation`,
+  `complete-consultation`, `skip`, `no-show`, `requeue`, `pause` (+`resume`),
+  `end-session`, `presence`, `walk-in`, `priority`, plus `result.ts` for the shared
+  response shape.
+- `call-order.ts` - the computed call order, token allocation and label formatting.
+- `queue.controller.ts` - twelve thin POST routes.
+- `test/queue-scenarios.e2e.test.ts` - 12 tests including the four docs/Phases.md names
+  verbatim and the phase's full-session integration checkpoint.
+
+Plus the two Phase-3 hooks: `discovery.snapshots()` now returns real numbers, and
+`isRegistrationOpen` accepts ACTIVE. A second migration adds `QueueEntry.requeuedAt`.
+
+**Decided:**
+
+- **`TenantGuard` learned `:sessionId`.** It keyed only off `:hospitalId`, and the queue
+  commands are `POST /sessions/:.../<command>` with no hospital segment - so all twelve
+  endpoints would have resolved NO tenant, and `@Roles` would have rejected every one of
+  them as "route requires a hospital context". The guard now resolves the hospital from
+  the SESSION ROW when a `:sessionId` param is present. The client still never names a
+  hospital; it names a session, and the server decides whose it is. An unknown session id
+  returns the same TenantMismatch as an unknown hospital, so this cannot be used to
+  enumerate session ids across the platform.
+
+- **The parameter name is the opt-in, exactly as in trap 12.** Patient-facing discovery
+  keeps `GET /sessions/:id` precisely because it must NOT be tenant-scoped; the queue
+  uses `:sessionId` because it must. Renaming either silently flips its security
+  posture, which is now noted in both files.
+
+- **A command is a function that calls `runCommand`, not a method on a service.** Twelve
+  files, no shared file to conflict over, and each one reads top-to-bottom as the thing
+  it does. `result.ts` holds the one response shape so twelve commands cannot answer the
+  same question twelve slightly different ways.
+
+- **`call-next` refuses while anyone is CALLED or IN_CONSULTATION.** The session lock
+  alone stops two callers seeing stale state, but it does not stop a doctor
+  double-clicking and legitimately calling two people. This does. It is also what makes
+  the concurrency test's outcome unambiguous: one succeeds, one is rejected, never two
+  patients called.
+
+- **The policy reaches commands through `ctx.policy`,** loaded once per command from
+  ConfigModule's `QueuePolicyService` (never its table - docs/CLAUDE.md 3), and OUTSIDE
+  the transaction, because it is configuration rather than queue state and has no
+  business lengthening a transaction other consoles are blocked behind.
+
+- **`snapshots()` does two queries per PAGE.** One `groupBy` over `QueueEntry.status`
+  keyed by sessionId for the counts, one small lookup for the token being served (at most
+  one row per session, because `call-next` refuses to call while someone is with the
+  doctor). Never one query per card - that is the N+1 docs/Phases.md names as this
+  module's standing risk.
+
+- **`isRegistrationOpen` now accepts ACTIVE, which made it MORE permissive** - the one
+  direction the Phase-3 note said it could never move. That note was written when nothing
+  could make a session ACTIVE. The first `call-next` now can, and docs/PRD.md 8.12 closes
+  registration on ETA overrun, the cap, the cutoff or a manual close - never because the
+  doctor started seeing people. Left alone, every clinic would have reported itself
+  closed the moment it opened.
+
+- **`end-session` skips RESERVED rather than cancelling it.** The state machine maps
+  RESERVED to CANCELLED correctly, but nothing creates a RESERVED entry until Phase 5's
+  pre-payment hold, and cancelling one needs the `ENTRY_CANCELLED` event and the refund
+  path that arrive with it. Resolving reservations belongs to the phase that can finish
+  the job.
+
+**Surprises:**
+
+1. **`requeue` was wrong, and my own test asserted the wrong behaviour with a comment
+   explaining why it was fine.** It returned a skipped patient to CHECKED_IN with their
+   original token, so token order could put them straight back at the FRONT - the doctor
+   would call the absent patient again immediately, forever. docs/PRD.md 8.8 and
+   `RequeueBehavior.END_OF_QUEUE` both say "move to end", and in a model where the order
+   is computed and the token is immutable there is nothing left to change, so nothing
+   moved. Fixed with a `requeuedAt` column: requeued entries sort after everyone who has
+   not been requeued, then among themselves by when they came back. Two tests now pin it.
+   **The dangerous part was not the bug, it was that the test rationalised it** - a
+   comment arguing that surprising behaviour is correct is worth more suspicion than a
+   failing assertion.
+
+2. **`QueuePolicyService.ensure()` had a live upsert race, inherited from Phase 2.** Two
+   commands hitting a hospital whose policy row did not exist yet both ran the INSERT and
+   one died on the unique constraint, taking a walk-in registration down with it. It only
+   surfaced because the queue engine calls `ensure` on every single command. It passed in
+   isolation and failed in the full-file run - intermittent, which is how it would have
+   reached production. Now read-first with the constraint violation caught and re-read,
+   which also takes a write off the hot path forever.
+
+3. **`nulls: 'first'` on `requeuedAt` is load-bearing.** Postgres puts nulls LAST on ASC,
+   which would have inverted the rule exactly - every requeued patient jumping to the
+   front instead of the back. The null-ness of that column IS the rule, so the ordering
+   option is not decoration.
+
+4. **Trap 13 again, in a new disguise.** A `groupBy` inside `$transaction([...])` loses
+   its row typing and `_count._all` stops existing, same as a computed `by` key. The fix
+   was to stop using the array form: two plain reads via `Promise.all`. Consistency
+   between them is not worth an interactive transaction on the hottest read path - the
+   two queries can land either side of a call-next, and a card that shows a token whose
+   count moved a moment ago is a projection that was already stale on arrival.
+
+5. **Prisma requires `orderBy` on a multi-field `groupBy`,** which is unrelated to any
+   result the code uses. It is there to satisfy the overload, and says so.
+
+**Next:** Phase 4's integration checkpoint is green, so the phase box can be ticked. Phase
+5 (join + payment) is the next phase, and it inherits three things from here: reservations
+must be resolved at session end (see the RESERVED note above), the `join` path must create
+its entry THROUGH a queue command rather than writing `QueueEntry` directly, and
+`registrationOpen` still needs the three policy limits ANDed in.
+
+---
+
+## 2026-08-31 - Phase 4 close-out: the LEFT guard, a device walkthrough, and doc sync
+
+**Did:** Walked the whole engine on a real phone with the user driving, added one rule that
+walkthrough exposed, and synced the two design docs the build had diverged from.
+
+- **`call-next` is now refused while doctor presence is LEFT** - new `DOCTOR_HAS_LEFT`
+  error code, guarded in `state-machine.ts` beside the pause rule, 2 unit tests + 1
+  scenario test.
+- `docs/PRD.md` 8.5, 8.8, 8.9 and 8.10 updated to match what was actually built.
+- `docs/Architecture.md` 5.1, 6.4, 7.1 and 11 updated likewise.
+- Final verification: `turbo run lint typecheck test build --force` -> **16/16, 0 cached,
+  141 tests**.
+
+**Decided:**
+
+- **Only LEFT blocks, and only `call-next`.** NOT_PRESENT and ON_BREAK deliberately do not:
+  docs/PRD.md 8.11 says a late doctor leaves the session and queue unaffected, and
+  reception routinely calls the next patient in as the doctor walks back to the room.
+  LEFT means gone for the day, which 8.11 says should end the session - so continuing to
+  call patients into an empty room is a step staff forgot, not a workflow to support.
+  `end`, `presence`, `check-in` and `walk-in` all still work while LEFT, because ending
+  the session is exactly what should happen next.
+
+- **A distinct error code rather than reusing INVALID_QUEUE_TRANSITION.** The rule in
+  `common/error.ts` is that a code exists only where the client shows a different message
+  or offers a different action, and this one does: "resume the queue" and "end the session
+  or mark the doctor present" are different fixes. `Cannot CALL_NEXT from ACTIVE` would
+  also have been an actively misleading message, since the session status is fine.
+
+- **Presence is still not a state machine.** Nothing rejects a presence CHANGE - any
+  presence may follow any other. This is a guard on one command, the same shape as the
+  pause rule, and the distinction matters: the system must never tell a hospital that its
+  own day did not happen.
+
+**Surprises:**
+
+1. **The user found the gap, not the tests.** Mid-walkthrough they asked "the doctor
+   hasn't arrived yet though, right?" - and they were right: presence was NOT_PRESENT and
+   patients were being called. That IS correct for NOT_PRESENT, but following the question
+   through showed nothing stopped it at LEFT either. **Every automated test passed both
+   before and after this change**; only somebody looking at the screen and asking an
+   obvious question surfaced it. That is the second time on this project a human found
+   what the suite could not (four defects in Phase 3), and it is the argument for keeping
+   a walkthrough in every phase even when the phase ships no UI.
+
+2. **A new error code compiles in tests and fails the build.** vitest resolves
+   `@opd/contracts` through its SOURCE (swc), while `nest build` resolves its BUILT
+   output - so adding `DOCTOR_HAS_LEFT` gave 31 passing tests and then
+   `TS2345: not assignable to parameter of type ...`. `pnpm exec turbo run build
+   --filter=@opd/api...` builds the contracts package first and fixes it. Worth knowing
+   before assuming a green test run means the API will start.
+
+3. **I truncated the dev database while the user was mid-walkthrough on their phone.**
+   Running the e2e suite calls `resetDb`, which TRUNCATEs everything including Account -
+   this is trap 11, written down after it bit a previous session, and I walked into it
+   anyway. Their login and the whole demo queue vanished between two steps. Re-seeding
+   then failed too, because the scenario suite's last test leaves its fixture hospital
+   behind and the seed refuses to run against a database holding hospitals it did not
+   create. **Do not run the test suite while anyone is using the dev environment** - and
+   if you must, expect to TRUNCATE the leftovers and re-seed before anything works again.
+
+**Next:** Phase 4 is complete and every box in docs/Phases.md is ticked. The one thing the
+walkthrough made obvious is that the patient screen does not refresh itself - you leave and
+re-enter to see a change. That is the Phase-3 known gap ("no pull-to-refresh on any mobile
+list"), and the real fix is Phase 7's realtime; a `refetchInterval` on the session screen
+would close the annoyance now without pulling Phase 7 forward, because docs/Rules.md 8
+already requires clients to reconcile against snapshots.
+
+---
+
+## 2026-08-31 - The session screen refreshes itself  ·  closes a Phase-3 gap, not Phase 7
+
+**Did:** `useApi` takes an optional `refetchMs`; the session detail screen passes 10s and
+gains pull-to-refresh. Nothing else polls. Mobile lint + typecheck green.
+
+**Decided:**
+
+- **One screen polls, not all of them.** A session's queue moves on its own; a hospital's
+  address does not. Discovery has no caching yet (deliberate, Phase 9), so a timer on every
+  list would multiply load on an uncached read path for screens whose answers never change.
+
+- **Ten seconds**, guessed at the boundary between "feels live" and "hammers the API". It is
+  a constant with a name, so it is one edit if a pilot says otherwise.
+
+- **Pull-to-refresh as well as the timer.** The timer covers the ordinary case; the gesture
+  is what a patient will try first regardless, and waiting up to ten seconds after
+  deliberately asking for an update reads as broken.
+
+- **`refetchIntervalInBackground: false`** stated explicitly even though it is the default:
+  a phone in a pocket must not poll a hospital API for a screen nobody is looking at.
+
+- **This is not Phase 7 pulled forward and Phase 7 does not undo it.** docs/Rules.md 8
+  already requires clients to reconcile against a REST snapshot rather than replay events;
+  this is that snapshot path running on a timer until there is a socket to trigger it
+  instead. Phase 7 keeps the fetch and drops (or slows) the interval.
+
+**Surprises:** none - but worth noting the gap was reported by a human watching a phone,
+saying "the screen I am on should update where I am". It was already written down as a
+Phase-3 known gap and had sat there unactioned because nothing yet CHANGED while you
+watched. Phase 4 is what made it visible.
+
+**Next:** unchanged - Phase 5, join + payment.
+
+---
+
 # 📌 HANDOFF (Phases 0–1) — SUPERSEDED
 
 > **Superseded by 📌 HANDOFF v2 at the bottom of this file.** Kept, not deleted: its
@@ -2341,6 +2795,36 @@ Added this session:
 18. **The seed's `unique(originalDoctorId, date, scheduledStart)` is easy to trip.** Generated sessions
     always start on an exact minute; the seed's live-now session sets seconds to 30 to stay clear of it.
 
+Added by Phase 4 Wave 1:
+
+19. **The `migrate diff` proof in trap 7 needs a shadow database that does not exist by default.**
+    It fails with `P1003 Database opd_shadow does not exist` - and because the command is usually
+    piped, `--exit-code` reports the PIPE's status, so it looks like it passed. Run
+    `docker compose exec -T postgres psql -U opd -d postgres -c "CREATE DATABASE opd_shadow;"` once per
+    machine, and read the words "No difference detected" rather than trusting the exit code.
+
+20. **`prisma generate` dies with `EPERM: rename ... query_engine-windows.dll.node`** while any node
+    process has the Prisma client loaded. The usual culprit is **orphaned vitest workers** (`tinypool`)
+    from an earlier session, which nothing surfaces. Trap 8's reflex - kill whatever holds :3000 - is
+    the wrong instrument; find the real holders by loaded module:
+    `Get-Process node | ... $_.Modules | Where FileName -like '*query_engine-windows.dll.node'`. Kill
+    those, delete the leftover `.tmp*` files beside the engine, then generate.
+
+21. **A backgrounded `a | tail && b` runs `b` even when `a` fails**, because a pipeline's status is the
+    LAST command's. A failed `prisma generate` still launched a full `turbo` test run underneath, whose
+    workers then held the very DLL the generate needed.
+
+22. **A new value in `packages/contracts` compiles in tests and FAILS the build.** vitest resolves the
+    contracts package through its SOURCE (swc); `nest build` resolves its BUILT output. Adding an error
+    code gave a fully green test run and then `TS2345: not assignable`. Build in dependency order:
+    `pnpm exec turbo run build --filter=@opd/api...`.
+
+23. **Never run the test suite while anyone is using the dev environment.** `resetDb` TRUNCATEs every
+    table including `Account` - this is trap 11, and it still cost a live phone walkthrough mid-demo.
+    Recovery is worse than it sounds: the scenario suite leaves its own fixture hospital behind, and
+    `pnpm seed` then REFUSES to run, saying the database holds a hospital it did not create. TRUNCATE
+    every table, then seed.
+
 ## 4. Decisions that constrain future work
 
 Phases 0–2 decisions still hold (read HANDOFF v2 §4). Added by Phase 3:
@@ -2387,7 +2871,9 @@ Mobile shell (rebuilt 2026-08-31):
 - **No password-reset / forgot-password flow anywhere.** Not in the app, not in the console, not in any
   phase plan. Argon2id is one-way, so a forgotten password means a new account. Belongs on the Phase 9
   hardening list.
-- **No pull-to-refresh on any mobile list** - leaving a screen and re-entering it is what refetches.
+- **No pull-to-refresh on any mobile LIST** - leaving a screen and re-entering it is what
+  refetches. The session DETAIL screen is now the exception: it polls every 10s and pulls to
+  refresh, because it is the only screen whose numbers move on their own (Phase 4).
 - **Seed artifact:** the live-now session is anchored to the clock, so seeding within an hour of IST
   midnight produces a card dated today that starts late the previous evening. Cosmetic, dev-only.
 - **No caching on discovery**, deliberately — Phase 9, with explicit invalidation.

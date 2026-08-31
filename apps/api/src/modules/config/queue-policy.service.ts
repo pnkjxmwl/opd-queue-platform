@@ -8,6 +8,7 @@ import {
   type UpdateQueuePolicyRequest,
 } from '@opd/contracts';
 import { PrismaService } from '../../prisma/prisma.service';
+import { isUniqueViolation } from '../../common/prisma-errors';
 
 type PolicyRow = {
   id: string;
@@ -76,14 +77,36 @@ export class QueuePolicyService {
    * Return the hospital's policy, creating it from the contract defaults the first
    * time. A read that writes once is the cheapest way to guarantee the engine never
    * meets a missing policy; the alternative is every caller remembering to seed one.
+   *
+   * **Read first, and tolerate losing the create race.** This was a plain `upsert`
+   * until the Phase-4 queue engine started calling it on every command: two staff
+   * acting at the same instant on a hospital whose row did not exist yet both ran
+   * the INSERT, and one died on `hospitalId`'s unique constraint - taking a walk-in
+   * registration down with it. Prisma's upsert is not atomic against a concurrent
+   * insert here, so the constraint violation is caught and re-read instead.
+   *
+   * The read-first path also keeps a WRITE off the hot path: after the first call
+   * for a hospital, this is a single indexed select rather than an upsert on every
+   * queue command for the life of the deployment.
    */
   async ensure(hospitalId: string): Promise<QueuePolicy> {
-    const row = await this.prisma.queuePolicy.upsert({
-      where: { hospitalId },
-      update: {},
-      create: { hospitalId, ...columnsFrom(DEFAULT_QUEUE_POLICY) },
-    });
-    return toDto(row as PolicyRow);
+    const existing = await this.prisma.queuePolicy.findUnique({ where: { hospitalId } });
+    if (existing !== null) {
+      return toDto(existing as PolicyRow);
+    }
+
+    try {
+      const created = await this.prisma.queuePolicy.create({
+        data: { hospitalId, ...columnsFrom(DEFAULT_QUEUE_POLICY) },
+      });
+      return toDto(created as PolicyRow);
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      // Someone else created it between the read and the write. Their row is just
+      // as valid as the one we were about to write - both are the defaults.
+      const raced = await this.prisma.queuePolicy.findUniqueOrThrow({ where: { hospitalId } });
+      return toDto(raced as PolicyRow);
+    }
   }
 
   /** PUT is a full replace: every field of the request defaults, so `{}` resets. */

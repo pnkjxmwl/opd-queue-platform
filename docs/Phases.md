@@ -27,7 +27,7 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 | ☑ | 1 — Identity & Tenancy | M | 3–4 | 3 | `phase-1-done` |
 | ☑ | 2 — Hospital Config + Admin + Seed | L | 5–7 | 4 | `phase-2-done` |
 | ☑ | 3 — Discovery | M | 3–4 | 4 | `phase-3-done` |
-| ☐ | 4 — Queue Engine | XL | 8–12 | 4 (with care) | `phase-4-done` |
+| ☑ | 4 — Queue Engine | XL | 8–12 | 4 (with care) | `phase-4-done` |
 | ☐ | 5 — Join + Payment → Token | L | 5–7 | 3 | `phase-5-done` |
 | ☐ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
 | ☐ | 7 — Realtime + ETA | L | 5–7 | 4 | `phase-7-done` |
@@ -169,7 +169,7 @@ BEFORE YOU REPORT DONE:
 
 ### A.8.2 Rules for launching
 
-- **One agent per directory.** Two agents inside `apps/api/src/queue` will clobber each other. Split by
+- **One agent per directory.** Two agents inside `apps/api/src/modules/queue` will clobber each other. Split by
   module, or by *command-per-file*, or run them sequentially.
 - **Worktree isolation** for every Wave-2+ agent: launch with `isolation: "worktree"` so each gets its own
   checkout. Branch naming: `phaseN/<stream>-<short-desc>`.
@@ -190,7 +190,7 @@ Things will go wrong. These conventions make "go wrong" cheap:
 - **Tag every completed phase**: `git tag phase-N-done`. That is your known-good floor.
 - **A bad agent branch is disposable.** Delete the worktree and re-cut from the merged Wave 1 — do not try
   to salvage a confused branch. Re-running an agent with a sharper prompt beats untangling its output.
-- **Never edit a merged migration.** Add a new one. In dev, `prisma migrate reset && pnpm seed` is free —
+- **Never edit a merged migration.** Add a new one. **`prisma migrate reset` and `migrate dev` do not work in this environment at all** (docs/PROGRESS.md trap 7: the permission classifier blocks one and neither gets a TTY). Hand-write `migration.sql`, apply it with `migrate deploy`, and prove it with `migrate diff --exit-code` against the shadow database. To start clean, drop and recreate the database and re-run `migrate deploy` — free in dev,
   treat that freedom as a Phase 0–5 privilege only.
 - **Append-only tables are never deleted from** — `QueueEvent`, `AuditLog`, `Payment`, `Refund`. Correct with
   a compensating row, never a `DELETE`.
@@ -511,7 +511,7 @@ Owns `packages/contracts` + `apps/api/prisma`.
 
 ### ↩️ If it goes wrong
 
-Config data is fully regenerable — `prisma migrate reset && pnpm seed` costs nothing. **This is the last phase
+Config data is fully regenerable — recreating the database and re-running `migrate deploy && pnpm seed` costs nothing (`migrate reset` itself does not work here — trap 7). **This is the last phase
 where a wide schema change is cheap**, because Phase 4 onward writes append-only operational history you
 cannot casually reset. Get the model right here.
 
@@ -607,7 +607,7 @@ Build the engine that actually runs the queue (Phase 4) — being built in paral
 **Goal:** A correct, concurrency-safe queue drivable entirely via API/tests.
 **Prerequisites:** Phase 2 (sessions + policy).
 **Size:** `XL` · ~8–12 focused days · up to 4 parallel agents
-**Status:** ☐ not started → tick in §0 when the integration checkpoint passes
+**Status:** ☑ complete — integration checkpoint passed 2026-08-31 (138 tests, 16/16 uncached)
 
 ### 📦 What you'll have after this phase
 The brain of the product. A correct, concurrency-safe queue that can be driven entirely through API
@@ -644,15 +644,15 @@ POST /sessions/:id/requeue
 
 | ID | Task | Stream | Wave | Deps | Test / Done-when |
 |---|---|---|---|---|---|
-| ☐ P4-CONTRACT-01 | Queue DTOs, enums, command I/O, error codes | CONTRACT | 1 | — | compiles |
-| ☐ P4-DB-01 | QueueEntry, QueueEvent(append-only), AuditLog, Consultation; unique(token,session) | DB | 1 | — | migration applies; unique enforced |
-| ☐ P4-BE-01 | **State machine** (states, transitions, guards) — pure | BE | 2 | Wave 1 | **table-driven: every legal transition ok, illegal rejected** |
-| ☐ P4-BE-02 | QueueService skeleton: `$transaction` + `SELECT … FOR UPDATE` + audit/event helper | BE | 2 | P4-BE-01 | lock serializes two txns; event+audit atomic |
-| ☐ P4-BE-03 | Commands A: checkIn, callNext, start/complete (+ token gen) | BE | 3 | BE-02 | token unique; complete writes Consultation |
-| ☐ P4-BE-04 | Commands B: skip, noShow, requeue | BE | 3 | BE-02 | called→absent→recall→skip→move-to-end |
-| ☐ P4-BE-05 | Commands C: pause, resume, endSession, presence | BE | 3 | BE-02 | pause blocks callNext; end → remaining RESCHEDULED |
-| ☐ P4-BE-06 | Commands D: walkIn, priority + eligibility/call-order | BE | 3 | BE-02 | walk-in auto-checked-in; emergency first; **doctor never idles** |
-| ☐ P4-TEST-01 | **Scenario + concurrency suite** | TEST | 3 | BE-03..06 | 2× racing callNext = no dup; 10-reserve-3-arrive; doctor late/early/substitution |
+| ☑ P4-CONTRACT-01 | Queue DTOs, enums, command I/O, error codes | CONTRACT | 1 | — | compiles |
+| ☑ P4-DB-01 | QueueEntry, QueueEvent(append-only), AuditLog, Consultation; unique(token,session) | DB | 1 | — | migration applies; unique enforced |
+| ☑ P4-BE-01 | **State machine** (states, transitions, guards) — pure | BE | 2 | Wave 1 | **table-driven: every legal transition ok, illegal rejected** |
+| ☑ P4-BE-02 | QueueService skeleton: `$transaction` + `SELECT … FOR UPDATE` + audit/event helper | BE | 2 | P4-BE-01 | lock serializes two txns; event+audit atomic |
+| ☑ P4-BE-03 | Commands A: checkIn, callNext, start/complete (+ token gen) | BE | 3 | BE-02 | token unique; complete writes Consultation |
+| ☑ P4-BE-04 | Commands B: skip, noShow, requeue | BE | 3 | BE-02 | called→absent→recall→skip→move-to-end |
+| ☑ P4-BE-05 | Commands C: pause, resume, endSession, presence | BE | 3 | BE-02 | pause blocks callNext; end → remaining RESCHEDULED |
+| ☑ P4-BE-06 | Commands D: walkIn, priority + eligibility/call-order | BE | 3 | BE-02 | walk-in auto-checked-in; emergency first; **doctor never idles** |
+| ☑ P4-TEST-01 | **Scenario + concurrency suite** | TEST | 3 | BE-03..06 | 2× racing callNext = no dup; 10-reserve-3-arrive; doctor late/early/substitution |
 
 **Parallelization:** Wave 3 → commands split by group (BE-03 ∥ BE-04 ∥ BE-05 ∥ BE-06), safe **only** with **command-per-file**.
 **Integration checkpoint:** scripted full session (check-in→call→consult→complete + no-show + walk-in) passes; P4-TEST-01 green.
@@ -668,7 +668,7 @@ Queue DTOs, every status/type enum, command I/O, `QueueEvent` types, error codes
 **Wave 2 — one agent, sequential, no parallelism:**
 ```text
 You are the BE agent for P4-BE-01 + P4-BE-02 — the core of the product.
-OWNS: apps/api/src/queue/{state-machine,queue.service}
+OWNS: apps/api/src/modules/queue/{state-machine,queue.service}
 
 TASK: 1) A PURE, TABLE-DRIVEN state machine: an explicit transition table
          (fromState x command -> toState + guards). No transition logic
@@ -686,7 +686,7 @@ DONE WHEN: a table-driven test asserts every legal transition succeeds and every
 ```
 
 **Wave 3 — four agents, but ONLY with command-per-file.** Each command lives in its own file under
-`apps/api/src/queue/commands/`. If you are not confident the agents will respect that, **run this wave
+`apps/api/src/modules/queue/commands/`. If you are not confident the agents will respect that, **run this wave
 sequentially** — a merge conflict in the queue engine costs more than the parallelism saves.
 
 | Agent | Subtask | Owns (files) | Brief |
@@ -727,7 +727,7 @@ sequentially** — a merge conflict in the queue engine costs more than the para
 **Do not patch a wrong state machine — redo it.** Everything from Phase 5 onward is built on this; a subtle
 ordering or locking bug here surfaces months later as "the hospital's queue went wrong", with no clean fix.
 Tag before and after this phase. `QueueEvent` and `AuditLog` are append-only: correct mistakes with a
-compensating event, never a `DELETE`. In dev, `migrate reset` is still free — use it freely while you can.
+compensating event, never a `DELETE`. In dev the database is still disposable (recreate + `migrate deploy` + seed; `migrate reset` itself does not work here — trap 7) — use that freedom while you can.
 
 ### ➡️ Next
 Let real patients join and pay to get into this queue (Phase 5).
@@ -821,7 +821,7 @@ Give BE-1 this line verbatim:
 ### ↩️ If it goes wrong
 
 Payment tables are financial history: **append-only, never deleted from.** Correct with a compensating row.
-In dev, `migrate reset` is still available. Once pointed at a real Razorpay account, reconcile through the
+In dev the database is still disposable (recreate + `migrate deploy` + seed; not `migrate reset` — trap 7). Once pointed at a real Razorpay account, reconcile through the
 Razorpay dashboard rather than editing rows. If the join/token flow is wrong, fix it *before* Phase 6 — the
 consoles assume real entries exist and behave correctly.
 
