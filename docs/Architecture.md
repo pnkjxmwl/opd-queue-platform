@@ -172,7 +172,7 @@ QueueEntry         id, hospitalId, sessionId, patientId, accountId?,
                    priority(NORMAL|PRIORITY|EMERGENCY), priorityAt,   # audited escalation
                    status(RESERVED|CONFIRMED|VIRTUAL_WAITING|CHECKED_IN|READY|CALLED|
                           IN_CONSULTATION|COMPLETED|CANCELLED|NO_SHOW|SKIPPED|RESCHEDULED),
-                   checkInCode(signed), recallCount, requeuedAt,
+                   checkInCode(random ref; served SIGNED, see below), recallCount, requeuedAt,
                    joinedAt, checkedInAt, calledAt, consultStartedAt, completedAt
                    # As built in Phase 4, three deliberate changes from the sketch above:
                    #  - escalation is its own field, so `type` records how the entry
@@ -293,7 +293,25 @@ POST /sessions/:sessionId/presence     body: { presence }
 POST /sessions/:sessionId/walk-in      body: { patientId | name, dob?, gender? }
 POST /sessions/:sessionId/priority     body: { entryId, priority, reason }  (audited)
 POST /sessions/:sessionId/requeue      body: { entryId }
+
+GET  /sessions/:sessionId/queue        -> Paginated<QueueEntryView>, in CALL_ORDER   (Phase 6)
+POST /sessions/:sessionId/cancel-entry body: { entryId, cause, reason }              (Phase 6)
 ```
+
+**Phase 6 added the two at the bottom**, and they are the only reads/writes here that were not in the
+original plan.
+
+`GET .../queue` is the roster both consoles render. It is a READ and takes **no session lock** —
+routing it through the command skeleton would grab the lock on every console re-render and serialise
+reads against the commands they are watching. It returns entries in `CALL_ORDER`, the same comparator
+`call-next` uses, so a console never sorts and therefore can never disagree with the engine about who
+is next.
+
+`POST .../cancel-entry` is reception withdrawing somebody else's booking (PRD 6.3). `cause` is
+`PATIENT_REQUEST` (the app's own time-based refund tier) or `HOSPITAL` (100%), because one fixed rule
+is wrong half the time — see PROGRESS.md. It is served by the **payments** module, not the queue one:
+it raises a refund, and `QueueModule` cannot import `PaymentsModule` since the dependency already
+runs the other way.
 
 ### 6.5 Admin config (RBAC: ADMIN)
 ```
@@ -460,6 +478,26 @@ POST /webhooks/razorpay  (payment.captured)
 - HTTPS/WSS everywhere; secrets in platform env vars (never in the repo).
 - Tenant isolation enforced server-side (§5.2); IDOR checks on every by-id fetch.
 - Rate limiting on auth + join endpoints; input validated by Zod DTOs.
+
+**The check-in QR (as built, Phase 6).** `QueueEntry.checkInCode` stores 24 random bytes, minted once
+when payment is confirmed and never rotated. The API never serves that reference bare — it serves
+
+```
+v1.<reference>.<hmac-sha256(CHECKIN_SECRET, "v1.<reference>") truncated to 132 bits>
+```
+
+signed on every read (`common/checkin-code.ts`) and verified **before any database access**, so a
+forged or garbage scan costs one hash. Three properties are deliberate:
+
+- **No entry id, no PII, nothing enumerable in the payload.** The random reference also keeps
+  `unique(checkInCode)` as the lookup the check-in command has used since Phase 4.
+- **The signature is computed, never stored.** Rotating `CHECKIN_SECRET` invalidates every QR at
+  once — what a compromised secret needs — while the stored reference never changes, so a token a
+  patient screenshotted last week still scans.
+- **An unsigned reference is refused.** There is no fallback that retries an unverified payload as a
+  raw code; that fallback is how a signing scheme becomes decoration.
+
+`CHECKIN_SECRET` is required at boot and is its own secret, not a reused JWT one.
 - QR check-in code is a **signed, opaque reference** (no PII); validated server-side.
 - **Audit + access logs** from day one; India-region hosting for data residency (DPDP).
 - Passwords hashed (Argon2id). PII treated as sensitive; least-privilege access.

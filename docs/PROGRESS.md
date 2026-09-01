@@ -3796,9 +3796,9 @@ config**. Neither would ever have shown up on a screen.
 
 ---
 
-# 📌 HANDOFF v4 — read this first in a new session
+# 📌 HANDOFF v4 — SUPERSEDED by HANDOFF v5 at the very bottom
 
-*Supersedes v2 and v3. Those are history; this is the brief.*
+*History. Read HANDOFF v5 instead.*
 
 ## 1. Where the project stands
 
@@ -3955,6 +3955,704 @@ Everything in HANDOFF v3 §5 still applies. Added by Phase 5:
 > - **Append to `docs/PROGRESS.md` as you go** — what you did, what you decided, **why**, and what you
 >   rejected. Failures and surprises are the most valuable entries. Append-only. Tick the ☐ in
 >   `docs/Phases.md`, and **only when the done-when genuinely passes** — mobile boxes need a device.
+> - **Never commit, branch, push or tag unless I ask.** When I do: branch → PR → squash merge → and
+>   **tag after the merge**.
+> - If the build must diverge from `PRD.md` / `Architecture.md` / `Design.md`, **say so and update
+>   that doc**.
+>
+> **Budget a device walkthrough into anything touching a screen.** Give me exact steps with expected
+> values, never "check it works".
+
+---
+
+## 2026-09-01 - Phase 6 Wave 1: the signed QR, the roster nobody had written, and staff cancel
+
+`P6-CONTRACT-01` and `P6-BE-01` are done. **212 tests** (was 180),
+`turbo run lint typecheck test build --force` -> 16/16, 0 cached.
+
+### Three gaps in the phase plan, found by reading before writing
+
+**1. There was no way to READ the queue.** `QueueEntryView` has existed since Phase 4 and NOTHING
+returned a list of them - every one of the twelve command endpoints returns a single entry.
+`docs/Phases.md` Phase 6 states "No new business endpoints - the consoles call the Phase-4 command
+endpoints", and that is simply wrong: a doctor console that cannot read the queue cannot exist.
+
+Added `GET /sessions/:sessionId/queue` -> `Paginated<QueueEntryView>` in `CALL_ORDER`. It is a method
+on `QueueService` rather than a file under `commands/`, and takes **no lock**: routing a read through
+`runCommand` would grab the session lock every time a console re-rendered and serialise reads against
+the very commands they are watching. `docs/Phases.md` and `docs/Architecture.md` 6.4 updated.
+
+**2. The seed had no DOCTOR.** `admin@apollo.test`, `reception@apollo.test`, `admin@fortis.test` -
+and no `Doctor.accountId` set on anyone. The doctor console would have been unopenable on a freshly
+seeded database. Added `doctor@apollo.test`, linked to Dr. Anita Sharma.
+
+That exposed a second hole: `MeResponse.memberships` had no way to say WHICH doctor an account is.
+The membership authorises ("this account may act as a doctor here"); `HospitalMembership.doctorId`
+now says who, so the console can show a doctor their own sessions instead of the whole hospital's.
+Matched by hospital, so a doctor at one hospital who is also reception at another does not appear to
+be a doctor at both.
+
+**3. There was no staff-facing cancel.** `POST /queue-entries/:id/cancel` is scoped to the caller's
+own ACCOUNT. `docs/PRD.md` 6.3 asks for "Assist: cancellations", and reception had nothing.
+
+### The signing scheme, and the two things it deliberately did NOT do
+
+`checkInCode` was 24 random bytes: opaque, unguessable, unsigned. The new scheme wraps it rather than
+replacing it:
+
+    v1.<stored reference>.<hmac over "v1.<reference>">
+
+signed on every read in `my-entry.ts`, verified in `check-in.ts` **before any database access**.
+
+- **The entry id is NOT in the payload.** `docs/Phases.md` asks for "no raw entry id that could be
+  enumerated or forged", and putting one there would also have thrown away the `unique(checkInCode)`
+  index the command has used since Phase 4.
+- **The signature is NOT stored.** Signing on read means rotating `CHECKIN_SECRET` invalidates every
+  QR at once - what a compromised secret actually needs - while the stored reference never changes,
+  so a token screenshotted last week still scans. `confirm-payment.ts` already promised that
+  ("issued once and never rotated - the patient may already have screenshotted it") and this keeps
+  the promise.
+- **The mobile app needed no change at all.** `visit/[id].tsx` renders `entry.checkInCode` verbatim
+  into the QR, so it picked up the signature for free.
+
+`CHECKIN_SECRET` is **required**, not defaulted. A deployment that quietly fell back to unsigned
+would look completely healthy and check anybody in. It broke `razorpay.client.test.ts`, which builds
+a minimal env - which is the failure working as intended.
+
+There is deliberately **no fallback that retries an unverified payload as a raw code**. That fallback
+is how a signing scheme becomes decoration: it would keep accepting every bare Phase-5 reference, so
+anyone who had ever seen one could still check in. `console.e2e.test.ts` pins it.
+
+### Staff cancel: one enum field, because a single fixed rule is wrong half the time
+
+`POST /sessions/:sessionId/cancel-entry` with `{ entryId, cause, reason }`, `reason` REQUIRED (the
+patient's own cancel keeps it optional - a patient cancelling their own booking owes nobody an
+explanation; staff cancelling someone else's paid booking owes a record).
+
+`cause` decides the refund, and the user chose this over both simpler options:
+
+- `HOSPITAL` -> 100%. The hospital cancelled; the patient should not pay for that.
+- `PATIENT_REQUEST` -> the same time-based tier `refundPctIfCancelledAt` gives the app.
+
+Always-100% would make reception a way around the hospital's own cancellation policy ("just ring the
+desk" always beats the app). Always-tiered would charge a patient the hospital itself turned away.
+
+**It lives in the payments module, not beside the other queue commands.** `PaymentsModule` already
+imports `QueueModule`, so hosting a refund-raising endpoint on `QueueController` would have made the
+module graph circular. Its own controller, because `PaymentsController` is patient-facing and
+deliberately uses `:id` to keep TenantGuard OUT, while this one needs `:sessionId` to bring it IN -
+putting both parameter conventions on one controller is exactly how trap 12 happens.
+
+### The refactor that was the actual point
+
+Phase 5's worst bug was a concurrent double-cancel raising three refunds. Writing a second cancel
+path meant duplicating that arithmetic - so it was extracted into one `refundForCancellation(ctx,
+{...})` that both paths call, re-reading the payment under the session lock. The regression test is
+re-pinned on the new path with `Promise.all`; a sequential version of it passed against the buggy
+code in Phase 5, which is why it is written that way.
+
+### Verified
+
+17 new e2e cases in `test/console.e2e.test.ts` plus 14 unit cases in `checkin-code.test.ts`:
+signed code checks in - tampered code refused with the row untouched - **bare unsigned reference
+refused** - a forged code answers *identically* to a valid code in the wrong session (same status AND
+same message, or the endpoint is an oracle) - double-scan idempotent with `checkedInAt` unchanged and
+exactly one `ENTRY_CHECKED_IN` event - roster in CALL_ORDER with an escalation reordering it -
+pagination capped at 200 - `TENANT_MISMATCH` for another hospital's staff - the roster carries
+`patientName` and **not** `checkInCode` (staff scan a screen; they are never handed the means to
+check anybody in without them) - HOSPITAL refunds 100%, PATIENT_REQUEST refunds the tier, two
+concurrent cancels raise exactly ONE refund.
+
+### Two test bugs, both mine, both in the fixture
+
+- `Payment.accountId` is required and the fixture created patients with `accountId: null`. Prisma's
+  error named the `hospital` relation, not the missing account - mixing checked and unchecked input
+  makes it report the first relation it cannot resolve rather than the one that is absent.
+- `unique(originalDoctorId, date, scheduledStart)` refused a second session created from the first
+  one's own timestamps.
+
+Neither was a code defect, which is the recurring shape: the fixture is the part of a test with no
+test.
+
+### Still to do in this phase
+
+Wave 2 - the four console routes. Nothing about check-in is proven on a real screen yet, and Phase 5
+established that a human looking at a screen finds defects lint and typecheck never will.
+
+---
+
+## 2026-09-01 - Phase 6 Wave 2: the consoles, and five bugs only a running browser found
+
+`P6-WEB-01` … `P6-WEB-04` built and exercised through the real UI. **215 tests**,
+`turbo run lint typecheck test build --force` -> 16/16, 0 cached.
+
+### Shape
+
+Everything lives under the EXISTING `(console)` shell rather than the `(doctor)` / `(staff)` route
+groups `docs/Phases.md` sketches. That shell already has auth, silent refresh, role-aware nav and the
+error banner; a second top-level group would have duplicated all of it for no gain.
+
+```
+queue/page.tsx                       today's sessions (a DOCTOR sees only their own)
+queue/[sessionId]/page.tsx           THE BOARD - Design.md 5.7
+queue/[sessionId]/check-in/          scanner + typed token + searchable list
+queue/[sessionId]/walk-in/           registration
+queue/_run.ts                        runQueueAction + queueGet
+queue/not-found.tsx, error.tsx
+```
+
+Server components and server actions throughout. **`scanner.tsx` is the only client component in the
+console**, and it earns it: a camera cannot be driven from the server. It decides nothing - it hands
+the decoded payload to the same server action the typed field uses, so the camera is an input method
+and never a second code path.
+
+### Three ways to check a patient in, and only one needs a camera
+
+`docs/PRD.md` 6.3 asks for QR-first with a manual fallback. The third - find them in the list and tap
+- is the one that actually saves a desk when the phone is flat or the booking is in a relative's
+name. `qr-scanner` (~15KB) was chosen over the native `BarcodeDetector` because that API does not
+exist on Windows desktop or in Firefox/Safari: it could not have been tested on this machine and
+would have dictated what hardware a hospital may put at reception.
+
+### Five bugs, every one found by RUNNING it
+
+Lint, typecheck, build and 212 tests were green through all five.
+
+1. **The queue page 500'd for reception.** `GET /hospitals/:id/doctors` was `@Roles('ADMIN')`, and the
+   console needs doctor names on every session row. Widened the two GETs to RECEPTION and DOCTOR;
+   writes stay ADMIN-only, per method. Now pinned by a test asserting BOTH halves - reception can
+   read the list and still gets 403 on create and update.
+
+2. **A paused queue looked unpaused after any reload.** `OPDSession` had no `pausedAt` in the
+   contract. `QueueCommandResult` has always carried it, so the console saw a pause the instant it
+   caused one - and lost it on the next page load. A doctor would have pressed Call next and been
+   refused with nothing on screen explaining why. Added to the DTO and the projection.
+
+3. **The stale-action message was written for a developer.** Two staff acting on one board is the
+   NORMAL case with no realtime, and the loser saw
+   `Cannot COMPLETE_CONSULTATION from COMPLETED (command: COMPLETE_CONSULTATION; from: COMPLETED)`.
+   That is the engine's internal vocabulary on a reception desk (docs/Rules.md 7). Now:
+   *"That is no longer possible - this is already completed. Someone may have acted first; reload to
+   see what changed."* `command` and `from` are untouched in `details`.
+
+4. **`toError` pasted `details` onto every message**, which is what produced the parenthesis above. It
+   now does that only for `VALIDATION_FAILED`, where the details name the offending field and are the
+   entire point - `reason: String must contain at least 3 character(s)` still renders.
+
+5. **Another hospital's session id was a raw 500.** No data leaked - the API refuses before returning
+   any - but a stack trace is not an answer. `queueGet` now collapses 403/404 into `notFound()`.
+   **Both collapse to the same page on purpose**: distinguishing them would let anyone with a login
+   enumerate session ids across the platform.
+
+   An `error.tsx` was tried first and was **wrong**: a Next error boundary renders after hydration, so
+   a client with no JavaScript still got a bare 500. `notFound()` renders during the server render
+   and returns a real 404. The boundary is kept, but only for genuinely unexpected faults.
+
+### A latent test bug that had nothing to do with this phase
+
+The full suite went red at 00:24 IST having been green at 23:58. Four fixtures computed
+`date: dateColumnFromString(new Date().toISOString().slice(0, 10))` - the **UTC** day, which between
+00:00 and 05:30 IST is YESTERDAY. Discovery filters on the IST day, found nothing, and one assertion
+failed. `istToday()` has existed in `src/common/ist.ts` since Phase 2; all four fixtures had
+hand-rolled a broken version of it. Fixed in all four.
+
+**The suite was wrong for five and a half hours out of every twenty-four and nobody had run it then.**
+
+### Verified by driving the real UI, not by reading the code
+
+Next renders server actions as ordinary forms with a `$ACTION_ID_...` field, so every button below
+was exercised over HTTP against the running console, and the result checked in Postgres:
+
+| Claim | Evidence |
+|---|---|
+| the doctor loop | Call next -> B001 -> Start -> Complete; B001 COMPLETED |
+| check-in by typed token | typed `A003` (letter stripped) -> "B003 · Anita Sharma checked in" |
+| check-in by signed QR | same banner from the scanner's own form |
+| double-scan is safe | same green banner twice, never an error |
+| **a tampered QR is refused** | one character flipped -> "No token matches that in this session" |
+| escalation reorders | B003 EMERGENCY -> jumps ahead of B002 in the Next strip |
+| escalation is audited | `queue.SET_PRIORITY / DOCTOR / "chest pain, needs to be seen now"` |
+| a reasonless escalation is refused | `reason: String must contain at least 3 character(s)` |
+| staff cancel + refund | "B003 cancelled — ₹600.00 refund raised (100%)"; payment REFUNDED, refund PENDING |
+| walk-in | B004 Meera Pillai added and CHECKED_IN, at the next token number |
+| pause survives a reload | (bug 2) and Call next answers "the queue is paused" |
+| role filter | reception sees 5 sessions across 4 doctors; the doctor sees her own 2 |
+| cross-tenant | Fortis admin on an Apollo board -> 404, zero patient data in the HTML |
+
+The refund stayed PENDING with no gateway id because the fixture's `pay_scratch_…` is not a real
+Razorpay payment - which is the documented behaviour for a failed gateway call, and exactly the row
+Phase 8's reconcile worker looks for.
+
+### Deliberately not done
+
+- **Reception cannot search for an EXISTING patient when registering a walk-in.** No endpoint exists:
+  `GET /patients` is account-scoped by design. Every walk-in creates a fresh patient with no account,
+  which is what `Patient.accountId` was made nullable for. A hospital-wide patient search is its own
+  feature with its own DPDP surface, not a field on this form.
+- **No realtime.** The board updates on navigation. `StaleDataNote` says so on screen, because a
+  console that silently shows stale data is worse than one that admits it.
+- **Row actions are offered by status group.** That is presentation; the server re-decides every
+  command against the state machine, and a stale board that offers the wrong button now gets a
+  sentence a receptionist can act on rather than a wrong outcome.
+
+---
+
+## 2026-09-01 - Trap 30: `next build` while `next dev` is running corrupts the dev server
+
+Handed the user a working console, then broke it for them within the hour by running the standing
+verification command:
+
+```bash
+pnpm exec turbo run lint typecheck test build --force
+```
+
+`next build` and `next dev` **share `apps/web/.next`**. The production build overwrote the chunks the
+running dev server had already handed to the browser, and every page after that failed with
+
+```
+Cannot find module './367.js'
+TypeError: __webpack_modules__[moduleId] is not a function
+Could not find the module "...segment-explorer-node.js#SegmentViewNode" in the React Client Manifest
+```
+
+Nothing in the repository was wrong. Typecheck, lint, the suite and the build were all green; the
+code was fine; only the on-disk `.next` was inconsistent. **The errors point at Next's own internals,
+which is exactly what sends you looking for a bug in your app that does not exist.**
+
+**Fix:** stop the dev server, `rm -rf apps/web/.next`, restart it.
+
+**Avoid:** do not run the full verification while a dev server is up. Either stop it first, or verify
+with `--filter` to skip the web build when only the API changed. This will recur, because the
+verification command is the one thing the handoff tells every future session to run constantly.
+
+Recorded as a trap rather than fixed with a separate `distDir`: a config split would make the dev and
+production builds differ from each other, which is a worse thing to own than a rule about not running
+two builders at the same directory.
+
+---
+
+## 2026-09-02 - Phase 6 driven end to end: 40/40 through the real console
+
+Next renders every server action as an ordinary form carrying a `$ACTION_ID_<hash>` field. That
+means the whole console can be operated over HTTP with a cookie jar and `FormData` - **every button
+genuinely pressed, not simulated** - which is how the walkthrough below was run without a browser.
+The driver lives in the scratchpad, not the repo: it is a one-off harness, and a permanent version of
+it belongs in Playwright rather than in `apps/api/test`.
+
+### What it proved
+
+| Act | Claims |
+|---|---|
+| I | signed QR checks in · **double-scan repeats the message, never errors** · tampered QR refused · unsigned reference refused · typed token WITH its letter works · blank token explained |
+| II | three walk-ins auto-checked-in at sequential tokens · nameless walk-in refused |
+| III | doctor sees 2 sessions to reception's 4 · call -> start -> complete · ACTIVE on the first call · **requeued patient goes to the BACK, not their token position** · no-show · **pause survives a reload** · call-next refused while paused · refused once the doctor has LEFT |
+| IV | escalation reorders the queue · reasonless escalation refused · HOSPITAL cancel = 100% · PATIENT_REQUEST cancel = the policy's own figure |
+| V | stale action refused in plain English with **no engine vocabulary leaked** · another hospital gets 404 with no patient names · a missing session answers identically |
+| VI | end-session resolves everyone |
+
+### Then the database was read, because a UI can lie
+
+Two things only visible in Postgres:
+
+- **End-of-session did the subtle thing right.** Patients who were PRESENT but unseen became
+  `RESCHEDULED`; the one who never arrived stayed `NO_SHOW`. docs/PRD.md 8.9 and 8.11 read like they
+  disagree and do not - they describe different people, and the data proves the engine knows it.
+- **`ENTRY_CHECKED_IN` fired exactly TWICE for three successful check-in calls.** The double scan
+  wrote no second event. Idempotency proven on the append-only timeline, not merely in the banner.
+
+Every audited action carried its reason and a `STAFF` actor; every refund's reason recorded its cause
+verbatim (`"... (hospital cancelled, 100%)"`).
+
+### The one failure was the test, not the product
+
+The run asserted that a `PATIENT_REQUEST` cancellation applies the LATE tier. It returned 100%, and
+100% was right: the policy gives free cancellation until 120 minutes before start, the session began
+at 10:00, and the clock said 00:30. An earlier run against an already-started session returned 50%.
+**Both tiers are correct; the assertion was hardcoded.** Rewritten to derive the expected figure from
+the hospital's own `cancellationRules` rather than assume a time of day - the same class of bug as the
+`istToday()` fixtures, and found the same way: by running at an unusual hour.
+
+### What is still NOT proven, and cannot be from here
+
+Three claims need hardware and stay unticked:
+
+1. **The camera itself** - a permission prompt, and a webcam decoding a QR off a phone screen. The
+   payload path is proven end to end; the optics are not.
+2. **A real Razorpay payment** issuing a token through the live webhook.
+3. **A declined camera permission** degrading to a working screen.
+
+`P6-WEB-02` is recorded as `◐` in docs/Phases.md for exactly this reason. Phase 5 ticked four boxes
+on a typecheck and had to un-tick them.
+
+---
+
+## 2026-09-02 - Traps 31-33, all found while handing the build over
+
+### 31. Two controls with the same label, one navigating and one acting
+
+The board's header link and every waiting patient's row button both read **"Check in"**. The first
+opens the scanner page; the second checks that patient in instantly. The first person to use the
+console pressed the row button, it worked, and they reported - entirely reasonably - that the camera
+never opened.
+
+Nothing was broken. The defect was the wording, and no test could have caught it.
+
+**Rule:** label a link with WHERE IT GOES, not with what happens once you get there. Now
+**"Open check-in desk"** and **"Add a walk-in"**, with the row buttons unchanged.
+
+### 32. A "process killed" notification is not evidence the process died
+
+Twice in one session the harness reported a background server as killed while it was still listening.
+Acting on that report started a SECOND `next dev` on the same `.next`, which failed to bind the port
+but had already begun writing - and the compiler worker then crashed on exactly one route
+(`Jest worker encountered 2 child process exceptions`), so the check-in page 500'd while every other
+page looked fine.
+
+**Rule: trust the port, not the notification.** `netstat -ano | grep ":3001 " | grep LISTENING`
+before starting anything. This is trap 30's sibling: same shared directory, different way in.
+
+### 33. Traps 16 and 28 both recurred within one evening
+
+Neither is new. Both cost time again anyway, which is the point of writing them down:
+
+- **The Wi-Fi IP moved from `192.168.0.3` to `.4`** and the mobile app sat on a loading screen. Note
+  the machine also carries `172.30.64.1` and `172.26.192.1` from Hyper-V, listed ABOVE the real
+  adapter in `ipconfig`. `EXPO_PUBLIC_*` is baked into the bundle, so the fix is `.env` **plus**
+  `--clear`, and a force-close of Expo Go rather than a reload.
+- **The cloudflared quick tunnel's hostname was withdrawn** while cloudflared itself stayed happy: one
+  live edge connection to `bom11`, 19 requests served, and its `/quicktunnel` endpoint still claiming
+  the dead name. Cloudflare's own authoritative DNS returned NXDOMAIN. The process does not notice and
+  will not tell you.
+
+  **Diagnose it with DoH, not with `curl` or `nslookup`**, because of a third thing found here: this
+  network's router refuses to resolve `*.trycloudflare.com` at all, returning NXDOMAIN for the
+  *working* hostname too. So a local `curl` fails on a perfectly healthy tunnel:
+
+  ```bash
+  curl -s -H 'accept: application/dns-json'     "https://cloudflare-dns.com/dns-query?name=<host>.trycloudflare.com&type=A"   # Status 0 = alive
+  curl --resolve <host>:443:<ip> https://<host>/health                            # prove it serves
+  ```
+
+  Razorpay resolves it normally, so a tunnel that fails locally may still be fine. **An ngrok static
+  domain still ends this permanently.**
+
+---
+
+## 2026-09-02 - Local Docker data wiped to reclaim disk space
+
+Ran `docker builder prune -af` plus removed unrelated old images/containers from other projects
+(`hospital-backend:*`, `auth-server-app`, `postgres:15-alpine`) and this project's own dev containers/
+volumes (`opd-postgres`, `opd-redis`, `opd-pgdata`, `opd-redisdata`). Reclaimed >13GB. Confirmed safe
+first: `docker-compose.yml` line 1 says outright "Local development dependencies only. Nothing here
+ships to staging/production" — Postgres and Redis are stock images, nothing custom baked in, and the
+schema lives in Prisma migrations + `apps/api/src/seed.ts`, not in the volume.
+
+**What this project needs Docker for — just two services, both defined in `docker-compose.yml`:**
+
+1. **`opd-postgres`** (`postgres:16-alpine`, container `opd-postgres`, host port **5433→5432**) —
+   the dev database. Volume `opd-pgdata`.
+2. **`opd-redis`** (`redis:7-alpine`, container `opd-redis`, host port **6380→6379**) — BullMQ queue
+   jobs + Socket.IO adapter. Volume `opd-redisdata`.
+
+Non-default ports (5433/6380) are deliberate — see the file's own comment — because 5432/6379 are
+often already bound by a native Postgres/Redis install on a Windows dev box.
+
+**To rebuild from nothing, in order:**
+
+```bash
+docker compose up -d                                   # 1. pulls images fresh, creates new empty volumes
+# wait for both healthchecks to go "healthy" (docker ps)
+pnpm --filter api prisma migrate deploy                # 2. replays all migrations -> empty but correct schema
+pnpm --filter api seed                                 # 3. nest build && node dist/seed.js -> seed data
+```
+
+Nothing else to consider: no manual SQL, no custom Dockerfile for these two services, no data that
+existed only in the deleted volume and mattered (it was ad-hoc dev rows from manual testing/join
+flows). Redis holds zero durable state worth keeping — it's cache + job queue only.
+
+**What is NOT rebuilt by this** and must still be checked separately if things look wrong afterward:
+- `.env` values for `DATABASE_URL` / `REDIS_URL` must still point at ports 5433 / 6380 (unchanged by
+  this, just noting it's a separate thing from the Docker data itself).
+- Any Razorpay test-mode webhook/tunnel config (trap 33-ish, see HANDOFF below) is unrelated to Docker
+  and does not need redoing.
+
+---
+
+---
+
+## 2026-09-02 — Phase 6 deep test: the console gets a walkthrough that lives in the repo
+
+The environment was rebuilt from nothing first — the Docker volumes had been wiped to
+reclaim disk. `docker compose up -d` → `migrate deploy` (7 migrations) → `prisma migrate diff
+--exit-code` (no difference) → `seed`. Two dev servers from the previous session were still
+holding :3000 and :3001 with a database that no longer existed; they were stopped before
+anything else, because `next build` and `next dev` share `.next` (trap 30).
+
+### What was actually missing
+
+Phase 6's API surface was already well covered — `console.e2e.test.ts` alone carries 20 cases
+across the signed QR, the roster order, the doctor-list widening and staff cancellation. The
+gap was the half that every Phase 5 and Phase 6 defect had actually come from:
+
+> **`apps/web` had no tests at all.** `"test": "echo \"no web tests yet\" && exit 0"`.
+
+The 40/40 walkthrough recorded on 2026-09-01 proved the console worked, but it was a scratch
+harness in a temp directory. It could not be re-run, so it could not protect anything — and
+Phase 7 is about to change every screen in the console.
+
+### What was built
+
+Three files under `apps/web/test/`, **zero new dependencies**:
+
+| File | What it is |
+|---|---|
+| `harness.mjs` | A browser, minus the browser. Cookie jar, manual redirect-following, an HTML form parser, and `press({button, where, fill})`. |
+| `fixture.mjs` | A session with paid bookings in it, written straight into Postgres through `docker exec psql`. |
+| `console-walkthrough.mjs` | Eight acts, **56 checks**. |
+
+Run with `pnpm --filter @opd/web test:console` against a live stack.
+
+It works because **Next renders every server action as an ordinary `<form>`** carrying a hidden
+`$ACTION_ID_<hash>` and posting `multipart/form-data` back to the page it is on — the
+progressive-enhancement path React ships for a client with no JavaScript. So every button is
+genuinely pressed. Not "the API the button would have called" — the button.
+
+**Rejected: Playwright.** It is the right long-term answer and `docs/Phases.md` says so, but it
+is a new dependency plus a ~300MB browser download, and it belongs to Phase 9 hardening rather
+than to a Phase 6 sign-off. The `ponytail:` comment at the top of the walkthrough names the
+ceiling honestly: this proves markup + server actions + API + database, and **nothing that
+needs a DOM** — the camera, `<details>` opening, client-side `required`.
+
+**Rejected: putting it in `turbo run test`.** It needs two live servers and a seeded database.
+A hermetic task must not, and a green turbo result that silently depended on a dev server
+running would be trap 1 all over again.
+
+**Rejected: adding the `globals` package** so ESLint would accept `fetch`/`Buffer`/`process` in
+a Node script inside a browser-targeted app. Six names are listed by hand in
+`apps/web/eslint.config.mjs` instead.
+
+### The fixture writes rows the webhook would have written
+
+A paid booking is created by the **Razorpay webhook**, so building one through the API would
+make a console test depend on a third party being reachable. `apps/api/test/console.e2e.test.ts`
+builds its fixtures the same way and for the same reason. Each run creates its own session
+(started two hours ago, so the cancellation policy is past its free window), three paid
+bookings and one unpaid hold — which makes the walkthrough **re-runnable against a dirty
+database**, proven by running it twice with no re-seed in between.
+
+### Four things found by writing it
+
+1. **The harness lied before the product did.** `canPress()` reported "Call next" as disabled on
+   a board where it was plainly enabled. The cause: `/\bdisabled\b/` matched
+   `disabled:bg-ink-disabled`, the **Tailwind variant** sitting in the class list of every
+   button on the page, pressable or not. Now it matches the attribute, on the opening tag only.
+   A test that reports a working control as broken is worse than no test — it sends you
+   looking for a defect that is not there.
+
+2. **`END_SESSION` before the scheduled end yields `ENDED_EARLY`, not `COMPLETED`.** The
+   assertion assumed `COMPLETED` and was simply wrong about the product. Recorded here because
+   the distinction is real and the walkthrough now accepts either.
+
+3. **Cancelling the same booking twice is deliberately safe.** `applyCancellation` returns
+   `changed`, and `refundForCancellation` only runs when it is true, so a second cancel moves
+   no money. The board also stops offering the button once a row is in the finished group. That
+   made the first attempt at a "stale action" test impossible to write — it kept *succeeding* —
+   and the real two-receptionist case had to be built from a genuinely illegal transition
+   instead: hold a board showing **Start consultation**, mark that patient **No-show** from a
+   second board, then press the stale button. The loser gets *"That is no longer possible…"*
+   with no engine vocabulary, and the entry stays `NO_SHOW`.
+
+4. **A short pause reason is refused in developer English.** The field is labelled *Optional*;
+   typing one or two characters answers *"Request validation failed (reason: String must
+   contain at least 3 character(s))"*. Empty is omitted correctly, so this only bites someone
+   who types "x" — but that sentence on a reception desk is the same class of problem as the
+   stale-action message that was fixed on 2026-09-01. **Left alone on purpose:** the generic
+   wording comes from the API's validation envelope, and rewording it is a cross-cutting change
+   that belongs in Phase 9, not in a Phase 6 sign-off. Logged as trap 34 so it is not
+   rediscovered.
+
+### What the 56 checks cover
+
+Act I the check-in desk — signed QR, double-scan, tampered code, bare unsigned reference (all
+three refusals identical), the token typed *with* its letter, a blank token · Act II walk-ins,
+including a nameless one refused · Act III the doctor loop — call/start/complete, skip, requeue
+landing the patient at the **back**, no-show, pause surviving a reload, call-next refused while
+paused and again once the doctor has LEFT · Act IV escalation reordering the queue, audited with
+its reason, and a reasonless one refused · Act V refunds — 100% for HOSPITAL, the policy tier for
+PATIENT_REQUEST (**derived from the hospital's own rules, never hardcoded** — that assertion is
+the bug this file already records once) · Act VI the stale board · Act VII the tenant boundary —
+another hospital gets a 404 with no patient name in the HTML, and a non-existent session answers
+identically so ids stay un-enumerable · Act VIII end of session — present-but-unseen →
+`RESCHEDULED`, already-seen left alone, the unpaid hold cancelled.
+
+### Verification
+
+`pnpm exec turbo run lint typecheck test build --force` → **16/16, 0 cached**, 215 API tests +
+31 contract tests. Both dev servers stopped first. `pnpm --filter @opd/web test:console` → **56
+passed, 0 failed**, twice, the second time without re-seeding.
+
+### Still not proven, and still not tickable
+
+Unchanged from the 2026-09-01 entry, and the reason `P6-WEB-02` and the §0 box stay `◐`:
+
+1. the camera permission prompt, and a webcam decoding a QR off a phone screen;
+2. a real Razorpay payment issuing a token through the live webhook;
+3. a declined camera permission degrading to a working screen.
+
+The walkthrough proves the payload path either side of the lens. It cannot prove the lens.
+
+# 📌 HANDOFF v5 — read this first in a new session
+
+*Supersedes v2, v3 and v4. Those are history; this is the brief.*
+
+## 1. Where the project stands
+
+| Phase | State |
+|---|---|
+| 0 — Foundation | ✅ `phase-0-done` |
+| 1 — Identity & Tenancy | ✅ `phase-1-done` |
+| 2 — Hospital Config + Admin + Seed | ✅ `phase-2-done` |
+| 3 — Discovery + mobile UI | ✅ `phase-3-done` |
+| 4 — Queue Engine | ✅ `phase-4-done` |
+| 5 — Join + Payment → Token | ✅ `phase-5-done` |
+| 6 — Doctor + Staff Consoles | **◐ code complete, UNMERGED, checkpoint pending a device** |
+| 7 — Realtime + ETA | ☐ next |
+
+**215 tests**, `turbo run lint typecheck test build --force` → 16/16, 0 cached.
+**Nothing from Phase 6 is committed.** The working tree carries the whole phase.
+
+Phase 6 was additionally driven end to end through the running console — 40/40 — and the resulting
+database state read back and checked. See the 2026-09-02 entry above.
+
+## 2. What Phase 6 built
+
+- **A signed check-in QR.** `QueueEntry.checkInCode` still stores 24 random bytes; the API serves
+  `v1.<reference>.<hmac>`, signed on every read and verified **before any database access**. The
+  mobile app needed no change — it renders that field verbatim.
+- **`GET /sessions/:sessionId/queue`** — the roster, in `CALL_ORDER`. Phases.md claimed this phase
+  needed no new endpoints; that was wrong, and the doc is corrected.
+- **`POST /sessions/:sessionId/cancel-entry`** — reception withdraws a booking. `cause` decides the
+  refund: `HOSPITAL` → 100%, `PATIENT_REQUEST` → the hospital's time-based tier.
+- **Four console routes** under the existing `app/(console)` shell: `/queue`, the board, `check-in`,
+  `walk-in`. Server components and server actions throughout; `scanner.tsx` is the only client
+  component in the console.
+- `doctor@apollo.test` in the seed, and `HospitalMembership.doctorId` so the console knows *which*
+  doctor an account is.
+
+## 3. THE ONLY THING BLOCKING THE PHASE
+
+Three claims need hardware. Everything else is proven.
+
+1. **The camera** — permission prompt, and a webcam decoding a QR off a phone screen.
+2. **A real Razorpay payment** issuing a token through the live webhook.
+3. **A declined camera permission** degrading to a working screen rather than an error.
+
+**Do not tick `P6-WEB-02`, the Phase 6 Status line, or the §0 board until a human has pointed a
+camera at a phone.** Phase 5 ticked four boxes on a typecheck and had to un-tick them.
+
+## 4. Before touching anything, in this order
+
+```bash
+docker compose up -d
+pnpm --filter @opd/api seed          # the test suite TRUNCATEs the dev database
+pnpm --filter @opd/api start         # :3000
+pnpm --filter @opd/web dev           # :3001
+pnpm --filter @opd/mobile dev -- --clear
+```
+
+Then check all four, because three of them fail silently:
+
+| Check | Why |
+|---|---|
+| `ipconfig` → Wi-Fi IPv4 vs `apps/mobile/.env` | trap 16. Hyper-V addresses list FIRST and a phone cannot reach them. |
+| tunnel hostname vs `PUBLIC_BASE_URL` **and** the Razorpay dashboard | trap 28/33. Diagnose with DoH — this router will not resolve `*.trycloudflare.com` even when the tunnel is alive. |
+| `netstat -ano` for a LISTENING :3001 before starting one | trap 32. A "process killed" notice is not evidence it died. |
+| Is a dev server running before `turbo run build`? | trap 30. `next build` and `next dev` share `.next`, and the build wins. |
+
+## 5. Traps — the ones that have actually cost time
+
+1–23 are in HANDOFF v3, 24–29 in v4; all still hold. The ones that bite in daily work:
+**1** (a green turbo result can lie — always `--force`), **7** (hand-write migrations; prove with
+`migrate diff --exit-code`), **11/23** (the e2e suite TRUNCATEs the dev database — re-seed after every
+run), **12** (the route parameter NAME decides whether TenantGuard engages), **16** (Wi-Fi IP),
+**24** (`{...pressable()}` beside `style`), **28** (dead tunnel), plus:
+
+- **30.** `next build` while `next dev` runs corrupts the dev server. Stop it first.
+- **31.** Two controls labelled the same, one navigating and one acting. Label a link with where it
+  goes. No test catches this — a human reported it within minutes.
+- **32.** Trust the port, not the "killed" notification.
+- **33.** A quick tunnel's hostname can be withdrawn while cloudflared still claims it. Diagnose with
+  DoH; a local `curl` failure proves nothing on this network.
+
+## 6. Decisions from Phase 6 that constrain future work
+
+- **The QR is signed on READ, never stored signed.** Rotating `CHECKIN_SECRET` invalidates every code
+  at once — what a compromised secret needs — while the stored reference never changes, so a token
+  screenshotted last week still scans. There is deliberately **no fallback** that retries an
+  unverified payload as a raw code; that fallback is how a signing scheme becomes decoration.
+- **`CHECKIN_SECRET` is required at boot**, not defaulted. A deployment that quietly fell back to
+  unsigned would look completely healthy and check anybody in.
+- **The roster read takes NO session lock.** Putting it through `runCommand` would grab the lock on
+  every console re-render and serialise reads against the commands they are watching.
+- **One refund function, called by both cancel paths.** Phase 5's worst bug was a concurrent
+  double-cancel raising three refunds; a second cancel path must not duplicate that arithmetic.
+- **Staff cancel lives in the payments module**, not beside the queue commands: it raises a refund,
+  and `QueueModule` cannot import `PaymentsModule` — the dependency already runs the other way.
+- **One console, role-aware**, not separate doctor and staff apps. The API has allowed all three roles
+  on every queue command since Phase 4, and a small hospital's admin genuinely does run reception.
+- **`OPDSession.pausedAt` is in the contract now.** It was missing, so a paused queue looked unpaused
+  after any reload.
+- **`InvalidQueueTransitionError` speaks English**; `command` and `from` stay in `details`. With no
+  realtime, two staff on one board is the normal case, and the loser sees this message constantly.
+
+## 7. Known gaps carried forward
+
+Everything in v4 §5 still applies, plus:
+
+- **Reception cannot search for an existing patient when registering a walk-in.** No endpoint exists
+  (`GET /patients` is account-scoped by design), so every walk-in creates a fresh account-less
+  patient. A hospital-wide patient search is its own feature with its own DPDP surface.
+- **No realtime.** The board updates on navigation; `StaleDataNote` says so on screen. Phase 7.
+- **`apps/web` still has no test script.** The 40/40 walkthrough was a scratch harness, not a suite.
+  If it should be permanent it belongs in Playwright — and the case for that is that **every defect in
+  Phases 5 and 6 was found by a human looking at a screen**, with lint, typecheck and 215 tests green
+  throughout.
+- **Grace-period and recall timers** are BullMQ work in Phase 8; staff have the manual buttons.
+
+## 8. Prompt for the next session
+
+> Continue building the **OPD Queue Platform** — a multi-tenant OPD queue app for Indian hospitals
+> (`C:\Projects\New folder`). Patients join a doctor's live queue remotely, watch a dynamic ETA, and
+> arrive only when their turn is near. **The queue is the product.**
+>
+> **Read first, in this order:** `CLAUDE.md` → `docs/PROGRESS.md` from **HANDOFF v5** at the very
+> bottom (v2–v4 above it are marked superseded) → `docs/Phases.md`. `docs/Rules.md` wins on conflict.
+>
+> **State:** Phases 0–5 are complete, merged and tagged. **Phase 6 is code-complete but UNCOMMITTED
+> and untagged** — the entire working tree is Phase 6. 215 tests, `turbo run lint typecheck test build
+> --force` → 16/16. It was also driven end to end through the running console (40/40) with the
+> resulting database state checked.
+>
+> **Start by asking me which of these three is true**, because it decides everything:
+>
+> 1. *"I ran the device walkthrough and it passed"* → tick `P6-WEB-02`, the Phase 6 Status line and
+>    the §0 board, append the result to PROGRESS.md, then branch → PR → squash merge → tag
+>    `phase-6-done`. Then start Phase 7.
+> 2. *"I ran it and something was wrong"* → fix that first. Do not start Phase 7 with an unticked
+>    checkpoint.
+> 3. *"I haven't run it yet"* → set the environment up (§4, all four checks) and give me the
+>    walkthrough again. **Do not tick anything, and do not start Phase 7.**
+>
+> **Standing rules — every one came from something that actually went wrong:**
+> - Verify with `pnpm exec turbo run lint typecheck test build --force`. **A cached green has lied
+>   five times.** Stop any dev server first (trap 30), and **re-seed afterwards** — the suite
+>   TRUNCATEs the dev database.
+> - Run §4's four environment checks before believing anything is broken. Three fail silently, and two
+>   cost time again in the last session alone.
+> - **Every list endpoint paginates.** `GET /patients` is the one documented exception.
+> - **Append to `docs/PROGRESS.md` as you go** — what you did, what you decided, **why**, and what you
+>   rejected. Failures and surprises are the most valuable entries. Append-only. Tick the boxes in
+>   `docs/Phases.md` **only when the done-when genuinely passes**.
 > - **Never commit, branch, push or tag unless I ask.** When I do: branch → PR → squash merge → and
 >   **tag after the merge**.
 > - If the build must diverge from `PRD.md` / `Architecture.md` / `Design.md`, **say so and update

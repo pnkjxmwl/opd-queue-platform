@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestApp, resetDb } from './helpers';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { QueueService, type QueueActor } from '../src/modules/queue/queue.service';
-import { dateColumnFromString } from '../src/common/ist';
+import { dateColumnFromString, istToday } from '../src/common/ist';
 import {
   InvalidQueueTransitionError,
   NotFoundError,
@@ -55,7 +55,12 @@ describe('queue command skeleton (P4-BE-02)', () => {
           departmentId,
           originalDoctorId: doctorId,
           currentProviderDoctorId: doctorId,
-          date: dateColumnFromString(new Date().toISOString().slice(0, 10)),
+          // istToday(), NOT toISOString().slice(0,10): the second is the UTC day, and
+          // between 00:00 and 05:30 IST that is YESTERDAY. Every fixture here stamped
+          // sessions with the wrong calendar date for five and a half hours a day, so
+          // discovery - which filters on the IST day - returned nothing and the suite
+          // failed only if you happened to run it after midnight.
+          date: dateColumnFromString(istToday()),
           scheduledStart: start,
           scheduledEnd: new Date(start.getTime() + 3 * 60 * 60 * 1000),
           feePaise: 50_000,

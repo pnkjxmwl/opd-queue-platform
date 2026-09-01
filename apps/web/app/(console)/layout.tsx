@@ -18,10 +18,15 @@ export default async function ConsoleLayout({ children }: { children: React.Reac
   // `ready: false` = the route does not exist yet. It still appears, so the shape of
   // the console is visible from the start, but it is NOT a link - docs/Phases.md:
   // make a placeholder obviously inert, or you will file bugs against your own
-  // placeholder. The queue consoles arrive in Phase 6.
+  // placeholder.
+  //
+  // Queue went live in Phase 6, and ADMIN was added to its roles: a small hospital's
+  // admin genuinely does run reception, and the API has allowed all three roles on
+  // the queue commands since Phase 4 - so hiding it from admins showed them less
+  // than they were entitled to do.
   const links = [
     { href: '/', label: 'Overview', roles: ['ADMIN', 'RECEPTION', 'DOCTOR'], ready: true },
-    { href: '/queue', label: 'Queue', roles: ['RECEPTION', 'DOCTOR'], ready: false },
+    { href: '/queue', label: 'Queue', roles: ['ADMIN', 'RECEPTION', 'DOCTOR'], ready: true },
     { href: '/config', label: 'Configuration', roles: ['ADMIN'], ready: true },
   ].filter((l) => active && l.roles.includes(active.role));
 

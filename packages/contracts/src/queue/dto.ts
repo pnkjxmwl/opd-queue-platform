@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { DoctorPresence, SessionStatus } from '../enums/config';
 import { Gender } from '../enums/patient';
+import { RefundStatus } from '../enums/payment';
 import { QueueEntryPriority, QueueEntryStatus, QueueEntryType } from '../enums/queue';
 
 /**
@@ -88,9 +89,13 @@ export type QueueCommandResult = z.infer<typeof QueueCommandResult>;
  * POST /sessions/:id/check-in
  *
  * Exactly one identifier. `checkInCode` is the signed opaque QR reference
- * (docs/Rules.md 10) and is the primary path; `tokenNumber` is reception's manual
- * fallback when a phone is flat (docs/PRD.md 6.3). Phase 6 builds the scanner; the
- * command accepts both from Phase 4 so the fallback is never an afterthought.
+ * (docs/Rules.md 10) and is the fastest path; `tokenNumber` is reception's manual
+ * fallback when a phone is flat (docs/PRD.md 6.3). The command has accepted both
+ * since Phase 4 so the fallback was never an afterthought - and it matters more than
+ * it looks, because a desk with no camera checks patients in with nothing else.
+ *
+ * The code is verified against its signature BEFORE any database lookup, so a
+ * tampered or invented code costs a hash and nothing more.
  *
  * Idempotent: checking in an already-checked-in patient succeeds and changes
  * nothing, because staff double-scan and that must not be an error.
@@ -210,3 +215,98 @@ export const SetPriorityRequest = EntryTarget.extend({
   reason: Reason,
 });
 export type SetPriorityRequest = z.infer<typeof SetPriorityRequest>;
+
+// ---------------------------------------------------------------------------
+// Console reads (Phase 6)
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /sessions/:sessionId/queue - the roster the doctor and staff consoles render.
+ *
+ * **This endpoint is a Phase-6 addition that docs/Phases.md did not plan for.** That
+ * doc says Phase 6 introduces "no new business endpoints" because the consoles call
+ * the Phase-4 commands - but `QueueEntryView` has existed since Phase 4 with nothing
+ * that returns a list of them, and a doctor console that cannot READ the queue cannot
+ * exist. Recorded in docs/PROGRESS.md and added to docs/Architecture.md 6.4.
+ *
+ * Entries come back in `CALL_ORDER` - the same comparator `call-next` uses - so the
+ * console never sorts. A UI that re-sorts is a UI that will eventually disagree with
+ * the engine about who is next (docs/Rules.md 9).
+ *
+ * `status` filters to one status; omitted returns the whole roster, unpaid RESERVED
+ * holds included, because reception legitimately wants to see a hold that has not
+ * been paid for yet.
+ */
+export const SessionQueueQuery = z.object({
+  /**
+   * Higher than the console-wide default of 20 and capped harder than it, because
+   * this is a roster rather than a browsable list: the board wants the whole session
+   * in one render, and an OPD session is tens of patients, not thousands.
+   *
+   * ponytail: counts on the board are derived from the returned page. A session
+   * larger than `limit` would need server-side aggregates - add them then, not now.
+   */
+  limit: z.coerce.number().int().min(1).max(200).default(100),
+  offset: z.coerce.number().int().min(0).default(0),
+  status: QueueEntryStatus.optional(),
+});
+export type SessionQueueQuery = z.infer<typeof SessionQueueQuery>;
+
+// ---------------------------------------------------------------------------
+// Commands - staff-initiated cancellation
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a booking was cancelled by staff, which is what decides the refund
+ * (docs/PRD.md 6.3 "Assist: cancellations", docs/PRD.md 10).
+ *
+ * **The two causes exist because a single fixed rule is wrong half the time.**
+ * Always refunding 100% turns reception into a way around the hospital's own
+ * cancellation policy - "just ring the desk" would always beat cancelling in the
+ * app. Always applying the time-based tier penalises a patient the hospital itself
+ * turned away. So the person cancelling states which happened, in writing, and it is
+ * audited.
+ */
+export const CancelCause = z.enum([
+  /** The patient asked; they get exactly what the app would have given them. */
+  'PATIENT_REQUEST',
+  /** The hospital cancelled - doctor unavailable, session moved, our mistake. 100%. */
+  'HOSPITAL',
+]);
+export type CancelCause = z.infer<typeof CancelCause>;
+
+/**
+ * POST /sessions/:sessionId/cancel-entry - reception withdraws a booking.
+ *
+ * Distinct from the patient's own `POST /queue-entries/:id/cancel`, which is scoped
+ * to the caller's account. This one is scoped to the caller's HOSPITAL, so it is the
+ * command shape (`:sessionId` + `entryId` in the body) rather than the patient one.
+ *
+ * `reason` is REQUIRED here, unlike the patient's optional one: a patient cancelling
+ * their own booking owes nobody an explanation, and staff cancelling someone else's
+ * paid booking owes a record.
+ */
+export const StaffCancelEntryRequest = EntryTarget.extend({
+  cause: CancelCause,
+  reason: Reason,
+});
+export type StaffCancelEntryRequest = z.infer<typeof StaffCancelEntryRequest>;
+
+/**
+ * `refund` is null when there was nothing to give back - an unpaid hold, a 0% tier,
+ * or a booking already fully refunded. A raised refund comes back PENDING: Razorpay
+ * settles asynchronously, so the console must say "refund on its way", never
+ * "refunded" (docs/Phases.md Phase 5 risks).
+ */
+export const StaffCancelEntryResponse = z.object({
+  result: QueueCommandResult,
+  refund: z
+    .object({
+      amountPaise: z.number().int().nonnegative(),
+      /** What the cause resolved to, so the console can show the patient why. */
+      refundPct: z.number().int().min(0).max(100),
+      status: RefundStatus,
+    })
+    .nullable(),
+});
+export type StaffCancelEntryResponse = z.infer<typeof StaffCancelEntryResponse>;

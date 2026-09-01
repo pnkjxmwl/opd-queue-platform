@@ -6,7 +6,7 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { RazorpayClient, type RazorpayApi } from '../src/modules/payments/razorpay.client';
 import { ReservationSweeper } from '../src/modules/queue/reservation-sweeper';
 import { QueuePolicyService } from '../src/modules/config/queue-policy.service';
-import { dateColumnFromString } from '../src/common/ist';
+import { dateColumnFromString, istToday } from '../src/common/ist';
 
 /**
  * P5-BE-01..04 done-when, against a real Postgres.
@@ -116,7 +116,12 @@ describe('join -> pay -> token (Phase 5)', () => {
           departmentId,
           originalDoctorId: doctorId,
           currentProviderDoctorId: doctorId,
-          date: dateColumnFromString(new Date().toISOString().slice(0, 10)),
+          // istToday(), NOT toISOString().slice(0,10): the second is the UTC day, and
+          // between 00:00 and 05:30 IST that is YESTERDAY. Every fixture here stamped
+          // sessions with the wrong calendar date for five and a half hours a day, so
+          // discovery - which filters on the IST day - returned nothing and the suite
+          // failed only if you happened to run it after midnight.
+          date: dateColumnFromString(istToday()),
           scheduledStart: start,
           scheduledEnd: new Date(start.getTime() + 3 * 60 * 60 * 1000),
           feePaise: FEE_PAISE,

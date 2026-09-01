@@ -8,12 +8,14 @@
     "start": "next start -p 3001",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "echo \"no web tests yet\" && exit 0"
+    "test": "echo \"no hermetic web tests - run test:console against a live stack\" && exit 0",
+    "test:console": "node test/console-walkthrough.mjs"
   },
   "dependencies": {
     "@opd/contracts": "workspace:*",
     "@tanstack/react-query": "^5.62.11",
     "next": "^15.1.3",
+    "qr-scanner": "^1.4.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

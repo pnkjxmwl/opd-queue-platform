@@ -317,6 +317,16 @@ export const OPDSession = z.object({
   feePaise: z.number().int(),
   /** Set when staff manually close registration (PRD 8.12, third mechanism). */
   registrationClosedAt: z.string().datetime().nullable(),
+  /**
+   * Set while the queue is paused; null when running (PRD 6.2).
+   *
+   * **Added in Phase 6, and it was a real hole.** `QueueCommandResult` has always
+   * carried it, so the console saw a pause the moment it caused one - and then lost
+   * it on the next page load, because the session READ did not return it. A paused
+   * queue that looks unpaused after a refresh is a doctor pressing Call next and
+   * being refused with no visible reason.
+   */
+  pausedAt: z.string().datetime().nullable(),
   version: z.number().int(),
 });
 export type OPDSession = z.infer<typeof OPDSession>;

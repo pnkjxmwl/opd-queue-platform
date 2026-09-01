@@ -3,13 +3,18 @@ import type { Prisma } from '@prisma/client';
 import type {
   ActorType,
   DoctorPresence,
+  Paginated,
   QueuePolicy,
+  QueueEntryView,
   QueueEventType,
+  SessionQueueQuery,
   SessionStatus,
 } from '@opd/contracts';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotFoundError, TenantMismatchError } from '../../common/errors';
 import { assertSessionAccepts, type QueueCommand } from './state-machine';
+import { CALL_ORDER } from './call-order';
+import { toEntryView } from './commands/result';
 import { QueuePolicyService } from '../config/queue-policy.service';
 
 /**
@@ -241,6 +246,47 @@ export class QueueService {
       },
       { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
     );
+  }
+
+  /**
+   * P6-BE-01 · the roster the doctor and staff consoles render.
+   *
+   * **A read, so no lock and no command.** It is on this service rather than in
+   * `commands/` because it changes nothing: putting it through `runCommand` would
+   * take the session lock every time a console re-rendered and serialise reads
+   * against the very commands they are watching.
+   *
+   * Ordered by `CALL_ORDER` - the same comparator `call-next` uses - so the console
+   * has no reason to sort and therefore no way to disagree with the engine about who
+   * is next (docs/Rules.md 9).
+   *
+   * `hospitalId` is in the WHERE clause even though `TenantGuard` already resolved it
+   * from this session row. Two independent checks, per docs/Rules.md 1.3: a by-id
+   * fetch verifies the row belongs to the caller's hospital, always.
+   */
+  async listEntries(
+    sessionId: string,
+    hospitalId: string,
+    query: SessionQueueQuery,
+  ): Promise<Paginated<QueueEntryView>> {
+    const where = {
+      sessionId,
+      hospitalId,
+      ...(query.status === undefined ? {} : { status: query.status }),
+    };
+
+    const [rows, total] = await Promise.all([
+      this.prisma.queueEntry.findMany({
+        where,
+        orderBy: CALL_ORDER,
+        include: ENTRY_INCLUDE,
+        take: query.limit,
+        skip: query.offset,
+      }),
+      this.prisma.queueEntry.count({ where }),
+    ]);
+
+    return { items: rows.map(toEntryView), total, limit: query.limit, offset: query.offset };
   }
 }
 

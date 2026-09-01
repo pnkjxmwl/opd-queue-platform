@@ -17,7 +17,7 @@ try {
  * a missing DATABASE_URL should fail loudly at startup, not as a confusing 500
  * on the first request.
  */
-const EnvSchema = z.object({
+export const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
 
@@ -33,6 +33,16 @@ const EnvSchema = z.object({
   /// Access tokens stay short-lived; the refresh token carries the session.
   JWT_ACCESS_TTL_SEC: z.coerce.number().int().positive().default(900),
   JWT_REFRESH_TTL_SEC: z.coerce.number().int().positive().default(60 * 60 * 24 * 30),
+
+  /**
+   * Signs the check-in QR (P6-BE-01, `common/checkin-code.ts`).
+   *
+   * Its OWN secret, not a reuse of a JWT one, for the reason stated above: a leak
+   * must not cross purposes. Required rather than defaulted, because the whole point
+   * of the scheme is that a code is refused unless it was signed - a deployment that
+   * quietly fell back to no signing would look identical and check anybody in.
+   */
+  CHECKIN_SECRET: z.string().min(32),
 
   /// Comma-separated Google OAuth client ids (iOS, Android and web each have one).
   /// Empty disables POST /auth/google rather than failing boot - Google is optional.

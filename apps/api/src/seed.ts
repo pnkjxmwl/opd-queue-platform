@@ -61,6 +61,10 @@ const STAFF = [
   { id: 'eeeeeeee-0000-4000-8000-000000000001', email: 'admin@apollo.test', hospitalId: HOSPITALS[0].id, role: 'ADMIN' as const },
   { id: 'eeeeeeee-0000-4000-8000-000000000002', email: 'reception@apollo.test', hospitalId: HOSPITALS[0].id, role: 'RECEPTION' as const },
   { id: 'eeeeeeee-0000-4000-8000-000000000003', email: 'admin@fortis.test', hospitalId: HOSPITALS[1].id, role: 'ADMIN' as const },
+  // Phase 6: the doctor console resolves the signed-in account to a Doctor row, so
+  // without a DOCTOR membership LINKED to one there was no way to open it at all.
+  // Linked to Dr. Anita Sharma, who runs the 10:00 Apollo cardiology session.
+  { id: 'eeeeeeee-0000-4000-8000-000000000004', email: 'doctor@apollo.test', hospitalId: HOSPITALS[0].id, role: 'DOCTOR' as const, doctorId: DOCTORS[0].id },
 ];
 
 async function assertSafeToSeed(): Promise<void> {
@@ -144,6 +148,16 @@ async function main(): Promise<void> {
         status: 'ACTIVE',
       },
     });
+
+    // The membership says "this account is a doctor here"; `Doctor.accountId` says
+    // WHICH doctor. Both are needed - the first authorises, the second is how the
+    // console knows whose sessions to show.
+    if (member.doctorId !== undefined) {
+      await prisma.doctor.update({
+        where: { id: member.doctorId },
+        data: { accountId: account.id },
+      });
+    }
   }
 
   // Today's sessions. The date is IST and computed here, not by the caller - the

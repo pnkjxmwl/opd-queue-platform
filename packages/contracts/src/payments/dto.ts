@@ -49,7 +49,13 @@ export const MyQueueEntry = z.object({
   /**
    * The signed, opaque QR reference reception scans (docs/Rules.md 10). Issued when
    * payment is confirmed, so it is null while an entry is still RESERVED - there is
-   * nothing to check in to yet. Phase 6 builds the scanner and the signing scheme.
+   * nothing to check in to yet.
+   *
+   * **Render this verbatim into the QR. Never parse it.** Phase 6 made it
+   * `v1.<opaque ref>.<hmac>`: the reference is what the server stores, the signature
+   * is computed on every read, and the client is not meant to be able to tell the
+   * parts apart. It carries no PII and no id, and it does not change between reads -
+   * a patient who screenshotted their token last week can still be checked in.
    */
   checkInCode: z.string().nullable(),
 

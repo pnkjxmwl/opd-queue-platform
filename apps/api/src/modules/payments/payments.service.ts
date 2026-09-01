@@ -10,17 +10,20 @@ import {
   type MyQueueEntry,
   type Paginated,
   type QueueEntryStatus,
+  type StaffCancelEntryRequest,
+  type StaffCancelEntryResponse,
   type WebhookAck,
 } from '@opd/contracts';
 import { PrismaService } from '../../prisma/prisma.service';
 import { env } from '../../config/env';
 import { NotFoundError, ValidationFailedError } from '../../common/errors';
 import { isUniqueViolation } from '../../common/prisma-errors';
-import { QueueService, type QueueActor } from '../queue/queue.service';
+import { QueueService, type CommandContext, type QueueActor } from '../queue/queue.service';
 import { QueuePolicyService } from '../config/queue-policy.service';
 import { joinQueue } from '../queue/commands/join';
 import { applyPaymentConfirmation } from '../queue/commands/confirm-payment';
 import { applyCancellation } from '../queue/commands/cancel-entry';
+import { toCommandResult } from '../queue/commands/result';
 import { RazorpayClient } from './razorpay.client';
 import {
   MY_ENTRY_INCLUDE,
@@ -85,6 +88,65 @@ interface RaisedRefund {
   refundId: string;
   paymentId: string;
   amountPaise: number;
+}
+
+/**
+ * What a cancellation owes the patient, written inside the cancelling transaction.
+ *
+ * **One function, called by both cancel paths.** The patient cancels their own
+ * booking and reception cancels it for them; those differ in who is authorised and
+ * in what percentage applies, and in NOTHING about the arithmetic. Phase 5's worst
+ * bug was a second refund raised for one cancellation, and duplicating this block
+ * for the staff path is precisely how that would come back.
+ *
+ * The caller must already have checked that the cancellation actually CHANGED
+ * something. A no-op cancel that reached here would refund an entry that was
+ * already cancelled - which is the Phase-5 bug verbatim.
+ *
+ * Returns null when there is nothing to give back: no payment, an unpaid hold, a 0%
+ * tier, or a booking already refunded in full.
+ */
+async function refundForCancellation(
+  ctx: CommandContext,
+  input: { entryId: string; hospitalId: string; pct: number; reason: string },
+): Promise<RaisedRefund | null> {
+  // Re-read under the session lock. Computing `refundedPaise` from a row fetched
+  // before the transaction is how two concurrent cancels each refund the full
+  // amount.
+  const payment = await ctx.tx.payment.findUnique({
+    where: { queueEntryId: input.entryId },
+    select: { id: true, status: true, amountPaise: true, refundedPaise: true },
+  });
+  if (payment === null || payment.status !== 'SUCCESS') {
+    return null;
+  }
+
+  const refundable = Math.floor((payment.amountPaise * input.pct) / 100) - payment.refundedPaise;
+  if (refundable <= 0) {
+    return null;
+  }
+
+  const refund = await ctx.tx.refund.create({
+    data: {
+      hospitalId: input.hospitalId,
+      paymentId: payment.id,
+      amountPaise: refundable,
+      status: 'PENDING',
+      reason: input.reason,
+    },
+    select: { id: true },
+  });
+
+  const refundedTotal = payment.refundedPaise + refundable;
+  await ctx.tx.payment.update({
+    where: { id: payment.id },
+    data: {
+      refundedPaise: refundedTotal,
+      status: refundedTotal >= payment.amountPaise ? 'REFUNDED' : 'PARTIALLY_REFUNDED',
+    },
+  });
+
+  return { refundId: refund.id, paymentId: payment.id, amountPaise: refundable };
 }
 
 @Injectable()
@@ -480,41 +542,12 @@ export class PaymentsService {
         if (!changed) {
           return null;
         }
-
-        const payment = await ctx.tx.payment.findUnique({
-          where: { queueEntryId: entry.id },
-          select: { id: true, status: true, amountPaise: true, refundedPaise: true },
+        return refundForCancellation(ctx, {
+          entryId: entry.id,
+          hospitalId: entry.hospitalId,
+          pct,
+          reason: input.reason ?? `Cancelled by patient (${pct}% per hospital policy)`,
         });
-        if (payment === null || payment.status !== 'SUCCESS') {
-          return null;
-        }
-
-        const refundable = Math.floor((payment.amountPaise * pct) / 100) - payment.refundedPaise;
-        if (refundable <= 0) {
-          return null;
-        }
-
-        const refund = await ctx.tx.refund.create({
-          data: {
-            hospitalId: entry.hospitalId,
-            paymentId: payment.id,
-            amountPaise: refundable,
-            status: 'PENDING',
-            reason: input.reason ?? `Cancelled by patient (${pct}% per hospital policy)`,
-          },
-          select: { id: true },
-        });
-
-        const refundedTotal = payment.refundedPaise + refundable;
-        await ctx.tx.payment.update({
-          where: { id: payment.id },
-          data: {
-            refundedPaise: refundedTotal,
-            status: refundedTotal >= payment.amountPaise ? 'REFUNDED' : 'PARTIALLY_REFUNDED',
-          },
-        });
-
-        return { refundId: refund.id, paymentId: payment.id, amountPaise: refundable };
       },
     });
 
@@ -533,6 +566,89 @@ export class PaymentsService {
     return {
       entry: await this.readMyEntry(entry.id),
       refund: refundRow,
+    };
+  }
+
+  /**
+   * P6-BE-01 · `POST /sessions/:sessionId/cancel-entry` - reception withdraws a
+   * booking on someone else's behalf (docs/PRD.md 6.3 "Assist: cancellations").
+   *
+   * **Scoped by hospital, never by account.** The patient path above finds the entry
+   * by `accountId` because it is the caller's own; this one has no such relationship
+   * and must instead prove the entry belongs to the caller's hospital - which is why
+   * the route carries `:sessionId` and the entry is looked up within it.
+   *
+   * The refund percentage comes from `cause`, and that is the whole reason `cause`
+   * exists. A single fixed rule is wrong half the time: always 100% makes the desk a
+   * way around the hospital's own cancellation policy, and always applying the tier
+   * charges a patient the hospital itself turned away. So the person cancelling says
+   * which happened, in writing, and it lands in the AuditLog.
+   */
+  async cancelAsStaff(
+    sessionId: string,
+    actor: QueueActor,
+    input: StaffCancelEntryRequest,
+  ): Promise<StaffCancelEntryResponse> {
+    const session = await this.prisma.oPDSession.findFirst({
+      where: { id: sessionId, hospitalId: actor.hospitalId },
+      select: { scheduledStart: true },
+    });
+    if (session === null) {
+      throw new NotFoundError('Session not found');
+    }
+
+    const policy = await this.policies.ensure(actor.hospitalId);
+    const pct =
+      input.cause === 'HOSPITAL'
+        ? 100
+        : refundPctIfCancelledAt(policy.cancellationRules, session.scheduledStart, new Date());
+
+    const outcome = await this.queue.runCommand({
+      sessionId,
+      actor,
+      command: 'CANCEL_ENTRY',
+      reason: input.reason,
+      handler: async (ctx) => {
+        // entryInSession, not a bare findUnique: an entry id in a request body is
+        // attacker-controlled, and this verifies it is in the session the caller was
+        // authorised for rather than someone else's (docs/Rules.md 1.3).
+        const { entry, changed } = await applyCancellation(
+          ctx,
+          input.entryId,
+          'CANCEL_ENTRY',
+          input.reason,
+        );
+        const raised = changed
+          ? await refundForCancellation(ctx, {
+              entryId: entry.id,
+              hospitalId: ctx.session.hospitalId,
+              pct,
+              reason: `${input.reason} (${input.cause === 'HOSPITAL' ? 'hospital cancelled' : 'patient request'}, ${pct}%)`,
+            })
+          : null;
+        return { result: toCommandResult(ctx, entry), raised };
+      },
+    });
+
+    if (outcome.raised !== null) {
+      await this.sendRefundToGateway(
+        outcome.raised.refundId,
+        outcome.raised.paymentId,
+        outcome.raised.amountPaise,
+      );
+    }
+
+    const refundRow =
+      outcome.raised === null
+        ? null
+        : await this.prisma.refund.findUniqueOrThrow({
+            where: { id: outcome.raised.refundId },
+            select: { amountPaise: true, status: true },
+          });
+
+    return {
+      result: outcome.result,
+      refund: refundRow === null ? null : { ...refundRow, refundPct: pct },
     };
   }
 

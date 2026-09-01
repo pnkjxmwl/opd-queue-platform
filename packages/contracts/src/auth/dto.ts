@@ -69,6 +69,17 @@ export const HospitalMembership = z.object({
   role: Role,
   status: StaffStatus,
   permissions: z.array(z.string()),
+  /**
+   * The `Doctor` record this account IS, when the membership is a DOCTOR one
+   * (Phase 6). Null for staff, and null for a DOCTOR membership whose account has
+   * not been linked to a doctor record yet.
+   *
+   * The membership says the account may act as a doctor here; this says WHICH
+   * doctor, which is what the console needs to show them their own sessions rather
+   * than the whole hospital's. Same field `StaffMember` already carries, for the
+   * same reason.
+   */
+  doctorId: z.string().uuid().nullable(),
 });
 export type HospitalMembership = z.infer<typeof HospitalMembership>;
 

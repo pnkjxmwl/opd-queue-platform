@@ -19,6 +19,7 @@ const client = (overrides: Record<string, string> = {}) =>
       REDIS_URL: 'redis://localhost:6379',
       JWT_ACCESS_SECRET: 'x'.repeat(32),
       JWT_REFRESH_SECRET: 'y'.repeat(32),
+      CHECKIN_SECRET: 'z'.repeat(32),
       RAZORPAY_KEY_ID: 'rzp_test_key',
       RAZORPAY_KEY_SECRET: 'api-secret',
       RAZORPAY_WEBHOOK_SECRET: SECRET,
