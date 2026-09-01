@@ -1,4 +1,4 @@
-import { Body, Controller, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import {
   CheckInRequest,
   CompleteConsultationRequest,
@@ -8,12 +8,15 @@ import {
   PresenceRequest,
   RequeueRequest,
   ResumeRequest,
+  SessionQueueQuery,
   SetPriorityRequest,
   SkipRequest,
   StartConsultationRequest,
   WalkInRequest,
   type ActorType,
+  type Paginated,
   type QueueCommandResult,
+  type QueueEntryView,
 } from '@opd/contracts';
 import { ZodBody } from '../../common/pipes/zod-validation.pipe';
 import { CurrentAccount, CurrentHospital, Roles } from '../../common/decorators';
@@ -54,6 +57,19 @@ import { setPriority } from './commands/priority';
 @Controller('sessions/:sessionId')
 export class QueueController {
   constructor(private readonly queue: QueueService) {}
+
+  /**
+   * The one READ on this controller (P6-BE-01). Reads may be resource-style
+   * (docs/Rules.md 6); only writes have to be commands.
+   */
+  @Get('queue')
+  listQueue(
+    @Param('sessionId') sessionId: string,
+    @CurrentHospital() tenant: TenantContext,
+    @Query(new ZodBody(SessionQueueQuery)) query: SessionQueueQuery,
+  ): Promise<Paginated<QueueEntryView>> {
+    return this.queue.listEntries(sessionId, tenant.hospitalId, query);
+  }
 
   @Post('check-in')
   checkIn(

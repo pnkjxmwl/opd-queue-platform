@@ -225,6 +225,14 @@ only the persistence is new, and it removes a full screen of friction from every
 ### 5.8 Staff check-in
 Big **Scan QR** button (opens camera) as the primary action; a manual "Search token / name" field beneath as fallback. On success → a green confirmation with the patient's token + name.
 
+**As built (Phase 6): three ways in, not two.** The camera is live on the page rather than behind a
+button, then the typed token, then a searchable list of everyone still to arrive. The third one is
+what saves a desk when the phone is flat or the booking is in a relative's name, and it costs nothing
+because the roster has to be fetched anyway. **The camera is treated as optional throughout** — no
+HTTPS, no device or a declined permission leaves a complete working screen with an explanation, never
+an error. The green confirmation names the token *and* the patient, so a mis-scan is visible before
+the wrong person is called in.
+
 ### 5.9 Navigation
 - **Mobile:** bottom tab bar (Home/Discover · My Visits · Profile), active tint teal.
   - **As built (Phase 5):** three tabs — **Discover** (`compass`), **My Visits** (`clipboard`) and
@@ -236,6 +244,12 @@ Big **Scan QR** button (opens camera) as the primary action; a manual "Search to
   - Discover **is** home. There is no separate home screen: it opens on the hospitals in the
     remembered city (see §5.10).
 - **Web console:** left sidebar (role-aware: doctor sees Session; staff sees Check-in/Queue; admin sees Config/Reports), top bar with hospital name + user.
+  - **As built (Phase 6):** ONE shell and one `/queue`, role-aware, rather than separate doctor and
+    staff consoles. A small hospital's admin genuinely does run reception, and the API has allowed
+    ADMIN, RECEPTION and DOCTOR on every queue command since Phase 4 — so two separate consoles would
+    have modelled a split the backend does not have. What differs by role is the CONTENT: a doctor's
+    session list shows only their own sessions. Check-in and walk-in are their own pages off the
+    board, because reception keeps them open through a whole clinic.
 
 ---
 

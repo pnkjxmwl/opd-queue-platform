@@ -165,6 +165,10 @@ export class AuthService {
             hospital: { select: { name: true } },
           },
         },
+        // 1:1 - `Doctor.accountId` is unique. Matched to the membership by hospital
+        // below, so a doctor at one hospital who is also reception at another does
+        // not appear to be a doctor at both.
+        doctor: { select: { id: true, hospitalId: true } },
       },
     });
     if (!account) throw new NotFoundError('Account not found');
@@ -180,6 +184,7 @@ export class AuthService {
         role: m.role as Role,
         status: m.status as StaffStatus,
         permissions: m.permissions,
+        doctorId: account.doctor?.hospitalId === m.hospitalId ? account.doctor.id : null,
       })),
     };
   }

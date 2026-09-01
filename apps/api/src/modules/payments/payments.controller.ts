@@ -7,13 +7,17 @@ import {
   MyQueueEntriesQuery,
   type CancelEntryResponse,
   type JoinResponse,
+  StaffCancelEntryRequest,
+  type ActorType,
   type MyQueueEntry,
   type Paginated,
+  type StaffCancelEntryResponse,
   type WebhookAck,
 } from '@opd/contracts';
 import { ZodBody } from '../../common/pipes/zod-validation.pipe';
-import { CurrentAccount, Public } from '../../common/decorators';
-import type { AuthedAccount } from '../../common/auth-context';
+import { CurrentAccount, CurrentHospital, Public, Roles } from '../../common/decorators';
+import type { AuthedAccount, TenantContext } from '../../common/auth-context';
+import type { QueueActor } from '../queue/queue.service';
 import { PaymentsService } from './payments.service';
 
 /**
@@ -118,3 +122,53 @@ export class RazorpayWebhookController {
     return this.payments.handleWebhook(req.rawBody, signature);
   }
 }
+
+/**
+ * Reception cancelling somebody else's booking (P6-BE-01, docs/PRD.md 6.3).
+ *
+ * **Its own controller, and the reason is the route parameter.** `PaymentsController`
+ * above is patient-facing and deliberately un-tenant-scoped - it uses `:id` so the
+ * global `TenantGuard` stays out of the way, because a patient has no membership in
+ * the hospital they are booking at. This one is the exact opposite: `:sessionId` is
+ * what makes TenantGuard resolve the hospital from the session row and refuse anyone
+ * without an active membership in it. Putting both parameter conventions on one
+ * controller is how trap 12 happens.
+ *
+ * It lives in the payments module rather than beside the other queue commands
+ * because it raises a refund, and `QueueModule` cannot import `PaymentsModule` - the
+ * dependency already runs the other way.
+ */
+@Roles('ADMIN', 'RECEPTION', 'DOCTOR')
+@Controller('sessions/:sessionId')
+export class StaffCancellationController {
+  constructor(private readonly payments: PaymentsService) {}
+
+  @Post('cancel-entry')
+  cancel(
+    @Param('sessionId') sessionId: string,
+    @CurrentAccount() account: AuthedAccount,
+    @CurrentHospital() tenant: TenantContext,
+    @Body(new ZodBody(StaffCancelEntryRequest)) body: StaffCancelEntryRequest,
+  ): Promise<StaffCancelEntryResponse> {
+    return this.payments.cancelAsStaff(sessionId, actorOf(account, tenant), body);
+  }
+}
+
+/**
+ * The actor, built entirely from server-resolved values - the same mapping
+ * `queue.controller.ts` uses, so one cancellation looks the same on the audit trail
+ * whoever performed it. ADMIN and RECEPTION are both STAFF: on the timeline the
+ * meaningful split is "the clinician" versus "the desk", and the exact membership
+ * role is recoverable from HospitalStaff.
+ */
+const ACTOR_TYPE: Record<TenantContext['role'], ActorType> = {
+  DOCTOR: 'DOCTOR',
+  ADMIN: 'STAFF',
+  RECEPTION: 'STAFF',
+};
+
+const actorOf = (account: AuthedAccount, tenant: TenantContext): QueueActor => ({
+  accountId: account.id,
+  hospitalId: tenant.hospitalId,
+  type: ACTOR_TYPE[tenant.role],
+});

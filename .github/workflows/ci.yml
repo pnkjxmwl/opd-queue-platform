@@ -37,6 +37,7 @@ jobs:
       # CI-only throwaway secrets. Real ones come from the platform per environment.
       JWT_ACCESS_SECRET: ci-access-secret-000000000000000000
       JWT_REFRESH_SECRET: ci-refresh-secret-00000000000000000
+      CHECKIN_SECRET: ci-checkin-secret-00000000000000000
 
     steps:
       - uses: actions/checkout@v4

@@ -6,6 +6,7 @@ const valid = {
   REDIS_URL: 'redis://localhost:6380',
   JWT_ACCESS_SECRET: 'a'.repeat(32),
   JWT_REFRESH_SECRET: 'b'.repeat(32),
+  CHECKIN_SECRET: 'c'.repeat(32),
 };
 
 describe('loadEnv', () => {
@@ -30,6 +31,13 @@ describe('loadEnv', () => {
     expect(() =>
       loadEnv({ ...valid, JWT_ACCESS_SECRET: 'too-short' } as NodeJS.ProcessEnv),
     ).toThrow(/JWT_ACCESS_SECRET/);
+  });
+
+  it('refuses to boot without a check-in signing secret', () => {
+    // Not defaulted on purpose: an unsigned QR scheme looks identical to a signed
+    // one right up to the moment someone checks in with a code they invented.
+    const { CHECKIN_SECRET: _omitted, ...rest } = valid;
+    expect(() => loadEnv(rest as NodeJS.ProcessEnv)).toThrow(/CHECKIN_SECRET/);
   });
 
   it('parses GOOGLE_CLIENT_IDS into a trimmed list', () => {

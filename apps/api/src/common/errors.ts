@@ -88,9 +88,25 @@ export class EmailAlreadyRegisteredError extends AppError {
  */
 export class InvalidQueueTransitionError extends AppError {
   constructor(command: string, from: string) {
-    super('INVALID_QUEUE_TRANSITION', 409, `Cannot ${command} from ${from}`, { command, from });
+    // **The message is for a receptionist, the details are for a developer.**
+    // It used to read "Cannot COMPLETE_CONSULTATION from COMPLETED", which is the
+    // single most likely thing staff see - with no realtime until Phase 7, two
+    // people acting on the same board means one of them loses this race routinely -
+    // and it told them nothing they could act on while leaking the engine's internal
+    // command vocabulary (docs/Rules.md 7). `command` and `from` are unchanged in
+    // `details`, so logs and clients keep everything they had.
+    super(
+      'INVALID_QUEUE_TRANSITION',
+      409,
+      `That is no longer possible - this is already ${humanState(from)}. ` +
+        'Someone may have acted first; reload to see what changed.',
+      { command, from },
+    );
   }
 }
+
+/** `IN_CONSULTATION` -> `in consultation`. Enough to make one sentence read. */
+const humanState = (state: string): string => state.toLowerCase().replaceAll('_', ' ');
 
 /** call-next with nobody checked in. docs/PRD.md 8.2 - the doctor never idles for someone still at home. */
 export class NoEligiblePatientError extends AppError {

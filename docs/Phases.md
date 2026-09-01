@@ -19,6 +19,10 @@
 
 Tick a phase box the moment its **Integration checkpoint** passes — not when the code is written.
 Every subtask row in this doc carries its own `☐`; tick those as you go and the phase box last.
+
+`◐` means **built and verified as far as it can be, but the checkpoint has not passed** — used where
+what remains needs hardware a build cannot supply. It is not a tick and must never be rounded up to
+one.
 Narrative history, decisions and surprises go in **PROGRESS.md**; this table is just the scoreboard.
 
 | ✓ | Phase | Size | Est. focused days | Parallel agents | Tag when done |
@@ -29,7 +33,7 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 | ☑ | 3 — Discovery | M | 3–4 | 4 | `phase-3-done` |
 | ☑ | 4 — Queue Engine | XL | 8–12 | 4 (with care) | `phase-4-done` |
 | ☑ | 5 — Join + Payment → Token | L | 5–7 | 3 | `phase-5-done` |
-| ☐ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
+| ◐ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
 | ☐ | 7 — Realtime + ETA | L | 5–7 | 4 | `phase-7-done` |
 | ☐ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
 | ☐ | 9 — Hardening | L | 5–7 | 6 | `phase-9-done` |
@@ -835,7 +839,17 @@ Give doctors and reception real screens to run the session (Phase 6).
 **Goal:** Staff and doctors can run a real session.
 **Prerequisites:** Phase 4 (commands), Phase 5 (real entries), Phase 1 (RBAC).
 **Size:** `L` · ~5–7 focused days · up to 4 parallel agents
-**Status:** ☐ not started → tick in §0 when the integration checkpoint passes
+**Status:** ◐ **code complete, not merged, checkpoint pending a device** (2026-09-02)
+
+All six subtasks are built and verified; five are ticked and `P6-WEB-02` is half-ticked. The phase box
+in §0 stays ☐ until a human runs the device walkthrough, because **three claims cannot be proven
+without hardware**: the camera permission prompt, a webcam decoding a QR off a phone screen, and a
+real Razorpay payment issuing a token through the live webhook. Everything else was driven end to end
+through the running console — 40/40 — with the resulting database state read back and checked
+(`docs/PROGRESS.md`, 2026-09-02).
+
+Phase 5 ticked four boxes on a typecheck and had to un-tick them. That is the whole reason this one
+waits.
 
 ### 📦 What you'll have after this phase
 The hospital side becomes usable by real people. A doctor gets a clean "current patient + call next" screen;
@@ -849,25 +863,72 @@ added by staff and slots in by token order. Everything still updates only on pag
 
 ### 🔌 Endpoints introduced
 ```
-(No new business endpoints — the consoles call the Phase-4 command endpoints.)
-POST /sessions/:id/check-in now accepts { code }  — the scanned QR (signed, opaque)
-GET  /queue-entries/:id/qr  (or QR embedded in the token response)
+POST /sessions/:sessionId/check-in    body: { checkInCode | tokenNumber }  (unchanged since Phase 4)
+GET  /sessions/:sessionId/queue       -> Paginated<QueueEntryView> in CALL_ORDER   ← ADDED
+POST /sessions/:sessionId/cancel-entry  body: { entryId, cause, reason }           ← ADDED
 ```
+
+**Corrected during the build.** This section originally read "No new business endpoints — the
+consoles call the Phase-4 command endpoints", and that was wrong twice over:
+
+- **There was no way to READ the queue.** `QueueEntryView` has existed since Phase 4 and nothing
+  returned a list of them — every command endpoint returns one entry. A doctor console that cannot
+  read the queue cannot exist.
+- **There was no staff-facing cancel.** `POST /queue-entries/:id/cancel` is scoped to the caller's
+  own account, and `docs/PRD.md` 6.3 asks reception for "Assist: cancellations".
+
+There is no `GET /queue-entries/:id/qr`: the QR is already on the token response as
+`MyQueueEntry.checkInCode`, and a second way to fetch it would be a second thing to keep signed.
+See `docs/PROGRESS.md` 2026-09-01.
 
 ### 🛠️ Build detail
 **Wave 1:** `P6-CONTRACT-01` (check-in-by-code/token, walk-in, QR payload) + `P6-BE-01` (signed QR code gen + check-in validation).
 
 | ID | Task | Stream | Wave | Deps | Test / Done-when |
 |---|---|---|---|---|---|
-| ☐ P6-CONTRACT-01 | Check-in/walk-in/QR DTOs | CONTRACT | 1 | — | compiles |
-| ☐ P6-BE-01 | Signed QR code on token; check-in accepts {code\|tokenNumber} + validates | BE | 1 | P4 | scan works; tampered rejected; double-scan idempotent |
-| ☐ P6-WEB-01 | **Doctor console** (Design 5.7): current patient + all session commands + presence | WEB | 2 | Wave 1 | run a full session vs seed entries |
-| ☐ P6-WEB-02 | **Staff: QR check-in** (camera) + manual search fallback | WEB | 2 | Wave 1 | scan token QR → CHECKED_IN; manual works |
-| ☐ P6-WEB-03 | **Staff: walk-in** registration | WEB | 2 | Wave 1 | walk-in appears auto-checked-in |
-| ☐ P6-WEB-04 | **Staff: priority/emergency + cancel/requeue** (audited) | WEB | 2 | Wave 1 | emergency reorders + audited |
+| ☑ P6-CONTRACT-01 | Check-in/walk-in/QR DTOs | CONTRACT | 1 | — | compiles |
+| ☑ P6-BE-01 | Signed QR code on token; check-in accepts {code\|tokenNumber} + validates | BE | 1 | P4 | scan works; tampered rejected; double-scan idempotent |
+| ☑ P6-WEB-01 | **Doctor console** (Design 5.7): current patient + all session commands + presence | WEB | 2 | Wave 1 | run a full session vs seed entries |
+| ◐ P6-WEB-02 | **Staff: QR check-in** (camera) + manual search fallback | WEB | 2 | Wave 1 | scan token QR → CHECKED_IN; manual works |
+| ☑ P6-WEB-03 | **Staff: walk-in** registration | WEB | 2 | Wave 1 | walk-in appears auto-checked-in |
+| ☑ P6-WEB-04 | **Staff: priority/emergency + cancel/requeue** (audited) | WEB | 2 | Wave 1 | emergency reorders + audited |
+
+> **`◐ P6-WEB-02` is half-ticked on purpose.** The typed-token path, the searchable-list path and the
+> signed-code path were all driven end to end through the running console, and a tampered code was
+> refused. **A real camera decoding a real QR off a real phone has not been done** — that needs
+> hardware and a human. Phase 5 ticked four boxes on a typecheck and had to un-tick them; this one
+> stays half until someone points a camera at a screen. The repeatable walkthrough covers the
+> payload path either side of the lens; it cannot cover the lens.
 
 **Parallelization:** Wave 2 → `WEB-01 ∥ WEB-02 ∥ WEB-03 ∥ WEB-04` (separate routes → 3–4 agents).
 **Integration checkpoint:** doctor + receptionist run a complete session (QR check-in → call → consult → complete + a no-show + a walk-in).
+
+**The walkthrough now lives in the repo.** `pnpm --filter @opd/web test:console` drives the real
+console over HTTP — every server action pressed as the form React renders for a client with no
+JavaScript — and reads the resulting rows back out of Postgres. **56 checks, re-runnable against a
+dirty database.** It replaces the scratch harness of 2026-09-01, which proved the same things once
+and then evaporated. It is deliberately outside `turbo run test`: it needs two live servers and a
+seeded database, and a hermetic task must not.
+
+**Status of the checkpoint (2026-09-02).** Everything except the camera has been driven through the
+running console and confirmed in the database — call/start/complete, skip and requeue (which correctly
+sends a patient to the BACK, not their token position), no-show, pause surviving a reload, presence,
+audited escalation reordering the queue, staff cancellation with the right refund tier, a stale action
+refused in plain English, and cross-tenant access answering 404 with no patient data. End-of-session
+resolved present-but-unseen patients as RESCHEDULED and the absent one as NO_SHOW, which is the
+distinction docs/PRD.md 8.9 and 8.11 draw.
+
+**Outstanding, and hardware-only:**
+
+1. the camera permission prompt and a webcam decoding a real QR;
+2. a real Razorpay payment issuing a token through the live webhook;
+3. a declined camera permission degrading to a working screen.
+
+**As built:** the four routes live under the existing `app/(console)` shell, **not** the separate
+`(doctor)` / `(staff)` route groups sketched below. That shell already carries auth, silent token
+refresh, role-aware navigation and the error banner; a second top-level group would have duplicated
+every one of them. `/queue` is one board, role-aware, rather than two consoles — which is also honest
+about a small hospital, where the same person does both jobs. See `docs/PROGRESS.md` 2026-09-01.
 
 ### 🤖 Agent kickoff
 
@@ -892,6 +953,10 @@ Give every WEB agent this line verbatim:
 
 - **Browser camera access requires HTTPS** (or `localhost`). The staff console will be used on a real device
   on the hospital's network — plan a dev certificate or a tunnel now, not on pilot day.
+  **Confirmed in the build.** The scanner is `qr-scanner` (~15KB), chosen over the native
+  `BarcodeDetector` because that API does not exist on Windows desktop or in Firefox/Safari. The page
+  treats an absent camera — no HTTPS, no device, permission declined — as normal and falls back to the
+  typed token and the searchable list, both of which work over plain HTTP.
 - **Staff will scan twice.** Double-scan must be idempotent and show "already checked in", not an error.
 - **The QR must be opaque and signed.** No PII in the payload, and no raw entry id that could be enumerated
   or forged. Short payload — long ones scan badly on cheap cameras.

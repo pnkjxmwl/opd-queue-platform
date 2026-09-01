@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import type { CancellationRules, MyQueueEntry, QueueEntryStatus } from '@opd/contracts';
+import { signCheckInCode } from '../../common/checkin-code';
 import { CALL_ORDER } from '../queue/call-order';
 import { ELIGIBLE_TO_CALL, canApplyToEntry } from '../queue/state-machine';
 
@@ -128,7 +129,10 @@ export function toMyQueueEntry(
 
     tokenNumber: row.tokenNumber,
     tokenLabel: row.tokenLabel,
-    checkInCode: row.checkInCode,
+    // Signed HERE rather than stored signed, so the signature is never baked into a
+    // row: rotating CHECKIN_SECRET invalidates every QR at once, which is what a
+    // compromised secret needs, and the stored reference itself never changes.
+    checkInCode: row.checkInCode === null ? null : signCheckInCode(row.checkInCode),
 
     patientId: row.patientId,
     patientName: row.patient.name,

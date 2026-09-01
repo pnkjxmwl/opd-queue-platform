@@ -37,6 +37,7 @@ type SessionRow = {
   tokenPrefix: string;
   feePaise: number;
   registrationClosedAt: Date | null;
+  pausedAt: Date | null;
   version: number;
 };
 
@@ -54,6 +55,7 @@ const toDto = (row: SessionRow): OPDSession => ({
   tokenPrefix: row.tokenPrefix,
   feePaise: row.feePaise,
   registrationClosedAt: row.registrationClosedAt?.toISOString() ?? null,
+  pausedAt: row.pausedAt?.toISOString() ?? null,
   version: row.version,
 });
 

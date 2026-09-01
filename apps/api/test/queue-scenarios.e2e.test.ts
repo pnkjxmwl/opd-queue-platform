@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createTestApp, resetDb } from './helpers';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { QueueService, type QueueActor } from '../src/modules/queue/queue.service';
-import { dateColumnFromString } from '../src/common/ist';
+import { dateColumnFromString, istToday } from '../src/common/ist';
 import { checkIn } from '../src/modules/queue/commands/check-in';
 import { callNext } from '../src/modules/queue/commands/call-next';
 import { startConsultation } from '../src/modules/queue/commands/start-consultation';
@@ -89,7 +89,12 @@ describe('queue scenarios (P4-TEST-01)', () => {
           departmentId,
           originalDoctorId: doctorId,
           currentProviderDoctorId: doctorId,
-          date: dateColumnFromString(new Date().toISOString().slice(0, 10)),
+          // istToday(), NOT toISOString().slice(0,10): the second is the UTC day, and
+          // between 00:00 and 05:30 IST that is YESTERDAY. Every fixture here stamped
+          // sessions with the wrong calendar date for five and a half hours a day, so
+          // discovery - which filters on the IST day - returned nothing and the suite
+          // failed only if you happened to run it after midnight.
+          date: dateColumnFromString(istToday()),
           scheduledStart: start,
           scheduledEnd: new Date(start.getTime() + 3 * 60 * 60 * 1000),
           feePaise: 50_000,
@@ -418,7 +423,8 @@ describe('queue scenarios (P4-TEST-01)', () => {
     await startConsultation(queue, sessionId, actor, { entryId: ann });
 
     await expect(endSession(queue, sessionId, actor, {})).rejects.toThrow(
-      /Cannot END_SESSION from IN_CONSULTATION/,
+      // The machine detail lives in `details` now; the message is for a human.
+      /already in consultation/,
     );
 
     // Complete them first, and it ends cleanly.

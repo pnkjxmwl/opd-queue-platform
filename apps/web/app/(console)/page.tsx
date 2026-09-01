@@ -9,8 +9,10 @@ export default async function Overview() {
   // should be told the queue console does not exist yet, not left hunting for it.
   const nextStep =
     active?.role === 'ADMIN'
-      ? 'Set up departments, doctors, schedules, sessions and queue rules under Configuration.'
-      : 'Your queue console arrives in a later phase. Nothing to do here yet.';
+      ? 'Run today’s sessions under Queue, or set up departments, doctors, schedules and queue rules under Configuration.'
+      : active?.role === 'DOCTOR'
+        ? 'Open Queue to run your session: call the next patient, start and complete consultations.'
+        : 'Open Queue to check patients in, register walk-ins and manage today’s sessions.';
 
   return (
     <>

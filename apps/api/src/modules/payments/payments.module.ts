@@ -1,5 +1,9 @@
 import { Module } from '@nestjs/common';
-import { PaymentsController, RazorpayWebhookController } from './payments.controller';
+import {
+  PaymentsController,
+  RazorpayWebhookController,
+  StaffCancellationController,
+} from './payments.controller';
 import { PaymentsService } from './payments.service';
 import { RazorpayClient } from './razorpay.client';
 import { QueueModule } from '../queue/queue.module';
@@ -17,7 +21,7 @@ import { ConfigModule } from '../config/config.module';
  */
 @Module({
   imports: [QueueModule, ConfigModule],
-  controllers: [PaymentsController, RazorpayWebhookController],
+  controllers: [PaymentsController, RazorpayWebhookController, StaffCancellationController],
   providers: [
     PaymentsService,
     // Constructed by hand, not by DI. RazorpayClient takes an optional `Env`, and

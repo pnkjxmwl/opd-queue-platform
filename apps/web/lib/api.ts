@@ -72,11 +72,18 @@ async function toError(res: Response): Promise<Error> {
     const body = (await res.json()) as ApiError;
     // Surface the server's own message. It is written to be shown to a human and
     // deliberately carries no internals.
-    const details = body.error.details
-      ? ` (${Object.entries(body.error.details)
-          .map(([field, message]) => `${field}: ${String(message)}`)
-          .join('; ')})`
-      : '';
+    //
+    // `details` is appended ONLY for a validation failure, where it names the field
+    // that was wrong and is the whole point. Every other error puts machine context
+    // there - a queue rejection carries `{command, from}` - and pasting that after a
+    // sentence written for a receptionist turned "someone acted first" into
+    // "(command: COMPLETE_CONSULTATION; from: COMPLETED)".
+    const details =
+      body.error.code === 'VALIDATION_FAILED' && body.error.details
+        ? ` (${Object.entries(body.error.details)
+            .map(([field, message]) => `${field}: ${String(message)}`)
+            .join('; ')})`
+        : '';
     return new ApiCallError(body.error.code, `${body.error.message}${details}`);
   } catch {
     return new Error(`Request failed with ${res.status}`);
