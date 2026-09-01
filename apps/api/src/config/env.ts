@@ -17,7 +17,7 @@ try {
  * a missing DATABASE_URL should fail loudly at startup, not as a confusing 500
  * on the first request.
  */
-const EnvSchema = z.object({
+export const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
 
