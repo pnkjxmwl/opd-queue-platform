@@ -10,6 +10,7 @@ import {
   type MyQueueEntry,
   type Paginated,
   type QueueEntryStatus,
+  type SessionStatus,
   type StaffCancelEntryRequest,
   type StaffCancelEntryResponse,
   type WebhookAck,
@@ -20,6 +21,7 @@ import { NotFoundError, ValidationFailedError } from '../../common/errors';
 import { isUniqueViolation } from '../../common/prisma-errors';
 import { QueueService, type CommandContext, type QueueActor } from '../queue/queue.service';
 import { QueuePolicyService } from '../config/queue-policy.service';
+import { EtaService } from '../eta/eta.service';
 import { joinQueue } from '../queue/commands/join';
 import { applyPaymentConfirmation } from '../queue/commands/confirm-payment';
 import { applyCancellation } from '../queue/commands/cancel-entry';
@@ -149,6 +151,20 @@ async function refundForCancellation(
   return { refundId: refund.id, paymentId: payment.id, amountPaise: refundable };
 }
 
+/**
+ * Entry statuses where a patient is still waiting for their turn, and session
+ * statuses where a queue is actually running. Outside either, there is no honest
+ * ETA to give and the card shows none rather than a number that means nothing.
+ */
+const AWAITING_A_TURN: QueueEntryStatus[] = [
+  'CONFIRMED',
+  'VIRTUAL_WAITING',
+  'CHECKED_IN',
+  'READY',
+  'CALLED',
+];
+const SESSION_RUNNING: SessionStatus[] = ['OPEN_FOR_REGISTRATION', 'ACTIVE'];
+
 @Injectable()
 export class PaymentsService {
   private readonly log = new Logger(PaymentsService.name);
@@ -158,6 +174,7 @@ export class PaymentsService {
     private readonly queue: QueueService,
     private readonly policies: QueuePolicyService,
     private readonly razorpay: RazorpayClient,
+    private readonly eta: EtaService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -752,6 +769,27 @@ export class PaymentsService {
     const viewBySession = new Map(views);
     const policyByHospital = new Map(policies);
 
+    // P7-BE-03 · one batched call for every entry on the screen, keyed by entryId.
+    // "Ahead of you" differs per entry, so each one is its own question - but they
+    // share the doctor-pace queries, which is the whole point of the batch.
+    const windows = await this.eta.windowsFor(
+      rows.map((row) => {
+        const live = viewBySession.get(row.sessionId)!;
+        const position = live.eligibleOrder.indexOf(row.id);
+        return {
+          key: row.id,
+          doctorId: row.session.currentProvider.id,
+          // The same rule the visible "ahead of you" count uses, deliberately: a
+          // patient must never be shown a position and a time that disagree. Not in
+          // the pool - still at home - means everyone present is ahead of them.
+          aheadCount: position === -1 ? live.eligibleOrder.length : position,
+          currentStartedAt: live.consultingSince,
+          estimable: AWAITING_A_TURN.includes(row.status) && SESSION_RUNNING.includes(row.session.status),
+        };
+      }),
+      now,
+    );
+
     return rows.map((row) =>
       toMyQueueEntry(
         row,
@@ -759,6 +797,7 @@ export class PaymentsService {
         viewBySession.get(row.sessionId)!,
         policyByHospital.get(row.hospitalId)!.cancellationRules,
         now,
+        windows.get(row.id) ?? null,
       ),
     );
   }

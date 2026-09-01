@@ -24,7 +24,8 @@
     "PUBLIC_BASE_URL",
     "RESERVATION_TTL_SEC",
     "API_URL",
-    "EXPO_PUBLIC_API_URL"
+    "EXPO_PUBLIC_API_URL",
+    "NEXT_PUBLIC_API_URL"
   ],
   "tasks": {
     "build": {

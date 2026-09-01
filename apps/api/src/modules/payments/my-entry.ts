@@ -32,7 +32,9 @@ export const MY_ENTRY_INCLUDE = {
       feePaise: true,
       hospital: { select: { id: true, name: true, area: true } },
       department: { select: { name: true } },
-      currentProvider: { select: { name: true } },
+      // The id as well as the name: the ETA engine learns per DOCTOR, and after a
+      // substitution it must be the person actually in the room (docs/PRD.md 8.11).
+      currentProvider: { select: { id: true, name: true } },
     },
   },
 } as const;
@@ -45,6 +47,12 @@ export interface SessionLiveView {
   /** Eligible entry ids in call order - an entry's position in this is its "ahead" count. */
   eligibleOrder: string[];
   bookedTokenNumbers: number[];
+  /**
+   * When the consultation in progress began, or null if nobody is in the room.
+   * The ETA subtracts it, which is what makes a window move while one patient
+   * overruns rather than only when the queue advances.
+   */
+  consultingSince: Date | null;
 }
 
 /**
@@ -70,7 +78,7 @@ export async function loadSessionLiveView(
     }),
     tx.queueEntry.findFirst({
       where: { sessionId, status: { in: ['CALLED', 'IN_CONSULTATION'] } },
-      select: { tokenLabel: true },
+      select: { tokenLabel: true, status: true, consultStartedAt: true },
     }),
     tx.queueEntry.findMany({
       where: { sessionId, status: { in: ['CONFIRMED', 'VIRTUAL_WAITING'] } },
@@ -82,6 +90,7 @@ export async function loadSessionLiveView(
     nowServingToken: serving?.tokenLabel ?? null,
     eligibleOrder: eligible.map((e) => e.id),
     bookedTokenNumbers: booked.map((e) => e.tokenNumber),
+    consultingSince: serving?.status === 'IN_CONSULTATION' ? serving.consultStartedAt : null,
   };
 }
 
@@ -117,6 +126,12 @@ export function toMyQueueEntry(
   live: SessionLiveView,
   rules: CancellationRules,
   now: Date,
+  /**
+   * When this patient will be seen (P7-BE-03). Computed by the caller, which is
+   * where the batching lives - this mapper stays a projection and does no IO.
+   * Null whenever the engine has nothing meaningful to say.
+   */
+  eta: { from: string; to: string } | null = null,
 ): MyQueueEntry {
   const position = live.eligibleOrder.indexOf(row.id);
 
@@ -156,9 +171,10 @@ export function toMyQueueEntry(
     checkedInAheadCount: position === -1 ? live.eligibleOrder.length : position,
     bookedAheadCount: live.bookedTokenNumbers.filter((t) => t < row.tokenNumber).length,
 
-    // Phase 7 fills these; a window, never a point.
-    etaFrom: null,
-    etaTo: null,
+    // A window, never a point (docs/Phases.md). Null while there is nothing honest
+    // to say - the visit is over, or the session is not running.
+    etaFrom: eta?.from ?? null,
+    etaTo: eta?.to ?? null,
 
     joinedAt: row.joinedAt.toISOString(),
     checkedInAt: row.checkedInAt?.toISOString() ?? null,

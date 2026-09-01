@@ -165,3 +165,74 @@ export function section(page, title) {
   const start = text.indexOf(title);
   return start === -1 ? '' : text.slice(start, start + 900);
 }
+
+// ---------------------------------------------------------------------------
+// The socket (Phase 7)
+// ---------------------------------------------------------------------------
+
+/**
+ * A realtime listener, connected the way the console's own `<Live/>` connects: fetch
+ * a token from the console (which reads the httpOnly cookie), then hand it to the
+ * API's gateway in the handshake.
+ *
+ * The browser component itself cannot run here - there is no DOM - so this stands in
+ * for it. What it genuinely proves is the server half: that a command emits, that the
+ * payload is what the contract says, and that an unauthorised socket gets nothing.
+ */
+export async function connectSocket(web, sessionId, { token, api } = {}) {
+  const { io } = await import('socket.io-client');
+  const url = api ?? process.env.API_URL ?? 'http://localhost:3000';
+
+  let bearer = token;
+  if (bearer === undefined) {
+    const res = await go(`${web}/api/socket-token`);
+    bearer = JSON.parse(res.html).token;
+  }
+
+  const socket = io(url, {
+    auth: { token: bearer },
+    transports: ['websocket'],
+    forceNew: true,
+    // Without this a rejected socket reconnects forever and `connected` flickers
+    // back to true a second after the server dropped it.
+    reconnection: false,
+  });
+
+  await new Promise((resolve) => {
+    socket.on('connect', resolve);
+    socket.on('connect_error', resolve);
+    socket.on('disconnect', resolve);
+    setTimeout(resolve, 5000);
+  });
+
+  // Socket.IO fires `connect` on the client as soon as the TRANSPORT is up, which is
+  // before the server has run its handshake check - so an unauthenticated socket is
+  // briefly "connected" and then dropped. What matters is whether it is still
+  // connected once the server has had its say, so settle before answering.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const connected = socket.connected;
+
+  const subscribeTo = (id) =>
+    connected
+      ? socket.timeout(5000).emitWithAck('subscribe', { sessionId: id }).catch(() => ({ ok: false }))
+      : Promise.resolve({ ok: false, error: 'not connected' });
+
+  const ack = connected && sessionId ? await subscribeTo(sessionId) : { ok: false };
+
+  return {
+    connected,
+    subscribed: ack.ok === true,
+    error: ack.error,
+    subscribeTo,
+    /** The next event of this name, or null if none arrives in time. */
+    next: (event, ms = 5000) =>
+      new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(null), ms);
+        socket.once(event, (payload) => {
+          clearTimeout(timer);
+          resolve(payload);
+        });
+      }),
+    close: () => socket.close(),
+  };
+}

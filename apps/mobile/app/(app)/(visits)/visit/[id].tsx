@@ -12,6 +12,7 @@ import {
   nextStepFor,
 } from '../../../../lib/visits';
 import { Button, ErrorNote, SectionLabel } from '../../../../lib/ui';
+import { useLiveSession } from '../../../../lib/realtime';
 import { calendarDate, istClock, istRange, rupees } from '../../../../lib/format';
 import { theme } from '../../../../theme';
 
@@ -23,9 +24,13 @@ import { theme } from '../../../../theme';
  * ahead who may or may not turn up. Nothing here recomputes a queue position
  * (docs/CLAUDE.md 9).
  *
- * It polls, because it is the screen a patient leaves open while they wait.
+ * Phase 7 made it live. `entry.updated` arrives on this account's own private room
+ * the instant their booking moves - called, skipped, cancelled - and
+ * `useLiveSession` keeps the queue numbers and the ETA window moving with the room
+ * they are waiting in. The poll below is now only the safety net for a socket that
+ * died without saying so, which on a phone is an ordinary Tuesday.
  */
-const LIVE_POLL_MS = 10_000;
+const FALLBACK_POLL_MS = 90_000;
 
 export default function TokenCard() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -34,10 +39,13 @@ export default function TokenCard() {
   // There is no GET /me/queue-entries/:id: the active list is small and already
   // carries every field this screen needs, so one cached request serves both
   // screens rather than adding an endpoint for a single reader.
-  const query = useApi<Paginated<MyQueueEntry>>(MY_ACTIVE_ENTRIES, true, LIVE_POLL_MS);
+  const query = useApi<Paginated<MyQueueEntry>>(MY_ACTIVE_ENTRIES, true, FALLBACK_POLL_MS);
   const past = useApi<Paginated<MyQueueEntry>>('/me/queue-entries?scope=past&limit=50');
   const entry =
     query.data?.items.find((e) => e.id === id) ?? past.data?.items.find((e) => e.id === id) ?? null;
+
+  // Watch the queue this token is in, so the ETA and "ahead of you" move with it.
+  useLiveSession(entry?.sessionId);
 
   const cancel = useApiPost<{ reason?: string }, CancelEntryResponse>(`/queue-entries/${id}/cancel`);
 

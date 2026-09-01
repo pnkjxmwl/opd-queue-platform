@@ -18,3 +18,5 @@ export * from './config/dto';
 export * from './discovery/dto';
 export * from './queue/dto';
 export * from './payments/dto';
+export * from './realtime/dto';
+export * from './eta/dto';

@@ -18,7 +18,7 @@
  * things it cannot reach (the camera, anything needing a DOM) start to matter.
  */
 
-import { canPress, go, login, logout, press, section, visible } from './harness.mjs';
+import { canPress, connectSocket, go, login, logout, press, section, visible } from './harness.mjs';
 import { fileURLToPath } from 'node:url';
 import { checkInSecret, columnOf, createSession, signCheckInCode, sql } from './fixture.mjs';
 
@@ -152,7 +152,11 @@ check(
   visible(page).includes('Unpaid holds') && section(page, 'Unpaid holds').includes('Unpaid Hold'),
   section(page, 'Unpaid holds').slice(0, 200),
 );
-check('the board admits it is not live', /reload|refresh|as of|not live/i.test(visible(page)));
+check(
+  'the board says whether it is live, rather than going quiet',
+  /live|connecting/i.test(visible(page)),
+  visible(page).slice(0, 200),
+);
 
 page = await press(page, { button: 'Call next' });
 check(
@@ -316,7 +320,7 @@ check(
 );
 
 // ===========================================================================
-heading('Act VI - two people, one board, no realtime');
+heading('Act VI - two people, one board');
 
 const entryIdOf = (name) =>
   sql(`
@@ -389,7 +393,60 @@ const refundCount = sql(`
 check('and its refund was raised exactly once', refundCount === '1', `refund rows: ${refundCount}`);
 
 // ===========================================================================
-heading('Act VII - the tenant boundary');
+heading('Act VII - realtime (P7-BE-01, P7-BE-02, P7-WEB-01)');
+
+// docs/Phases.md, the Phase 7 integration checkpoint, verbatim: "two clients; one
+// triggers a change, the other updates live". The console's own listener is a
+// browser component this harness cannot run, so the SOCKET is driven directly and
+// the button that fires it is pressed for real, over HTTP.
+{
+  const listener = await connectSocket(WEB, sessionId);
+  check('a console can subscribe to the session it is showing', listener.subscribed, listener.error ?? '');
+
+  const heard = listener.next('session.updated', 6000);
+  await press(await go(`${WEB}/queue/${sessionId}/walk-in`), {
+    button: 'Add',
+    fill: { name: 'Realtime Rita' },
+  });
+  const event = await heard;
+
+  check('acting on the board tells everyone watching it', event !== null, 'no session.updated arrived');
+  check(
+    'and the broadcast carries no patient data - only "this queue moved"',
+    event !== null && Object.keys(event).sort().join(',') === 'sessionId,version',
+    JSON.stringify(event),
+  );
+
+  const refused = await listener.subscribeTo('ffffffff-ffff-4fff-8fff-ffffffffffff');
+  check('a session that does not exist cannot be subscribed to', refused.ok === false, JSON.stringify(refused));
+
+  const anonymous = await connectSocket(WEB, sessionId, { token: 'not-a-token' });
+  check(
+    'a socket with a bad token is dropped by the server',
+    !anonymous.connected,
+    'it was still connected after the server had had its say',
+  );
+  check(
+    'and it never got into the room',
+    anonymous.subscribed === false,
+    JSON.stringify({ subscribed: anonymous.subscribed, error: anonymous.error }),
+  );
+
+  listener.close();
+  anonymous.close();
+
+  // The board still renders its live indicator server-side, so a receptionist can
+  // see whether the screen is moving before they trust it.
+  const boardHtml = visible(await board(sessionId));
+  check(
+    'the board says on screen whether it is live',
+    /live|connecting/i.test(boardHtml),
+    boardHtml.slice(0, 200),
+  );
+}
+
+// ===========================================================================
+heading('Act VIII - the tenant boundary');
 
 logout();
 await login(WEB, 'admin@fortis.test', 'Demo@12345');
@@ -417,7 +474,7 @@ const loggedOut = await board(sessionId);
 check('a logged-out visitor is sent to sign in', /sign in|password/i.test(visible(loggedOut)), visible(loggedOut).slice(0, 150));
 
 // ===========================================================================
-heading('Act VIII - the doctor sees their own work, and the session ends');
+heading('Act IX - the doctor sees their own work, and the session ends');
 
 await login(WEB, 'doctor@apollo.test', 'Demo@12345');
 const doctorList = await go(`${WEB}/queue`);

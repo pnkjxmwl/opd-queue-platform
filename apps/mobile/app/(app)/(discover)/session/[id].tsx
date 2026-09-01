@@ -7,6 +7,7 @@ import { JoinButton, PresencePill, QueryState, SessionStatusPill } from '../../.
 import { calendarDate, istRange, rupees } from '../../../../lib/format';
 import { Avatar, Button, SectionLabel, pressable } from '../../../../lib/ui';
 import { bookingStateFor, useMyActiveEntries } from '../../../../lib/visits';
+import { useLiveSession } from '../../../../lib/realtime';
 import { theme } from '../../../../theme';
 
 /**
@@ -27,24 +28,30 @@ import { theme } from '../../../../theme';
  * no information. The navigation graph is now a DAG.
  */
 /**
- * How often the live queue re-reads itself while this screen is open.
+ * The safety net behind the socket, not the way this screen stays current.
  *
- * This is the ONE screen that polls. A session's queue moves on its own - the
- * numbers on it are stale the moment they are drawn - while a hospital's address is
- * not, so nothing else pays for a timer.
- *
- * Ten seconds is a guess at the boundary between "feels live" and "hammers an
- * uncached read path". Phase 7 replaces the timer with a socket push and keeps the
- * fetch, because docs/Rules.md 8 makes the REST snapshot the thing a client
+ * Phase 7 replaced the ten-second timer with a push: `useLiveSession` subscribes to
+ * this session's room and every command in it invalidates this query, so the numbers
+ * move when the QUEUE moves rather than when a timer fires. The fetch itself is
+ * unchanged, because docs/Rules.md 8 makes the REST snapshot the thing a client
  * reconciles against either way.
+ *
+ * A slow poll stays because a phone's socket dies in ways a phone does not notice -
+ * a lift, a hospital basement, an OS that suspended the app. Ninety seconds is
+ * invisible when the socket is healthy and is the difference between "briefly stale"
+ * and "silently wrong" when it is not.
  */
-const LIVE_QUEUE_POLL_MS = 10_000;
+const FALLBACK_POLL_MS = 90_000;
 
 export default function Session() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
-  const session = useApi<SessionDetail>(`/sessions/${id}`, true, LIVE_QUEUE_POLL_MS);
+  const session = useApi<SessionDetail>(`/sessions/${id}`, true, FALLBACK_POLL_MS);
   const data = session.data;
+
+  // Live for as long as this screen is open (P7-MOB-01). Unsubscribes on unmount, so
+  // a patient browsing ten doctors does not end up listening to ten queues.
+  useLiveSession(id);
 
   // What this account already holds here, and whether anyone is left to book for.
   // Both are server data; joining them is rendering, not a queue decision.

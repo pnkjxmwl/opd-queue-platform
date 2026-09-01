@@ -3,6 +3,7 @@ import { QueueController } from './queue.controller';
 import { QueueService } from './queue.service';
 import { ReservationSweeper } from './reservation-sweeper';
 import { ConfigModule } from '../config/config.module';
+import { RealtimeModule } from '../../realtime/realtime.module';
 
 /**
  * The queue engine (docs/Architecture.md 7). Owns QueueEntry, QueueEvent,
@@ -14,7 +15,9 @@ import { ConfigModule } from '../config/config.module';
  * than writing a QueueEntry itself (docs/Rules.md 1.2 - no raw CRUD on queue state).
  */
 @Module({
-  imports: [ConfigModule],
+  // RealtimeModule so every command announces itself AFTER it commits (P7-BE-02).
+  // The dependency runs one way only: the gateway knows nothing about the queue.
+  imports: [ConfigModule, RealtimeModule],
   controllers: [QueueController],
   providers: [QueueService, ReservationSweeper],
   exports: [QueueService, ReservationSweeper],

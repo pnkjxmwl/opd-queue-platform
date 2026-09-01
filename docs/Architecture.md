@@ -402,8 +402,20 @@ window = [now + etaMinutes - pad, now + etaMinutes + pad]
 - **Rooms:**
   - `session:{id}` — everyone viewing that session's live queue (patients browsing, doctor, staff).
   - `account:{id}` — a patient's personal channel (their own entry status, nudges).
-- **Events emitted after a command commits:**
-  - `session.updated`, `entry.status_changed`, `eta.updated`, `session.status_changed`, `doctor.presence_changed`.
+- **Events emitted after a command commits (AS BUILT, Phase 7): two, and they carry no state.**
+  - `session.updated` → `{ sessionId, version }`, to `session:{id}`
+  - `entry.updated` → `{ entryId, sessionId, version }`, to `account:{id}`
+
+  The five separate event types sketched here collapsed into one per room, carrying a version
+  and nothing else. A client re-reads its REST snapshot on any event, which is the reconnect
+  contract below applied all the time — so a missed, duplicated or out-of-order event costs a
+  refetch rather than correctness. It also means the room every patient joins has nothing in it
+  to leak (DPDP). Putting a `QueueSnapshot` on the wire was rejected: it is an aggregation
+  `discovery` owns, and rebuilding it in the queue engine would be a second definition of the
+  live queue able to disagree with the first. See `docs/PROGRESS.md` 2026-09-02.
+
+  The emit is wired once, in `QueueService.runCommand`, after `$transaction` resolves — so no
+  command can forget it, for the same reason none can forget the session lock.
 - **Auth on connect:** JWT verified in the handshake; server decides which rooms a socket may join (a patient can't join a hospital-only channel).
 - **Reconnect contract:** client re-fetches the REST snapshot, then rejoins rooms. Realtime never replaces the snapshot as source of truth.
 
