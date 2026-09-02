@@ -91,11 +91,29 @@ export function usePushRegistration(): void {
           method: 'POST',
           body: JSON.stringify({ token, platform: Platform.OS === 'ios' ? 'ios' : 'android' }),
         });
-      } catch {
-        // Never surface this. A failed push registration is invisible to the patient
-        // and must stay that way - the queue works regardless, and an error toast
-        // about notifications on the booking screen would be noise about nothing
-        // they can fix.
+      } catch (error) {
+        // **Never surfaced to the patient.** The queue works without push, and an
+        // error about notifications on a booking screen is noise about something
+        // they cannot fix.
+        //
+        // But it IS logged, because swallowing it entirely made this undiagnosable:
+        // push silently did nothing for a whole testing session, and the only
+        // evidence anywhere was `no registered device` on the server, which names
+        // the symptom rather than the cause. A warning in the Metro terminal is
+        // invisible to a patient and is the first place a developer looks.
+        const reason = error instanceof Error ? error.message : String(error);
+        const noProjectId = reason.includes('projectId');
+
+        console.warn(
+          `[push] this device did not register, so it will receive nothing.\n` +
+            `  reason: ${reason}\n` +
+            (noProjectId
+              ? `  fix: this project has no EAS projectId. Run "eas init" in apps/mobile.\n`
+              : '') +
+            `  note: Expo Go cannot receive remote push at all - Android support was\n` +
+            `        removed in SDK 53 and iOS never had it. Push needs a development\n` +
+            `        build: eas build --profile development`,
+        );
       }
     })();
   }, [signedIn, authedFetch]);
