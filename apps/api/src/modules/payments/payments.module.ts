@@ -6,6 +6,7 @@ import {
 } from './payments.controller';
 import { PaymentsService } from './payments.service';
 import { RazorpayClient } from './razorpay.client';
+import { ReconcileSweeper } from './reconcile-sweeper';
 import { QueueModule } from '../queue/queue.module';
 import { ConfigModule } from '../config/config.module';
 import { EtaModule } from '../eta/eta.module';
@@ -27,6 +28,7 @@ import { EtaModule } from '../eta/eta.module';
   controllers: [PaymentsController, RazorpayWebhookController, StaffCancellationController],
   providers: [
     PaymentsService,
+    ReconcileSweeper,
     // Constructed by hand, not by DI. RazorpayClient takes an optional `Env`, and
     // Nest reads that parameter as an injectable `Object` it cannot resolve - which
     // broke every OTHER e2e suite while the payment tests kept passing, because they
@@ -34,6 +36,6 @@ import { EtaModule } from '../eta/eta.module';
     // asking the container to understand it.
     { provide: RazorpayClient, useFactory: () => new RazorpayClient() },
   ],
-  exports: [PaymentsService],
+  exports: [PaymentsService, ReconcileSweeper],
 })
 export class PaymentsModule {}

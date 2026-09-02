@@ -112,9 +112,10 @@ describe('entry state machine (P4-BE-01)', () => {
   });
 
   it('covers every command and every status, so a new one cannot slip through untested', () => {
-    expect(QUEUE_COMMANDS).toHaveLength(18);
+    expect(QUEUE_COMMANDS).toHaveLength(19);
     expect(ENTRY_STATUSES).toHaveLength(12);
-    // 18 x 12 pairs considered; only these are legal.
+    // 19 x 12 pairs considered; only these are legal. CLOSE_REGISTRATION (Phase 8)
+    // adds none: it shuts the session's doors and moves nobody.
     expect(EXPECTED_LEGAL).toHaveLength(31);
   });
 
@@ -245,6 +246,9 @@ const EXPECTED_SESSION_ACCEPTS: Record<QueueCommand, SessionStatus[]> = {
   RESUME: ['ACTIVE'],
   END_SESSION: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
   PRESENCE: ['SCHEDULED', 'OPEN_FOR_REGISTRATION', 'ACTIVE'],
+  // Phase 8. Only a session that is open can have its doors closed; re-closing a
+  // closed one is the command's own no-op, not a session-status question.
+  CLOSE_REGISTRATION: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
 };
 
 const running = (status: SessionStatus) => ({

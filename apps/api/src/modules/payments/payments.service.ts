@@ -328,6 +328,54 @@ export class PaymentsService {
     }
   }
 
+  /**
+   * P8-BE-05 · confirm what the webhook never told us.
+   *
+   * A payment that is still CREATED or PENDING long after the patient left the
+   * checkout is either abandoned or a webhook that never arrived, and the two look
+   * identical from here - so it asks Razorpay, which knows. **Money that moved must
+   * become a token**; the reservation quietly lapsing while the patient has been
+   * charged is the worst outcome this system can produce.
+   *
+   * It routes the answer through `onPaymentCaptured`, the exact function the webhook
+   * uses, so there is ONE confirm path. A second one would drift, and it would drift
+   * on the money path.
+   */
+  async reconcilePending(olderThan: Date, limit = 20): Promise<{ checked: number; confirmed: number }> {
+    if (!this.razorpay.configured) return { checked: 0, confirmed: 0 };
+
+    const stale = await this.prisma.payment.findMany({
+      where: {
+        status: { in: ['CREATED', 'PENDING'] },
+        createdAt: { lt: olderThan },
+      },
+      select: { id: true, razorpayOrderId: true },
+      orderBy: { createdAt: 'asc' },
+      take: limit,
+    });
+
+    let confirmed = 0;
+    for (const payment of stale) {
+      try {
+        const attempts = await this.razorpay.paymentsForOrder(payment.razorpayOrderId);
+        const captured = attempts.find((attempt) => attempt.status === 'captured');
+        if (captured === undefined) continue;
+
+        const ack = await this.onPaymentCaptured(captured);
+        if (ack.handled !== 'IGNORED' && ack.handled !== 'DUPLICATE') confirmed += 1;
+        this.log.warn(
+          { paymentId: payment.id, handled: ack.handled },
+          'reconciled a captured payment whose webhook never arrived',
+        );
+      } catch (error) {
+        // One unreachable order must not stop the rest of the sweep.
+        this.log.error({ err: error, paymentId: payment.id }, 'reconcile failed for one payment');
+      }
+    }
+
+    return { checked: stale.length, confirmed };
+  }
+
   private async onPaymentCaptured(
     entity: { id: string; order_id?: string | null; amount: number; currency: string } | undefined,
   ): Promise<WebhookAck> {

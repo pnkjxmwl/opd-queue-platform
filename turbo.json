@@ -25,7 +25,9 @@
     "RESERVATION_TTL_SEC",
     "API_URL",
     "EXPO_PUBLIC_API_URL",
-    "NEXT_PUBLIC_API_URL"
+    "NEXT_PUBLIC_API_URL",
+    "DISABLED_WORKERS",
+    "EXPO_ACCESS_TOKEN"
   ],
   "tasks": {
     "build": {

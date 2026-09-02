@@ -114,6 +114,8 @@ export const QueueEventType = z.enum([
   'SESSION_PAUSED',
   'SESSION_RESUMED',
   'SESSION_ENDED',
+  /** Phase 8: the cutoff worker, or staff, closed the doors on new bookings. */
+  'SESSION_REGISTRATION_CLOSED',
   'DOCTOR_PRESENCE_CHANGED',
 ]);
 export type QueueEventType = z.infer<typeof QueueEventType>;

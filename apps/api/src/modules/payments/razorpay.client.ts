@@ -37,11 +37,22 @@ export interface RazorpayRefund {
   status: string;
 }
 
+/** One payment against an order, as the reconcile worker needs to see it. */
+export interface RazorpayPayment {
+  id: string;
+  order_id?: string | null;
+  status: string;
+  amount: number;
+  currency: string;
+}
+
 /** The client's shape, so a test can substitute one without a mocking library. */
 export interface RazorpayApi {
   createOrder(input: { amountPaise: number; receipt: string; notes?: Record<string, string> }): Promise<RazorpayOrder>;
   refund(input: { paymentId: string; amountPaise: number; notes?: Record<string, string> }): Promise<RazorpayRefund>;
   verifyWebhookSignature(rawBody: Buffer, signature: string | undefined): boolean;
+  /** Phase 8: what actually happened to an order whose webhook never arrived. */
+  paymentsForOrder(orderId: string): Promise<RazorpayPayment[]>;
 }
 
 @Injectable()
@@ -136,15 +147,45 @@ export class RazorpayClient implements RazorpayApi {
     return timingSafeEqual(expected, provided);
   }
 
-  private async post<T>(path: string, payload: unknown): Promise<T> {
-    const credentials = Buffer.from(
+  /**
+   * P8-BE-05 · every payment Razorpay knows about for one of our orders.
+   *
+   * The webhook is the primary path and always will be - this exists because
+   * webhooks are delivered over the internet to a server that might have been
+   * restarting, and docs/Architecture.md 12 budgets for exactly that: *"catch missed
+   * webhooks by polling Razorpay."* A patient whose money left their account must get
+   * a token whether or not an HTTP callback survived the journey.
+   */
+  async paymentsForOrder(orderId: string): Promise<RazorpayPayment[]> {
+    const body = await this.get<{ items?: RazorpayPayment[] }>(`/orders/${orderId}/payments`);
+    return body.items ?? [];
+  }
+
+  private async get<T>(path: string): Promise<T> {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: 'GET',
+      headers: { authorization: `Basic ${this.credentials()}` },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`Razorpay ${path} failed with ${res.status}: ${detail.slice(0, 500)}`);
+    }
+    return (await res.json()) as T;
+  }
+
+  private credentials(): string {
+    return Buffer.from(
       `${this.config.RAZORPAY_KEY_ID}:${this.config.RAZORPAY_KEY_SECRET}`,
     ).toString('base64');
+  }
 
+  private async post<T>(path: string, payload: unknown): Promise<T> {
     const res = await fetch(`${API_BASE}${path}`, {
       method: 'POST',
       headers: {
-        authorization: `Basic ${credentials}`,
+        authorization: `Basic ${this.credentials()}`,
         'content-type': 'application/json',
       },
       body: JSON.stringify(payload),

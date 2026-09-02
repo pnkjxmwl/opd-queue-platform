@@ -7,6 +7,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider, useAuth } from '../lib/auth';
 import { CityProvider } from '../lib/city';
 import { RealtimeProvider } from '../lib/realtime';
+import { usePushRegistration } from '../lib/push';
 import { theme } from '../theme';
 
 /**
@@ -15,6 +16,10 @@ import { theme } from '../theme';
  */
 function Gate() {
   const { ready, signedIn } = useAuth();
+
+  // P8-MOB-01. Inside the gate because it needs a session, and once for the whole
+  // app: permission, token registration, and opening the right screen on a tap.
+  usePushRegistration();
   const segments = useSegments();
   const router = useRouter();
 

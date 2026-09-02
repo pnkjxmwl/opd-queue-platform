@@ -2,6 +2,9 @@ import { Module } from '@nestjs/common';
 import { QueueController } from './queue.controller';
 import { QueueService } from './queue.service';
 import { ReservationSweeper } from './reservation-sweeper';
+import { GraceSweeper } from './grace-sweeper';
+import { CutoffSweeper } from './cutoff-sweeper';
+import { EtaModule } from '../eta/eta.module';
 import { ConfigModule } from '../config/config.module';
 import { RealtimeModule } from '../../realtime/realtime.module';
 
@@ -17,9 +20,9 @@ import { RealtimeModule } from '../../realtime/realtime.module';
 @Module({
   // RealtimeModule so every command announces itself AFTER it commits (P7-BE-02).
   // The dependency runs one way only: the gateway knows nothing about the queue.
-  imports: [ConfigModule, RealtimeModule],
+  imports: [ConfigModule, RealtimeModule, EtaModule],
   controllers: [QueueController],
-  providers: [QueueService, ReservationSweeper],
-  exports: [QueueService, ReservationSweeper],
+  providers: [QueueService, ReservationSweeper, GraceSweeper, CutoffSweeper],
+  exports: [QueueService, ReservationSweeper, GraceSweeper, CutoffSweeper],
 })
 export class QueueModule {}

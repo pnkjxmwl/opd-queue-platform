@@ -463,22 +463,63 @@ POST /webhooks/razorpay  (payment.captured)
 
 ---
 
-## 12. Background Jobs (module: `jobs`, BullMQ)
+## 12. Background Jobs (module-local sweepers)
 
-| Job | Trigger | Purpose |
-|---|---|---|
-| `reservation-expiry` | 60s sweep | Marks lapsed unpaid holds CANCELLED. **As built (Phase 5): not BullMQ.** `QueueEntry.reservationExpiresAt` is what frees the slot - every rule that counts bookings ignores a RESERVED entry past that instant, so a session never oversells even if no worker runs. The sweep only writes down what is already true, and calls the domain command to do it. Phase 8 owns worker infrastructure and may replace it. |
-| `grace-expiry` | on call-next | Drive recall → skip → requeue for no-shows. |
-| `eta-tick` | periodic per active session | Refresh ETA as time passes / doctor idle. |
-| `registration-cutoff` | periodic | Auto-close registration when ETA would exceed session end / cap hit. |
-| `notification-dispatch` | on events | Send push via Expo. |
-| `payment-reconcile` | periodic | Catch missed webhooks by polling Razorpay. |
+**AS BUILT (Phase 8): there is no BullMQ, and no queue.** Every worker is a periodic
+**sweep over database state**, sharing one base class (`common/sweeper.ts`) that owns the
+interval, the overlap guard and an env kill switch (`DISABLED_WORKERS`).
+
+The reasoning, in full, because this is a deliberate departure from the plan that used to
+be in this section. Phase 5 made the same call for `reservation-expiry` and wrote down
+why: *the column, not a job, is what frees the slot — the sweeper only writes down what
+is already true.* That describes all of them. A called patient is out of time when
+`calledAt + gracePeriodSec` has passed; registration is past its cutoff when the clock
+and the queue say so; a payment is unreconciled when its row says PENDING. **The state is
+the schedule**, and re-deriving it beats remembering it:
+
+- **A sweep cannot lose work.** A job enqueued between a command committing and the
+  process restarting is gone. A sweep re-derives everything outstanding on its next pass,
+  so an outage self-heals.
+- **A sweep is idempotent by construction**, so the "stable `jobId`" requirement that
+  exists because a queue can deliver twice does not arise: a second pass finds nothing to
+  do. Every worker has a test asserting exactly that.
+- **No new dependency, no job state, nothing extra to operate.**
+
+The cost is precision: a sweep acts within one interval of the moment rather than at it.
+Grace periods and cutoffs are measured in minutes, so that is affordable. If something
+ever must fire *at* a second, BullMQ is still the right answer and `Sweeper` is the seam
+it goes behind.
+
+| Sweeper | Lives in | Every | Purpose |
+|---|---|---|---|
+| `reservation` | `queue/reservation-sweeper.ts` | 60s | Mark lapsed unpaid holds CANCELLED (Phase 5). |
+| `eta-tick` | `eta/eta-tick.ts` | 60s | Re-broadcast live sessions so an idle doctor's ETA drifts later (Phase 7). |
+| `grace` | `queue/grace-sweeper.ts` | 15s | recall → skip → requeue → no-show, all thresholds from `QueuePolicy`. |
+| `cutoff` | `queue/cutoff-sweeper.ts` | 60s | Close registration when a newcomer could not be seen before the session ends. |
+| `reconcile` | `payments/reconcile-sweeper.ts` | 5m | Ask Razorpay about payments whose webhook never arrived. |
+| `notify` | `notifications/event-notifier.ts` | 30s | Turn `QueueEvent` rows into notifications. |
+| `leave-now` | `notifications/leave-now.ts` | 30s | Tell a booked patient when to set off. |
+| `dispatch` | `notifications/dispatch-sweeper.ts` | 15s | Send what is PENDING through Expo. |
+
+**Workers mutate state only by calling domain commands** — never by writing rows. That is
+what keeps the state machine, the audit log, the queue timeline and the realtime
+broadcast applying to a timer's action exactly as they do to a receptionist's. Closing
+registration therefore required a real `CLOSE_REGISTRATION` command rather than a column
+update.
 
 ---
 
 ## 13. Notifications (module: `notifications`)
 
-- Central `NotificationService`; domain events enqueue notification jobs (no notification logic scattered in feature code).
+- Central `NotificationService` (docs/PROGRESS.md 2026-09-02). **An outbox, not a call**:
+  `record()` writes a PENDING `Notification` row and a separate sweep sends it, so a push
+  survives a restart between the decision and the send, Expo is never called from inside
+  a transaction, and "was she told?" has an answer.
+- **Events become messages by reading `QueueEvent`**, the append-only timeline — not by
+  calling into the queue commands. So `QueueModule` does not import notifications and
+  cannot be broken by them, and an outage catches up rather than losing messages.
+- **The storm guard is `unique(entryId, type)` in the database**, not an application
+  check: the sweeps that produce these run every half-minute and would race.
 - Channel: **Expo Push** (→ FCM/APNs) for MVP. Records stored for history/idempotency.
 - Types: token issued, queue milestones, "leave/arrive now," called, delay, cancellation, refund, substitution.
 - SMS/WhatsApp are pluggable later (needs India DLT registration).
