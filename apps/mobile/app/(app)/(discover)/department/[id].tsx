@@ -3,6 +3,7 @@ import { FlatList, StyleSheet, Text, View } from 'react-native';
 import type { Paginated, SessionCard } from '@opd/contracts';
 import { useApi } from '../../../../lib/api';
 import { MoreNote, PAGE, QueryState, SessionCardView } from '../../../../lib/discovery';
+import { useLiveSessions } from '../../../../lib/realtime';
 import { bookingStateFor, useMyActiveEntries } from '../../../../lib/visits';
 import { theme } from '../../../../theme';
 
@@ -21,6 +22,11 @@ export default function DepartmentSessions() {
   const myBookings = useMyActiveEntries();
 
   const sessions = useApi<Paginated<SessionCard>>(`/departments/${id}/sessions?limit=${PAGE}`);
+
+  // Live for every session in this department, not just the one a patient has opened
+  // (P7-MOB-01). Each card carries a queue that moves on its own; without this the
+  // numbers sat frozen until the screen was navigated away from and back.
+  useLiveSessions((sessions.data?.items ?? []).map((card) => card.id));
   const first = sessions.data?.items[0];
 
   return (
