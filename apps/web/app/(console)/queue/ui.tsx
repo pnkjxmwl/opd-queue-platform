@@ -94,18 +94,3 @@ export function SuccessBanner({ message }: { message?: string }) {
   );
 }
 
-/**
- * Small print explaining that a rejection is normal.
- *
- * There is no realtime until Phase 7, so two staff WILL act on stale data and the
- * server WILL refuse one of them. docs/Phases.md names this as the phase's risk:
- * the console must make a rejection legible rather than look broken.
- */
-export function StaleDataNote() {
-  return (
-    <p className="mt-4 text-caption text-ink-muted">
-      This board updates when the page reloads, not live. If someone else acted first, your action is
-      refused and the reason appears above — reload and look before trying again.
-    </p>
-  );
-}

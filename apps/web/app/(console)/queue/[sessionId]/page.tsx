@@ -9,7 +9,8 @@ import type {
 import { requireStaffHospital } from '../../../../lib/tenant';
 import { queueGet } from '../_run';
 import { Card, ErrorBanner, button, buttonDanger, buttonQuiet, input, label, td, th } from '../../config/ui';
-import { IST_TIME, PriorityPill, StaleDataNote, StatusPill, SuccessBanner, token } from '../ui';
+import { IST_TIME, PriorityPill, StatusPill, SuccessBanner, token } from '../ui';
+import { Live } from '../live';
 import {
   callNext,
   cancelEntry,
@@ -370,7 +371,13 @@ export default async function BoardPage({
           </div>
         )}
 
-        <StaleDataNote />
+        {/*
+          P7-WEB-01. This replaces StaleDataNote, which existed to admit that the
+          board did not update itself. It does now - and when the connection drops,
+          this says so rather than going quiet, because a board that has silently
+          stopped moving is the thing that gets a patient called twice.
+        */}
+        <Live sessionId={sessionId} />
       </div>
     </>
   );

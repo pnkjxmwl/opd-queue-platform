@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { AuthTokens } from '@opd/contracts';
@@ -39,23 +40,60 @@ export class TokenService {
     if (!existing) throw new UnauthorizedError('Invalid refresh token');
     if (existing.expiresAt <= new Date()) throw new UnauthorizedError('Refresh token expired');
 
-    // Atomic claim: a single conditional UPDATE, so exactly one caller can consume a
-    // given token. A read-then-write here would let two concurrent refreshes both
-    // succeed - handing out two live sessions AND hiding genuine replay, because
-    // neither would observe the other's revocation.
-    const claimed = await this.prisma.refreshToken.updateMany({
-      where: { tokenHash, revokedAt: null },
-      data: { revokedAt: new Date() },
+    /**
+     * The claim, the mint and the family revocation all happen under ONE lock on the
+     * family, because the three of them interleave badly without it.
+     *
+     * **The bug this fixes**, found by CI on a build that had nothing to do with
+     * auth, and reproducible only under real concurrency:
+     *
+     *   1. the winner claims the presented token (marks it revoked)
+     *   2. the loser's claim fails, so it revokes every unrevoked row in the family -
+     *      which at that instant is none, because...
+     *   3. ...the winner now inserts its NEW token
+     *
+     * The replay was detected and announced, and the new token survived it anyway.
+     * "Reuse detected, everyone logs in again" is the entire security value of a
+     * token family, and that ordering quietly withdrew it.
+     *
+     * `SELECT ... FOR UPDATE` on the family is the same instrument, and the same
+     * documented exception to "no raw SQL" (docs/Rules.md 2), that serialises two
+     * receptionists pressing Call next. Both paths take it first, so the loser's
+     * revocation cannot land in the gap between the winner's claim and its insert.
+     */
+    const rotated = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`
+        SELECT "id" FROM "RefreshToken" WHERE "familyId" = ${existing.familyId} FOR UPDATE
+      `;
+
+      // Atomic claim: a single conditional UPDATE, so exactly one caller can consume
+      // a given token. A read-then-write here would let two concurrent refreshes both
+      // succeed - handing out two live sessions AND hiding genuine replay, because
+      // neither would observe the other's revocation.
+      const claimed = await tx.refreshToken.updateMany({
+        where: { tokenHash, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+
+      // Already consumed - by an attacker replaying it, or by a racing client. The
+      // family has to die, but NOT in here: throwing inside the transaction would
+      // roll the revocation back with everything else, and the replay would be
+      // announced while every token it was meant to kill stayed alive. (It did
+      // exactly that for one run, which is why this is spelled out.)
+      if (claimed.count === 0) return null;
+
+      return this.mint(existing.account, existing.familyId, tx);
     });
 
-    if (claimed.count === 0) {
-      // Already consumed - by an attacker replaying it, or by a racing client.
-      // Either way the token is no longer exclusively held, so kill the family.
+    if (rotated === null) {
+      // Outside the transaction, and correct precisely because the lock above is
+      // what orders these: the loser waited for the winner to COMMIT before it could
+      // claim, so the winner's new token exists by now and is revoked with the rest.
       await this.revokeFamily(existing.familyId);
       throw new UnauthorizedError('Refresh token reuse detected; session revoked');
     }
 
-    return this.mint(existing.account, existing.familyId);
+    return rotated;
   }
 
   /** Log out: kill the whole family, not just the presented token. */
@@ -79,6 +117,8 @@ export class TokenService {
   private async mint(
     account: { id: string; email: string },
     familyId: string,
+    /** The rotation's transaction, so the new token lands under the family lock. */
+    client: Prisma.TransactionClient | PrismaService = this.prisma,
   ): Promise<AuthTokens> {
     const config = env();
 
@@ -88,7 +128,7 @@ export class TokenService {
     );
 
     const refreshToken = randomBytes(48).toString('base64url');
-    await this.prisma.refreshToken.create({
+    await client.refreshToken.create({
       data: {
         accountId: account.id,
         familyId,

@@ -2,6 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { Email, LoginRequest, Password, SignupRequest } from './auth/dto';
 import { CreatePatientRequest } from './patients/dto';
 import {
+  EntryUpdatedEvent,
+  SessionUpdatedEvent,
+  SubscribeRequest,
+  accountRoom,
+  sessionRoom,
+} from './realtime/dto';
+import { EtaBasis, SessionEta } from './eta/dto';
+import {
   CancellationRules,
   ClockTime,
   ConfigListQuery,
@@ -283,5 +291,62 @@ describe('discovery schemas', () => {
     expect(HospitalSearchQuery.parse({ q: '  apollo ' }).q).toBe('apollo');
     expect(HospitalSearchQuery.safeParse({ q: '   ' }).success).toBe(false);
     expect(HospitalSearchQuery.safeParse({ q: 'x'.repeat(81) }).success).toBe(false);
+  });
+});
+
+describe('realtime + eta (P7-CONTRACT-01)', () => {
+  const sessionId = '11111111-0000-4000-8000-000000000003';
+  const accountId = '11111111-0000-4000-8000-000000000004';
+
+  it('namespaces the two rooms so one can never be mistaken for the other', () => {
+    expect(sessionRoom(sessionId)).toBe(`session:${sessionId}`);
+    expect(accountRoom(accountId)).toBe(`account:${accountId}`);
+    expect(sessionRoom(sessionId)).not.toBe(accountRoom(sessionId));
+  });
+
+  it('makes the session broadcast a doorbell, not a copy of the queue', () => {
+    // Everyone looking at this doctor receives it. Carrying queue state here would
+    // be a second definition of the live queue - one that could disagree with the
+    // REST read - and one refactor away from carrying somebody's name with it.
+    expect(Object.keys(SessionUpdatedEvent.shape)).toEqual(['sessionId', 'version']);
+    expect(SessionUpdatedEvent.parse({ sessionId, version: 7 })).toEqual({ sessionId, version: 7 });
+  });
+
+  it('strips anything a caller tries to smuggle into the broadcast', () => {
+    const parsed = SessionUpdatedEvent.parse({
+      sessionId,
+      version: 7,
+      patientName: 'Anita Sharma',
+    }) as Record<string, unknown>;
+    expect(parsed.patientName).toBeUndefined();
+  });
+
+  it('makes the personal event a nudge, not a copy of the state', () => {
+    // No status, no ETA: the client refetches, so there is exactly one path by which
+    // a patient's screen learns what is true.
+    expect(Object.keys(EntryUpdatedEvent.shape)).toEqual(['entryId', 'sessionId', 'version']);
+  });
+
+  it('only lets a client ask for a session room, and only by uuid', () => {
+    expect(SubscribeRequest.safeParse({ sessionId }).success).toBe(true);
+    expect(SubscribeRequest.safeParse({ sessionId: 'session:*' }).success).toBe(false);
+    expect(SubscribeRequest.safeParse({ accountId }).success).toBe(false);
+  });
+
+  it('says what the estimate stands on, so a doctor can judge whether to trust it', () => {
+    expect(EtaBasis.options).toEqual(['SEED', 'DOCTOR_HISTORY', 'TODAY']);
+    const eta = SessionEta.parse({
+      sessionId,
+      expectedConsultMins: 12.5,
+      basis: 'SEED',
+      sampleSize: 0,
+      runningBehind: false,
+      joinNowEtaFrom: null,
+      joinNowEtaTo: null,
+    });
+    expect(eta.sampleSize).toBe(0);
+    // A zero or negative estimate is never a valid answer - it would produce a
+    // window that has already passed.
+    expect(SessionEta.safeParse({ ...eta, expectedConsultMins: 0 }).success).toBe(false);
   });
 });

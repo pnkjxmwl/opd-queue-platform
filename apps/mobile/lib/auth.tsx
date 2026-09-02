@@ -19,6 +19,14 @@ type AuthState = {
   signOut: () => Promise<void>;
   /** fetch() against the API with the access token attached, refreshing once on 401. */
   authedFetch: (path: string, init?: RequestInit) => Promise<Response>;
+  /**
+   * The current access token, for the realtime handshake (P7-MOB-01).
+   *
+   * Exposed here rather than re-read from SecureStore by the socket, so there is one
+   * copy in memory and it is always the one `authedFetch` is using - including right
+   * after a refresh, when a second reader would still be holding the old one.
+   */
+  accessToken: string | null;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -120,7 +128,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const value = useMemo<AuthState>(
-    () => ({ ready, signedIn: tokens !== null, signIn, signUp, signOut, authedFetch }),
+    () => ({
+      ready,
+      signedIn: tokens !== null,
+      signIn,
+      signUp,
+      signOut,
+      authedFetch,
+      accessToken: tokens?.accessToken ?? null,
+    }),
     [ready, tokens, signIn, signUp, signOut, authedFetch],
   );
 

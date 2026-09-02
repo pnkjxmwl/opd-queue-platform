@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import type {
   ActorType,
@@ -12,6 +12,7 @@ import type {
 } from '@opd/contracts';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotFoundError, TenantMismatchError } from '../../common/errors';
+import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { assertSessionAccepts, type QueueCommand } from './state-machine';
 import { CALL_ORDER } from './call-order';
 import { toEntryView } from './commands/result';
@@ -152,9 +153,12 @@ const TRANSACTION_MAX_WAIT_MS = 15_000;
 
 @Injectable()
 export class QueueService {
+  private readonly log = new Logger(QueueService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly policies: QueuePolicyService,
+    private readonly realtime: RealtimeGateway,
   ) {}
 
   /**
@@ -180,7 +184,14 @@ export class QueueService {
     // lock that other staff are waiting on.
     const policy = await this.policies.ensure(actor.hospitalId);
 
-    return this.prisma.$transaction(
+    // Assigned inside the transaction, read AFTER it commits. Realtime is emitted
+    // from out here for the reason docs/Phases.md puts first among this phase's
+    // risks: an event sent inside a transaction that then rolls back tells a patient
+    // they were called while the database says otherwise.
+    let touchedEntryIds: string[] = [];
+    let committedVersion = 0;
+
+    const result = await this.prisma.$transaction(
       async (tx) => {
         const session = await lockSession(tx, sessionId);
         if (session === null) {
@@ -242,10 +253,67 @@ export class QueueService {
           records,
         });
 
+        // The version the row now holds: `session.version` is the value that was
+        // READ under the lock, and the update above incremented it.
+        committedVersion = session.version + 1;
+        touchedEntryIds = [
+          ...new Set(
+            records
+              .map((r) => r.entryId)
+              .filter((id): id is string => typeof id === 'string' && id !== ''),
+          ),
+        ];
+
         return result;
       },
       { timeout: TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
     );
+
+    await this.announce(sessionId, committedVersion, touchedEntryIds);
+    return result;
+  }
+
+  /**
+   * P7-BE-02 · tell everyone watching, once the change is real.
+   *
+   * **One hook, twelve commands.** The same argument that put the session lock in
+   * `runCommand` rather than in each command file applies exactly: a command cannot
+   * forget to emit an event it never emits, and "we forgot to notify" is a bug that
+   * only shows up as a screen that quietly stopped updating.
+   *
+   * Awaited rather than fired and forgotten. It costs one indexed lookup, and it
+   * means that by the time a command's HTTP response is written, its events have
+   * gone out - which is what makes them testable without polling for them.
+   *
+   * Never throws: the command has already committed and is correct. A realtime
+   * failure downgrades the product from live to stale, and stale is what every
+   * client already knows how to recover from.
+   */
+  private async announce(
+    sessionId: string,
+    version: number,
+    entryIds: string[],
+  ): Promise<void> {
+    try {
+      this.realtime.emitSessionUpdate(sessionId, version);
+      if (entryIds.length === 0) return;
+
+      // Only entries with an account behind them: a walk-in registered at the desk
+      // has no app and no room to send anything to.
+      const owners = await this.prisma.queueEntry.findMany({
+        where: { id: { in: entryIds }, accountId: { not: null } },
+        select: { id: true, accountId: true },
+      });
+      for (const owner of owners) {
+        if (owner.accountId === null) continue;
+        this.realtime.emitEntryUpdate(owner.accountId, owner.id, sessionId, version);
+      }
+    } catch (error) {
+      this.log.error(
+        { err: error, sessionId },
+        'realtime announce failed - the command committed, clients will refetch',
+      );
+    }
   }
 
   /**

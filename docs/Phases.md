@@ -34,7 +34,7 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 | ☑ | 4 — Queue Engine | XL | 8–12 | 4 (with care) | `phase-4-done` |
 | ☑ | 5 — Join + Payment → Token | L | 5–7 | 3 | `phase-5-done` |
 | ◐ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
-| ☐ | 7 — Realtime + ETA | L | 5–7 | 4 | `phase-7-done` |
+| ◐ | 7 — Realtime + ETA | L | 5–7 | 4 | `phase-7-done` |
 | ☐ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
 | ☐ | 9 — Hardening | L | 5–7 | 6 | `phase-9-done` |
 | ☐ | 10 — Staging Deploy + Pilot | M | 3–4 | 3 | `phase-10-done` |
@@ -984,7 +984,13 @@ Make every screen live and predict wait times — the product's USP (Phase 7).
 **Goal:** Live position + accurate moving ETA window for everyone.
 **Prerequisites:** Phase 4 (events), Phase 6 (consoles), Phase 3 (patient views).
 **Size:** `L` · ~5–7 focused days · up to 4 parallel agents
-**Status:** ☐ not started → tick in §0 when the integration checkpoint passes
+**Status:** ◐ **built and verified as far as a machine can, checkpoint pending two screens** (2026-09-02)
+
+Five of seven subtasks are ticked. `P7-WEB-01` and `P7-MOB-01` are `◐`: the socket half of
+each is proven against the real gateway, but a browser repainting a board and a phone
+reconnecting on hospital Wi-Fi both need a human with a device. **266 API tests** (was 216),
+**37 contract tests**, and the console walkthrough now includes a real socket receiving a real
+broadcast caused by a real button press — 63/63.
 
 ### 📦 What you'll have after this phase
 The "magic moment." Queue position and ETA update **live** on every screen with no refresh, and the ETA engine
@@ -1010,13 +1016,24 @@ WS  connect (Socket.IO, JWT in handshake)
 
 | ID | Task | Stream | Wave | Deps | Test / Done-when |
 |---|---|---|---|---|---|
-| ☐ P7-CONTRACT-01 | Event + ETA DTOs, room naming | CONTRACT | 1 | — | compiles |
-| ☐ P7-BE-01 | Socket.IO gateway + Redis adapter + JWT handshake + room-join authz | BE | 2 | Wave 1 | patient can't join hospital room |
-| ☐ P7-BE-02 | Wire emit-after-commit into every queue command | BE | 2 | P7-BE-01 | commit → event received; nothing on rollback |
-| ☐ P7-BE-03 | **ETA engine** (blend seed/all-time/today; window; queue-health) | BE | 2 | Wave 1 | **known inputs → expected window**; no-history/idle/overrun cases |
-| ☐ P7-BE-04 | eta-tick worker (recompute over time) | BE | 2 | P7-BE-03 | idle doctor → ETA drifts on tick |
-| ☐ P7-MOB-01 | Socket client + reconnect→snapshot→resubscribe + live ETA | MOB | 2 | Wave 1 | server change → UI updates; drop/restore resyncs |
-| ☐ P7-WEB-01 | Socket client in consoles | WEB | 2 | Wave 1 | doctor/staff queue live |
+| ☑ P7-CONTRACT-01 | Event + ETA DTOs, room naming | CONTRACT | 1 | — | compiles; 6 contract tests |
+| ☑ P7-BE-01 | Socket.IO gateway + Redis adapter + JWT handshake + room-join authz | BE | 2 | Wave 1 | 20 e2e; unknown/cancelled/unverified refused **identically** |
+| ☑ P7-BE-02 | Wire emit-after-commit into every queue command | BE | 2 | P7-BE-01 | commit → event received; **refused command → no event, no version bump** |
+| ☑ P7-BE-03 | **ETA engine** (blend seed/all-time/today; window; queue-health) | BE | 2 | Wave 1 | 19 unit + 10 e2e; no-history/idle/overrun all pinned |
+| ☑ P7-BE-04 | eta-tick worker (recompute over time) | BE | 2 | P7-BE-03 | idle session re-broadcast; version and updatedAt untouched |
+| ◐ P7-MOB-01 | Socket client + reconnect→snapshot→resubscribe + live ETA | MOB | 2 | Wave 1 | written, typechecks; **no phone has run it** |
+| ◐ P7-WEB-01 | Socket client in consoles | WEB | 2 | Wave 1 | socket proven; `router.refresh()` in a browser is not |
+
+**As built, three departures from the sketch above, all recorded in `docs/PROGRESS.md`:**
+
+- **The events carry no state.** `session.updated` is `{ sessionId, version }` and
+  `entry.updated` is `{ entryId, sessionId, version }`. Clients re-read over REST. Putting a
+  `QueueSnapshot` on the wire would have been a second definition of the live queue, built in
+  the queue engine, able to disagree with the REST read — and no client wanted it.
+- **`eta-tick` is a `setInterval`, not BullMQ**, exactly as Phase 5's reservation sweeper is,
+  because Phase 8 owns worker infrastructure and lists this job again.
+- **One new endpoint: `GET /sessions/:sessionId/eta`** — queue health is staff-facing
+  (docs/PRD.md 195), so it does not belong on the frozen patient `QueueSnapshot`.
 
 **Parallelization:** Wave 2 → BE gateway/ETA ∥ MOB-01 ∥ WEB-01 (clients build against event contract). ETA-03 unit-testable in parallel.
 **Integration checkpoint:** two clients; one triggers a change, the other updates live; ETA moves on a delay; reconnect resyncs.

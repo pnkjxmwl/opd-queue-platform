@@ -4501,6 +4501,231 @@ Unchanged from the 2026-09-01 entry, and the reason `P6-WEB-02` and the §0 box 
 
 The walkthrough proves the payload path either side of the lens. It cannot prove the lens.
 
+---
+
+## 2026-09-02 — Phase 7: realtime + the ETA engine
+
+The USP comes online. Every screen updates itself, and every waiting patient gets a
+window for when they will be seen. 30 new API tests, 6 new contract tests, and the
+console walkthrough grew a realtime act.
+
+### The decision that shaped the whole phase: the broadcast is a doorbell
+
+`session.updated` was specified — by me, in the plan for this phase — as carrying a
+whole `QueueSnapshot`, so a client could drop it into cache without a refetch. It was
+cut before a line of the gateway was written, and the phase got smaller and safer:
+
+```
+session.updated  →  { sessionId, version }
+entry.updated    →  { entryId, sessionId, version }
+```
+
+Two things killed the fat payload:
+
+1. **Nothing wanted it.** The console is server-rendered and answers by calling
+   `router.refresh()`; the mobile app answers by invalidating a TanStack query. Both
+   then re-read over REST. Neither would have looked at a field of it.
+2. **It needed a second definition of "the live queue".** Those numbers are an
+   aggregation `discovery` builds, batched across a page of cards. Rebuilding them
+   inside the queue engine on every command would be a duplicate that could disagree
+   with the REST read — and disagreeing about the queue is the one thing this product
+   must never do.
+
+So the event says *that* something changed, never *what*. That is the reconnect
+contract (docs/Rules.md 8 — fetch a snapshot, never replay events) applied all the
+time rather than only after a drop, and a client that re-reads cannot drift no matter
+which events it missed, duplicated or received out of order.
+
+It also makes the DPDP question trivial: **a payload with no queue data in it cannot
+leak another patient's anything.** The session room is joined by every phone looking
+at that doctor, and now there is nothing in it to leak. A test asserts the key list is
+exactly `['sessionId', 'version']`, and another asserts a bystander watching the same
+session receives no `entry.updated` at all.
+
+### Rooms: two, not three
+
+`session:{id}` for anyone signed in, `account:{id}` joined from the JWT at connect.
+
+**A `staff:{sessionId}` room was rejected.** The consoles need per-entry detail and
+patients must not have it, so the obvious move is a third room — but it needs its own
+authorisation path and its own payload shape, to save the console a REST call it
+already makes on every render. Staff hear the same doorbell and re-read
+`GET /sessions/:id/queue`, which they are already authorised for.
+
+Room joins are authorised server-side against the same rule discovery uses: the
+session must exist, its hospital must be verified, and it must not be cancelled. **All
+three refusals are identical**, so the socket cannot be used to discover which session
+ids exist — pinned by a test that subscribes to a cancelled session, an unverified
+hospital's session and a made-up uuid and asserts the three answers are equal.
+
+### One emit hook, twelve commands
+
+The emit lives in `QueueService.runCommand`, after `$transaction` resolves — the same
+argument that put the session lock there rather than in each command file. **A command
+cannot forget to emit an event it never emits**, and "we forgot to notify" is a bug
+whose only symptom is a screen that quietly stopped updating.
+
+The records list already says which entries were touched, so the account rooms fall
+out of it. Awaited rather than fired and forgotten: it costs one indexed lookup, and it
+means a command's events have gone out by the time its HTTP response is written, which
+is what makes them testable without polling for them.
+
+The rule docs/Phases.md puts first for this phase — never emit inside the transaction —
+is pinned by a test that issues a `call-next` with nobody checked in, and asserts both
+that the version did not move and that **no event arrived at all**.
+
+### The ETA engine
+
+Pure. No Prisma, no `new Date()`. That is what makes the cold cases testable: "an idle
+doctor's window drifts later" is two calls with different clocks, not a fixture and a
+wait. 19 unit tests, 10 more against a real database.
+
+**Weights are renormalised over the terms that exist** (today 0.5, all-time 0.3, seed
+0.2). Treating a missing term as zero drags the estimate below every input it was
+given — a doctor with a 20-minute average and no data yet today would come out at 8
+minutes, which is lower than anything the engine was told. The test that pins this
+asserts the result sits between the smallest and largest input.
+
+**The window is anchored to `now`**, and the idle-doctor case then costs nothing: the
+inputs do not change, the clock does, and the absolute window slides away from the
+patient exactly as their real wait is doing. The same anchor handles an overrunning
+consultation, with a floor so a doctor 40 minutes into a 10-minute estimate produces a
+window that has not already passed.
+
+`sampleSize` is the **all-time count, not the sum** of all-time and today: today's
+consultations are already inside the all-time figure, and adding them would report
+double the evidence that exists.
+
+**Queue health is staff-only.** docs/PRD.md 195 asks for "running slower than usual"
+*for staff visibility*, so it went on a new `GET /sessions/:sessionId/eta` rather than
+onto `QueueSnapshot`, which is the patient shape and frozen. It needs three
+consultations before it will say anything — one slow patient is a patient, not a
+trend, and a flag that cries wolf gets ignored.
+
+### eta-tick is a `setInterval`, again
+
+Exactly the precedent `queue/reservation-sweeper.ts` set in Phase 5, for the same
+reason: **Phase 8 owns worker infrastructure** and lists `eta-tick` in its own table.
+A timer that re-broadcasts every session where somebody is waiting is the smallest
+thing that makes an idle doctor's window drift, and Phase 8 can replace it without
+changing a rule.
+
+It writes nothing and bumps no version — it re-broadcasts the version the row already
+has. That forced a clarification in the contract: a client discards an event only when
+it holds a **strictly greater** version. An equal one still means re-read, because time
+passing is a change nothing commanded. A test asserts the tick leaves both `version`
+and `updatedAt` untouched. It skips paused queues and sessions whose doctor has LEFT:
+broadcasting a drifting estimate for a queue that is stopped would be inventing
+precision.
+
+### The console had to be given a token, and that is a real trade
+
+A WebSocket connects from the browser straight to the API, which is a different origin
+in every deployed environment (console on Vercel, API on Render). The console's cookies
+are `SameSite=Lax` and are simply **not sent there**, so the handshake needs its own
+credential — and the console's whole design to date is that *no token ever reaches the
+browser* (docs/Rules.md 10).
+
+`GET /api/socket-token` now hands the browser the access token. The alternatives were
+worse: proxying the socket through Next is a second hop to operate and debug;
+`SameSite=None` weakens every request the console makes to fix one; and doing without
+is skipping the phase. What bounds it:
+
+- the **access** token only, 15-minute TTL;
+- the **refresh** token stays httpOnly, so a stolen access token expires and cannot be
+  renewed into a lasting session;
+- held in a local variable for one handshake, never `localStorage`, never the DOM;
+- middleware guards the route like every other console route and refreshes an expiring
+  token before handing it over.
+
+Recorded here rather than buried in the file, because it is the first deliberate
+weakening of a Rules.md line in the build and the next person deserves to see the
+reasoning rather than discover the exception.
+
+### The clients
+
+**Console:** a 100-line client component that renders one line of text and calls
+`router.refresh()`. `refresh()` re-runs the server components and patches the DOM in
+place, so an open `<details>` menu or a half-typed reason survives the update — a
+reload would discard both on a screen a receptionist is typing into. It coalesces
+events over 300ms so a burst of commands costs one render. When the connection drops
+it **says so**: a board that has silently stopped moving is exactly how a patient gets
+called twice. `StaleDataNote` is deleted — it existed to admit the board was not live.
+
+**Mobile:** one socket at the root, not one per screen, so flicking between a session
+card and a token does not reconnect. On connect it re-joins every watched room **and
+then invalidates everything** — a change that happened while the socket was down would
+otherwise sit on screen until the next navigation. It also refetches on app foreground,
+because a phone that has been in a pocket for an hour comes back with a socket that may
+or may not be alive and a screen that is certainly wrong.
+
+**The polls became fallbacks rather than being deleted** — 10s → 90s on both live
+screens. A phone's socket dies in ways the phone does not notice: a lift, a hospital
+basement, an OS that suspended the app. Ninety seconds is invisible when the socket is
+healthy and is the difference between "briefly stale" and "silently wrong" when it is
+not.
+
+### What went wrong, and what it cost
+
+1. **CI caught what local never could: `CHECKIN_SECRET` was missing from
+   `turbo.json`.** Turbo 2 runs tasks in a filtered environment; locally
+   `process.loadEnvFile()` reads `apps/api/.env` and bypasses Turbo entirely, so the
+   gap is invisible until a machine with no `.env` runs it. turbo.json has carried a
+   comment warning about this since Phase 0 and Phase 6 walked into it anyway.
+   **A comment is not a mechanism**, so it is now a test: every key in `EnvSchema` must
+   appear in turbo.json, and the failure message names the variables to add. Verified
+   by deleting the declaration and watching it fail.
+
+2. **Two Phase 3 tests asserted the ETA fields were null.** Correct then, wrong now.
+   Rewritten to assert the Phase 7 behaviour, and one turned into a new test —
+   a session nobody can join gets **no** window, because a time on a card whose Join
+   button is disabled is an invitation to nothing.
+
+3. **Two of my own ETA assertions were wrong, in opposite directions.**
+   - "today is weighted highest" was written as *today moves the estimate more than
+     half the way*, which at a weight of exactly 0.5 is false by a hair. Rewritten as
+     the thing it actually means: the same change to today moves the result more than
+     that change to any other term.
+   - "ten minutes already spent means ten fewer minutes to wait" compared the window's
+     `from`, which moved by 7.5 minutes — because **the window also narrows as the wait
+     shortens**, so it was measuring two effects at once. Now measured at the centre,
+     with the narrowing asserted separately.
+
+4. **`PAUSE` is only legal on an ACTIVE session** (409 otherwise), which broke a
+   realtime fixture that paused an `OPEN_FOR_REGISTRATION` one. Fixed by activating it
+   first — with two patients, so somebody is still eligible after the call, otherwise
+   the tick would have skipped the session for having an empty queue and the test would
+   have passed without proving anything about pausing.
+
+5. **Trap 35: Socket.IO fires `connect` on the client before the server has run its
+   handshake check.** A socket with a garbage token is briefly "connected" and then
+   dropped, so the walkthrough's helper measured the wrong instant and reported an
+   unauthenticated socket as connected. **Nothing was wrong with the gateway** — the
+   e2e suite, which waits for the disconnect, was green throughout. The helper now
+   settles for 500ms before answering, and the walkthrough additionally asserts the
+   rejected socket never got into the room. Worth writing down because the failure mode
+   is a security test that quietly reports a hole that does not exist, and the obvious
+   next move is to go "fix" the gateway.
+
+### Verification
+
+`pnpm exec turbo run lint typecheck test build --force` → **16/16, 0 cached**;
+**266 API tests** (was 216) + **37 contract tests** (was 31).
+`pnpm --filter @opd/web test:console` → **63 passed, 0 failed**, against the running
+stack, including a real socket receiving a real broadcast caused by a real button.
+
+### Not proven from here
+
+- **The console's `<Live/>` component in an actual browser.** The socket half is proven
+  by driving a real socket against the real gateway; `router.refresh()` repainting a
+  board needs a DOM, and this harness has none.
+- **The mobile app on a device.** The code typechecks and lints; no phone has run it.
+  Trap 16 (the Wi-Fi IP) applies before it will connect at all.
+
+`P7-WEB-01` and `P7-MOB-01` are therefore `◐`, and the Phase 7 box stays `☐` until
+someone watches two screens update. Phase 5 ticked four boxes on a typecheck and had to
+un-tick them; that is still the rule.
+
 # 📌 HANDOFF v5 — read this first in a new session
 
 *Supersedes v2, v3 and v4. Those are history; this is the brief.*

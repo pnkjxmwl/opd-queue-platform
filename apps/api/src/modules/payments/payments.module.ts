@@ -8,6 +8,7 @@ import { PaymentsService } from './payments.service';
 import { RazorpayClient } from './razorpay.client';
 import { QueueModule } from '../queue/queue.module';
 import { ConfigModule } from '../config/config.module';
+import { EtaModule } from '../eta/eta.module';
 
 /**
  * Join, payment, refund (docs/Architecture.md 10). Owns `Payment` and `Refund`.
@@ -20,7 +21,9 @@ import { ConfigModule } from '../config/config.module';
  * record from ever disagreeing.
  */
 @Module({
-  imports: [QueueModule, ConfigModule],
+  // EtaModule fills etaFrom/etaTo on the patient's token card - through its
+  // service, never by reading Consultation from here.
+  imports: [QueueModule, ConfigModule, EtaModule],
   controllers: [PaymentsController, RazorpayWebhookController, StaffCancellationController],
   providers: [
     PaymentsService,

@@ -273,15 +273,30 @@ describe('Phase 3 discovery', () => {
         doctorPresence: 'NOT_PRESENT',
       });
 
-      // The Phase-7 contract: present, named, and null - never absent.
-      expect(card.snapshot).toEqual({
+      expect(card.snapshot).toMatchObject({
         nowServingToken: null,
         checkedInCount: 0,
         bookedNotArrivedCount: 0,
         registrationOpen: true,
-        joinNowEtaFrom: null,
-        joinNowEtaTo: null,
       });
+
+      // Phase 7 fills what Phase 3 froze as null. An open session with an empty
+      // queue still answers "when would I be seen" - with a window starting about
+      // now, because there is nobody in front of you.
+      expect(typeof card.snapshot.joinNowEtaFrom).toBe('string');
+      expect(new Date(card.snapshot.joinNowEtaTo).getTime()).toBeGreaterThan(
+        new Date(card.snapshot.joinNowEtaFrom).getTime(),
+      );
+      // A window, never a point (docs/Phases.md).
+      expect(card.snapshot.joinNowEtaFrom).not.toEqual(card.snapshot.joinNowEtaTo);
+    });
+
+    it('offers no ETA on a session nobody can join - a time would be an invitation', async () => {
+      const res = await get(`/departments/${cardiology}/sessions`).expect(200);
+      const closed = res.body.items.find((s: { id: string }) => s.id === closedSession);
+      expect(closed.snapshot.registrationOpen).toBe(false);
+      expect(closed.snapshot.joinNowEtaFrom).toBeNull();
+      expect(closed.snapshot.joinNowEtaTo).toBeNull();
     });
 
     it('reports a manually closed session as closed for registration', async () => {
@@ -319,7 +334,14 @@ describe('Phase 3 discovery', () => {
         hospitalAddress: '1 Andheri West Road',
         doctorDefaultConsultMins: 12,
       });
-      expect(res.body.snapshot.joinNowEtaFrom).toBeNull();
+
+      // Phase 7. The doctor has no history, so this window is built from
+      // `defaultConsultMins` alone - which is exactly what that column is for, and
+      // why a brand-new doctor still gets an honest answer rather than none.
+      expect(typeof res.body.snapshot.joinNowEtaFrom).toBe('string');
+      expect(new Date(res.body.snapshot.joinNowEtaTo).getTime()).toBeGreaterThan(
+        Date.now(),
+      );
     });
 
     it('hides a cancelled session and one belonging to an unverified hospital', async () => {

@@ -19,8 +19,9 @@ import type {
 } from '@opd/contracts';
 import { PrismaService } from '../../prisma/prisma.service';
 import { registrationGate } from '../../common/registration';
-import { HOLDS_A_SLOT } from '../queue/state-machine';
+import { ELIGIBLE_TO_CALL, HOLDS_A_SLOT } from '../queue/state-machine';
 import { QueuePolicyService } from '../config/queue-policy.service';
+import { EtaService } from '../eta/eta.service';
 import { NotFoundError } from '../../common/errors';
 import { dateColumnFromString, dateColumnToString, istToday } from '../../common/ist';
 
@@ -108,6 +109,7 @@ export class DiscoveryService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly policies: QueuePolicyService,
+    private readonly eta: EtaService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -451,7 +453,9 @@ export class DiscoveryService {
       }),
       this.prisma.queueEntry.findMany({
         where: { sessionId: { in: sessionIds }, status: { in: ['CALLED', 'IN_CONSULTATION'] } },
-        select: { sessionId: true, tokenLabel: true },
+        // Phase 7 added the last two, in the query that was already being made:
+        // the ETA needs to know how long the person in the room has been in it.
+        select: { sessionId: true, tokenLabel: true, status: true, consultStartedAt: true },
       }),
       // Online bookings holding a slot, for maxOnlineTokens. Grouped across the
       // whole page, never one query per card. A lapsed unpaid hold is excluded
@@ -469,19 +473,32 @@ export class DiscoveryService {
       }),
     ]);
 
+    // Eligible-only, kept separately from checkedInCount: that count includes the
+    // patient who has been CALLED, and the ETA already accounts for them through the
+    // consultation clock. Adding them to both would charge a newcomer twice for the
+    // same person.
+    const eligibleAhead = new Map(sessionIds.map((id) => [id, 0]));
+
     for (const group of counts) {
       const snapshot = snapshots.get(group.sessionId);
       if (snapshot === undefined) continue;
       if (PRESENT_STATUSES.includes(group.status)) {
         snapshot.checkedInCount += group._count._all;
+        if (ELIGIBLE_TO_CALL.includes(group.status)) {
+          eligibleAhead.set(group.sessionId, (eligibleAhead.get(group.sessionId) ?? 0) + group._count._all);
+        }
       } else {
         snapshot.bookedNotArrivedCount += group._count._all;
       }
     }
 
+    const consultingSince = new Map<string, Date | null>();
     for (const row of serving) {
       const snapshot = snapshots.get(row.sessionId);
       if (snapshot !== undefined) snapshot.nowServingToken = row.tokenLabel;
+      if (row.status === 'IN_CONSULTATION') {
+        consultingSince.set(row.sessionId, row.consultStartedAt);
+      }
     }
 
     const heldBySession = new Map(held.map((group) => [group.sessionId, group._count._all]));
@@ -513,6 +530,33 @@ export class DiscoveryService {
         onlineTokensHeld: heldBySession.get(row.id) ?? 0,
         now,
       }).open;
+    }
+
+    // P7-BE-03 · "if I joined right now, when would I be seen?"
+    //
+    // One batched call for the whole page - three queries however many cards are on
+    // it - which is the same rule the rest of this method follows and the reason the
+    // ETA service takes a list rather than a session.
+    //
+    // Only for a session a patient could actually join: `registrationOpen` is
+    // already the answer to that, and offering a time on a card whose Join button is
+    // disabled would be an invitation to nothing.
+    const windows = await this.eta.windowsFor(
+      rows.map((row) => ({
+        key: row.id,
+        doctorId: row.currentProviderDoctorId,
+        aheadCount: eligibleAhead.get(row.id) ?? 0,
+        currentStartedAt: consultingSince.get(row.id) ?? null,
+        estimable: (snapshots.get(row.id)?.registrationOpen ?? false) && row.doctorPresence !== 'LEFT',
+      })),
+      now,
+    );
+
+    for (const [sessionId, window] of windows) {
+      const snapshot = snapshots.get(sessionId);
+      if (snapshot === undefined || window === null) continue;
+      snapshot.joinNowEtaFrom = window.from;
+      snapshot.joinNowEtaTo = window.to;
     }
 
     return snapshots;

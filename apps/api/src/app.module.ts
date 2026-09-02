@@ -5,6 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { env } from './config/env';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
+import { EtaModule } from './modules/eta/eta.module';
+import { RealtimeModule } from './realtime/realtime.module';
 import { HealthModule } from './modules/health/health.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { PatientsModule } from './modules/patients/patients.module';
@@ -60,6 +62,8 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
     DiscoveryModule,
     QueueModule,
     PaymentsModule,
+    EtaModule,
+    RealtimeModule,
   ],
   // Registered through DI, not app.useGlobalFilters(): nestjs-pino's PinoLogger
   // is transient-scoped and cannot be resolved with app.get().

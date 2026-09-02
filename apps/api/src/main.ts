@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
 import { env } from './config/env';
+import { RedisIoAdapter } from './realtime/redis-io.adapter';
 
 async function bootstrap(): Promise<void> {
   // Validate configuration before anything else boots. Fail loudly, fail early.
@@ -17,6 +18,14 @@ async function bootstrap(): Promise<void> {
 
   app.useLogger(app.get(Logger));
   app.enableShutdownHooks();
+
+  // Socket.IO across every instance, not just this one (docs/Phases.md Phase 7).
+  // Installed HERE and not in the test bootstrap: the tests exercise one process and
+  // the default in-memory adapter is exactly right for them, while a test suite that
+  // needed Redis pub/sub to pass would be testing the adapter instead of the product.
+  const realtime = new RedisIoAdapter(app);
+  await realtime.connect();
+  app.useWebSocketAdapter(realtime);
 
   await app.listen(config.PORT);
 }

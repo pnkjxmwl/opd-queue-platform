@@ -6,6 +6,7 @@ import { ActivityIndicator, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider, useAuth } from '../lib/auth';
 import { CityProvider } from '../lib/city';
+import { RealtimeProvider } from '../lib/realtime';
 import { theme } from '../theme';
 
 /**
@@ -50,10 +51,18 @@ export default function RootLayout() {
     <SafeAreaProvider>
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
-          <CityProvider>
-            <StatusBar style="dark" />
-            <Gate />
-          </CityProvider>
+          {/*
+            Inside AuthProvider (it needs the token) and inside QueryClientProvider
+            (it invalidates queries). One socket for the whole app - a patient
+            flicking between a session card and their token must not reconnect on
+            every navigation.
+          */}
+          <RealtimeProvider>
+            <CityProvider>
+              <StatusBar style="dark" />
+              <Gate />
+            </CityProvider>
+          </RealtimeProvider>
         </AuthProvider>
       </QueryClientProvider>
     </SafeAreaProvider>
