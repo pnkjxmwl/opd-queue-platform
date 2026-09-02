@@ -1105,11 +1105,26 @@ Nudge patients via push and let the timers run themselves (Phase 8).
 **Goal:** The system nudges patients and self-manages timers unattended.
 **Prerequisites:** Phase 7 (events + ETA), Phase 5 (reservation expiry), Phase 4 (no-show flow).
 **Size:** `M` · ~4–5 focused days · up to 5 parallel agents
-**Status:** ◐ **built and tested, checkpoint pending a phone** (2026-09-02)
+**Status:** ◐ **built and tested; the push hop is blocked on tooling** (2026-09-02)
 
-Seven of eight subtasks are ticked. `P8-MOB-01` is `◐`: permission, registration and
-tap-to-open are written and typecheck, but **nothing has made a device buzz**. 41 new
-tests (308 API total).
+Seven of eight subtasks are ticked, and two of the three workers were observed firing
+unprompted during device testing: grace-expiry passed over an absent patient (*"No
+response within the 20s grace period"*, actor `SYSTEM`), and registration-cutoff closed a
+session that could not finish its queue (*"Anyone joining now would not be seen before the
+session ends"*).
+
+`P8-MOB-01` stays `◐`, and the reason is **not** a defect in this code. `PushToken` has
+never had a row in it, for two independent reasons found on 2026-09-02:
+
+1. the project has never been linked to EAS, so `getExpoPushTokenAsync` throws
+   `ERR_NOTIFICATIONS_NO_EXPERIENCE_ID` — `eas init` fixes it, and this would have failed
+   in a development build too;
+2. Expo Go cannot receive remote push at all — Android support was removed in SDK 53 and
+   iOS never had it.
+
+Everything up to the delivery hop is proven: rows are created with the right content,
+deduped by the database, and marked `FAILED / no registered device`, which is the correct
+outcome when nothing is registered. See `docs/PROGRESS.md` 2026-09-02.
 
 ### 📦 What you'll have after this phase
 The "wait at home" promise fully working. Patients get **push notifications** (token issued, getting close,
@@ -1141,7 +1156,7 @@ POST /me/push-tokens     — register a device push token
 | ☑ P8-BE-03 | Worker: grace-expiry (recall→skip→requeue) | BE | 2 | Wave 1 | recall then requeue, no-show once spent, thresholds from the policy, `SYSTEM` in the audit log |
 | ☑ P8-BE-04 | Worker: registration-cutoff | BE | 2 | Wave 1 | closes on ETA overrun, respects the policy switch, and the join it prevents is refused |
 | ☑ P8-BE-05 | Worker: payment-reconcile | BE | 2 | Wave 1 | a captured payment with no webhook becomes a token; twice is a no-op |
-| ◐ P8-MOB-01 | Push permission + registration + foreground/background/tap→deep-link | MOB | 2 | Wave 1 | written, typechecks; **no device has received one** |
+| ◐ P8-MOB-01 | Push permission + registration + foreground/background/tap→deep-link | MOB | 2 | Wave 1 | written; **blocked on tooling, not code** — needs `eas init` (no projectId exists) then a development build, because Expo Go lost Android remote push in SDK 53 |
 
 **As built, two departures from the plan above, both in `docs/PROGRESS.md`:**
 

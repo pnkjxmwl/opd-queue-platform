@@ -5272,6 +5272,82 @@ to start during this phase.
 
 Everything up to the final delivery hop is proven. The hop itself is untested.
 
+---
+
+## 2026-09-02 — Why no notification ever arrived, and the silence that hid it
+
+Reported after the Phase 8 workers were seen firing correctly: no push ever reached
+the phone. The workers were fine. **Nothing had ever registered a device.**
+
+```sql
+SELECT count(*) FROM "PushToken";   ->  0
+```
+
+The server was behaving exactly as designed - it wrote the `Notification` rows, deduped
+them, and marked them `FAILED / "no registered device"`, which is the correct outcome
+when there is nowhere to send. The failure was entirely on the device side, and there
+are **two independent causes**, either of which alone is fatal:
+
+### 1. The project has never been linked to EAS
+
+`getExpoPushTokenAsync` reads a `projectId` from `Constants.easConfig` or
+`expoConfig.extra.eas.projectId` and **throws** without one:
+
+```
+ERR_NOTIFICATIONS_NO_EXPERIENCE_ID
+No "projectId" found...
+```
+
+`apps/mobile/app.json` has no `extra` block at all and there is no `eas.json`. So the
+call was throwing on the very first attempt, on every launch, on any device. The fix is
+`eas init` inside `apps/mobile`, which writes the `projectId` and creates `eas.json`.
+
+**This would have failed in a development build too.** It is not the Expo Go problem; it
+is a second one hiding behind it, and it would have been discovered only after a
+twenty-minute cloud build.
+
+### 2. Expo Go cannot receive remote push
+
+`expo-notifications` removed Android remote push from Expo Go with **SDK 53**, and Expo
+Go on iOS never had it. The SDK says so itself:
+
+> *Android Push notifications (remote notifications) functionality provided by
+> expo-notifications was removed from Expo Go with the release of SDK 53. Use a
+> development build instead.*
+
+So `P8-MOB-01` cannot be closed from Expo Go under any circumstances. It needs
+`eas build --profile development` - free tier, ~20 minutes, no paid account for Android.
+iOS additionally needs the $99/year Apple account that docs/Phases.md says to start
+during this phase.
+
+### The real defect: the catch that hid both of them
+
+`lib/push.tsx` swallowed every registration error in silence. The comment justifying it
+was right about the patient and wrong about everyone else:
+
+> *Never surface this. A failed push registration is invisible to the patient and must
+> stay that way.*
+
+It stayed invisible to the **developer** too. Push did nothing for an entire testing
+session and the only evidence anywhere in the system was `no registered device` on the
+server - which names the symptom and not the cause. Diagnosing it took reading the
+Expo SDK's source to find out what `getExpoPushTokenAsync` requires.
+
+The catch now logs. Not a toast, not an alert - a `console.warn` that names the reason,
+detects the missing-projectId case specifically and prints the exact command, and always
+mentions the Expo Go limitation. Invisible to a patient, and the first place a developer
+looks.
+
+**The principle, worth keeping:** *"do not bother the user"* is not the same as *"do not
+record it"*. A failure that is correctly hidden from the person using the product still
+has to be visible to the person maintaining it, or it is not handled - it is concealed.
+
+### Not done
+
+`eas init` was not run: it needs an interactive login to an Expo account, which is the
+user's to give. Nothing else in the app or the API needs changing for push to work -
+the templates, the outbox, the dedupe and the pruning are all tested, and the only
+untested link in the chain is the delivery hop itself.
 # 📌 HANDOFF v6 — read this first in a new session
 
 *Supersedes v2–v5. Those are history; this is the brief.*
@@ -5311,13 +5387,21 @@ it ticked on a typecheck. **Tag each phase the moment its device walkthrough pas
 | 5 | 7 | ✅ live position and a moving ETA window on the phone |
 | 6 | 8 | ⛔ **blocked on tooling, not on us** — see below |
 
-**Phase 8's push cannot be tested from Expo Go.** `expo-notifications` removed Android
-remote push from Expo Go in SDK 53, and Expo Go on iOS never had it. Closing
-`P8-MOB-01` needs a development build:
+**Phase 8's push needs TWO things done, and neither is a code change.** Confirmed
+2026-09-02 by finding `SELECT count(*) FROM "PushToken"` returning 0:
 
 ```bash
-pnpm --filter @opd/mobile exec eas build --profile development --platform android
+cd apps/mobile
+eas init                                              # 1. writes the EAS projectId
+eas build --profile development --platform android    # 2. ~20 min, free tier
 ```
+
+1. **The project has never been linked to EAS.** `getExpoPushTokenAsync` throws
+   `ERR_NOTIFICATIONS_NO_EXPERIENCE_ID` without a `projectId`, and `app.json` has no
+   `extra` block. This would have failed in a development build too — it is a second
+   blocker hiding behind the first.
+2. **Expo Go cannot receive remote push at all** — Android support was removed in SDK
+   53 and iOS never had it.
 
 ~20 minutes of cloud build, free tier, no paid account for Android. iOS needs the
 $99/year Apple account that §7 already says to start now. Everything up to the final
