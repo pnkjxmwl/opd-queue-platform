@@ -16,14 +16,46 @@ const IST_OFFSET_MS = 330 * 60_000;
 
 const istShifted = (iso: string): Date => new Date(new Date(iso).getTime() + IST_OFFSET_MS);
 
-/** A UTC instant as its IST clock face, "HH:mm". */
+/**
+ * A UTC instant as its IST clock face, the way it is said out loud in India:
+ * "7 PM", "6 AM", "10:30 AM".
+ *
+ * **12-hour, and the ":00" is dropped on the hour.** Clinics run on whole and half
+ * hours, and "7 PM" is what a receptionist says to a patient - "19:00" is what a
+ * server log says. This is a patient-facing app in a country that reads the clock
+ * in twelve hours, so the display follows the country, not the storage.
+ *
+ * The instant itself is still UTC everywhere behind this (docs/Rules.md 5); only
+ * the rendering changes.
+ */
 export function istClock(iso: string): string {
-  return istShifted(iso).toISOString().slice(11, 16);
+  const at = istShifted(iso);
+  const hours = at.getUTCHours();
+  const minutes = at.getUTCMinutes();
+  const meridiem = hours < 12 ? 'AM' : 'PM';
+  // 0 and 12 both read as 12 - midnight is "12 AM", noon is "12 PM".
+  const twelve = hours % 12 === 0 ? 12 : hours % 12;
+
+  return minutes === 0
+    ? `${twelve} ${meridiem}`
+    : `${twelve}:${String(minutes).padStart(2, '0')} ${meridiem}`;
 }
 
-/** The session's working block, e.g. "10:00–13:00". */
+/**
+ * A session's working block, e.g. "10 AM–1 PM", or "10–11:30 AM" when both ends
+ * fall in the same half of the day.
+ *
+ * Collapsing the repeated AM/PM is how a person writes it, and on a session card
+ * every character competes with the doctor's name for the same line.
+ */
 export function istRange(startIso: string, endIso: string): string {
-  return `${istClock(startIso)}–${istClock(endIso)}`;
+  const start = istClock(startIso);
+  const end = istClock(endIso);
+  const startMeridiem = start.slice(-2);
+
+  return startMeridiem === end.slice(-2)
+    ? `${start.slice(0, -3)}–${end}`
+    : `${start}–${end}`;
 }
 
 /**

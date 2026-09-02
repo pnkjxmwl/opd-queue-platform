@@ -5053,6 +5053,126 @@ Everything in v4 §5 still applies, plus:
 
 ---
 
+---
+
+## 2026-09-02 — Device testing: three findings, two of them real defects
+
+Phase 6 check 3 passed on the first attempt. The other two findings came from the
+tester looking at screens, which is now the fourth phase running for which that is
+where the defects came from.
+
+### Check 3 passed, and the evidence is worth keeping
+
+```
+razorpayOrderId    order_TX5NRwuloez4gv
+razorpayPaymentId  pay_TX5P2e1gYEPp5f     18 chars, real gateway format
+ENTRY_RESERVED     PATIENT   01:57:52
+ENTRY_CONFIRMED    SYSTEM    01:59:36
+Payment            SUCCESS   ₹400
+```
+
+`ENTRY_CONFIRMED` with actor `SYSTEM`, 1m44s after the patient reserved, is the claim
+the check exists to make: **the token was issued by the webhook, not by the client's
+success screen.** The fixture payments elsewhere in this build use 40-character
+UUID-based ids, so the 18-character `pay_…` is unambiguous proof it came from
+Razorpay rather than from a test.
+
+### Defect 1 — My Visits never said WHO a booking was for
+
+The tester saw two bookings, both labelled `A001`, and read them as a duplicate. They
+were not: token numbers restart per session (docs/PRD.md 8.1 — the token is a label,
+not a position), so two sessions legitimately both have an A001.
+
+But underneath the false alarm was a real one. The visits list rendered the token, the
+doctor, the department, the hospital and the date — and **not the patient**. An
+account holds a whole family (docs/PRD.md 3.1), so a mother who books for herself and
+for her father at the same doctor gets two rows that are identical in every visible
+field. The token DETAIL screen has always shown `Patient`; the LIST did not.
+
+That is how somebody takes the wrong person to an appointment.
+
+Fixed in `apps/mobile/app/(app)/(visits)/visits.tsx`: the patient now reads first, as
+**"For <name>"**, with the doctor demoted to secondary. The label is doing real work —
+the patient and the doctor are both people's names, stacked, and without it the two
+are indistinguishable.
+
+**The test fixture made this much worse and that is worth admitting.** The setup
+script named a patient profile *"Anita Sharma"* — the same name as a seeded doctor.
+Rendered under "Dr. Anita Sharma" with no label, the screen was genuinely unreadable,
+and the tester reasonably concluded they had booked the wrong doctor. They had not.
+The script now refuses to reuse a seeded doctor's name.
+
+### Defect 2 — a doctor on a break was not on a break
+
+The tester marked a doctor `ON_BREAK`, and reception could still call patients in and
+start consultations. That was **the documented behaviour**: docs/PRD.md 10 said
+*"presence is recorded, never validated, with one exception"* — `call-next` while
+`LEFT` — and the state machine implemented exactly that.
+
+The doc was too narrow, and the reading of it treated the console's own presence
+control as decoration. A doctor who selects **On break** and watches the queue keep
+handing out patients has been given a button that does nothing, which is trap 31 in a
+different costume.
+
+`NEEDS_THE_DOCTOR_PRESENT` (`CALL_NEXT`, `START_CONSULTATION`) is now refused for both
+away states, with **two distinct errors** because the remedy differs: a break is
+waited out, a departure ends the session. `DOCTOR_ON_BREAK` was added to the error
+contract; no client branched on the old code, so this is additive.
+
+**The three commands deliberately NOT blocked matter as much as the two that are:**
+
+- **`NOT_PRESENT` blocks nothing.** It is the DEFAULT for every session, so blocking
+  it would make marking the doctor present a mandatory ceremony before the first
+  patient of every clinic — and the first `call-next` is what activates a session at
+  all. It is also the *absence* of information rather than a statement: nobody has
+  said anything yet. docs/PRD.md 11 is explicit that a late doctor leaves the queue
+  unaffected.
+- **`CHECK_IN` and `WALK_IN` are never blocked.** Patients arrive at a reception desk
+  whether or not the doctor is in the room, and turning them away because of a
+  dropdown is a worse product than a slightly longer queue — the same argument the
+  pause rule already makes.
+- **`COMPLETE_CONSULTATION` is never blocked.** A consultation that has started must
+  always be closable; blocking it would strand a patient `IN_CONSULTATION` for good
+  the moment anyone touched presence mid-visit, with no way back out.
+
+Four tests replace the one that encoded the old rule, including one asserting that a
+receptionist is told *which* absence they are looking at.
+
+**docs/PRD.md 10 has been updated**, because the build now diverges from what it said.
+
+### The whole app now tells the time the way India reads it
+
+`istClock` and the console's formatter were both 24-hour. They are now 12-hour with
+the meridiem — **"7 PM", "6 AM", "10:15 AM"** — and the `:00` is dropped on the hour,
+because "7 PM" is what a receptionist says to a patient and "19:00" is what a server
+log says.
+
+Ranges collapse a repeated meridiem the way a person writes them: **"10–11:30 AM"**,
+**"7–10 PM"**, but **"10 AM–5 PM"** across noon.
+
+Both implementations were checked against each other on the same instants, including
+noon and midnight, and agree character for character — the mobile one on fixed-offset
+arithmetic (Hermes cannot be relied on for `Intl` with a `timeZone`), the console one
+on real `Intl`. The console's used `en-IN`, which renders a lowercase "pm"; it is now
+`en-US` so the two agree. Storage is unchanged: UTC everywhere, converted only for
+display (docs/Rules.md 5).
+
+A duplicated formatter in `config/sessions/page.tsx` was deleted in favour of the
+shared one, so a session reads identically on every screen it appears on.
+
+### A self-inflicted one, for the record
+
+Running the full verification mid-testing **truncated the tester's data** — trap 11/23,
+which this file has recorded since Phase 4 and which I walked into anyway while they
+were halfway through a checklist. The suite resets the database it runs against.
+**Do not run `turbo run test` while somebody is testing against the dev database**;
+rebuild their fixtures afterwards if you do.
+
+### Verification
+
+`pnpm exec turbo run lint typecheck test build --force` → **16/16, 0 cached**;
+**311 API tests** (was 308) + 37 contract tests.
+
 # 📌 HANDOFF v6 — read this first in a new session
 
 *Supersedes v2–v5. Those are history; this is the brief.*

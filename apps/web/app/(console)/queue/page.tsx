@@ -3,7 +3,7 @@ import type { Doctor, OPDSession, Paginated } from '@opd/contracts';
 import { requireStaffHospital } from '../../../lib/tenant';
 import { queueGet } from './_run';
 import { Card, Empty, ErrorBanner, buttonQuiet, input, label, td, th } from '../config/ui';
-import { IST_TIME, rupees } from './ui';
+import { istTime, rupees } from './ui';
 
 /**
  * P6-WEB-01 (entry) · which session am I running?
@@ -112,8 +112,8 @@ export default async function QueuePage({
                       {doctorName.get(session.currentProviderDoctorId) ?? 'Unknown doctor'}
                     </td>
                     <td className={td + ' tabular-nums'}>
-                      {IST_TIME.format(new Date(session.scheduledStart))}–
-                      {IST_TIME.format(new Date(session.scheduledEnd))}
+                      {istTime(session.scheduledStart)}–
+                      {istTime(session.scheduledEnd)}
                     </td>
                     <td className={td + ' tabular-nums'}>₹{rupees(session.feePaise)}</td>
                     <td className={td}>

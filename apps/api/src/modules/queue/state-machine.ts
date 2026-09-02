@@ -1,6 +1,7 @@
 import type { DoctorPresence, QueueEntryStatus, SessionStatus } from '@opd/contracts';
 import {
   DoctorHasLeftError,
+  DoctorOnBreakError,
   InvalidQueueTransitionError,
   QueuePausedError,
 } from '../../common/errors';
@@ -408,21 +409,50 @@ const SESSION_ACCEPTS: Record<QueueCommand, readonly SessionStatus[]> = {
 const BLOCKED_WHILE_PAUSED: readonly QueueCommand[] = ['CALL_NEXT'];
 
 /**
- * Commands refused once the doctor is marked LEFT.
+ * Commands that put a patient in front of the doctor, and therefore need the doctor
+ * to actually be in the room.
  *
- * Presence is still not a state machine - any presence may follow any other, and
- * nothing here rejects a presence CHANGE. This is a guard on one command, the same
- * shape as the pause rule above.
+ * **Widened in Phase 8, from CALL_NEXT-while-LEFT to this.** A tester marked a
+ * doctor ON_BREAK and watched reception keep calling patients in and starting
+ * consultations. docs/PRD.md 10 did say *"presence is recorded, never validated,
+ * with one exception"* - and that reading was too narrow, because it treated the
+ * console's own presence control as decoration. A doctor who selects "On break" and
+ * sees the queue carry on regardless has been given a button that does nothing,
+ * which is the same defect as trap 31.
  *
- * LEFT is the only presence that blocks anything. NOT_PRESENT and ON_BREAK must
- * not: a doctor who is late or momentarily out is the ordinary case
- * (docs/PRD.md 8.11, "doctor late -> session/queue unaffected"), and reception
- * routinely calls the next patient in as the doctor walks back to the room.
- * LEFT means gone for the day, which docs/PRD.md 8.11 says should end the session -
- * so calling more patients into an empty room is staff having forgotten a step, not
- * a workflow to support.
+ * `START_CONSULTATION` joins the list for both away states: a consultation cannot
+ * begin with a doctor who is not there, and letting it write a Consultation row
+ * would also feed a fiction to the ETA engine, which learns from those durations.
  */
-const BLOCKED_WHEN_DOCTOR_LEFT: readonly QueueCommand[] = ['CALL_NEXT'];
+const NEEDS_THE_DOCTOR_PRESENT: readonly QueueCommand[] = ['CALL_NEXT', 'START_CONSULTATION'];
+
+/**
+ * The presences that mean "not in the room right now".
+ *
+ * **NOT_PRESENT is deliberately absent**, and that is the important half of this
+ * rule. It is the DEFAULT for every session, so blocking on it would make marking
+ * the doctor present a mandatory ceremony before the first patient of every clinic -
+ * and the first `call-next` is what activates a session in the first place. It is
+ * also the absence of information rather than a statement: nobody has said anything
+ * yet. docs/PRD.md 11 is explicit that a late doctor leaves the queue unaffected,
+ * and reception routinely calls the next patient in as the doctor walks back.
+ *
+ * ON_BREAK and LEFT are different: somebody positively declared the doctor away.
+ */
+const PRESENCE_MEANS_AWAY: readonly DoctorPresence[] = ['ON_BREAK', 'LEFT'];
+
+/**
+ * Commands that must NEVER be blocked by presence, recorded here so the reasoning
+ * survives the next person who reads the list above and wonders why it is short.
+ *
+ * - `CHECK_IN` and `WALK_IN`: patients arrive at a reception desk whether or not
+ *   the doctor is in the room. Turning them away because of a dropdown would be a
+ *   worse product than a slightly longer queue - the same argument the pause rule
+ *   makes directly above.
+ * - `COMPLETE_CONSULTATION`: a consultation that has started must always be
+ *   closable. Blocking it would strand a patient IN_CONSULTATION for good the
+ *   moment anyone touched presence mid-visit, and there is no way back out of that.
+ */
 
 /**
  * Gate a command against the session it targets. Throws, or returns cleanly.
@@ -439,8 +469,13 @@ export function assertSessionAccepts(
   if (session.pausedAt !== null && BLOCKED_WHILE_PAUSED.includes(command)) {
     throw new QueuePausedError();
   }
-  if (session.doctorPresence === 'LEFT' && BLOCKED_WHEN_DOCTOR_LEFT.includes(command)) {
-    throw new DoctorHasLeftError();
+  if (
+    PRESENCE_MEANS_AWAY.includes(session.doctorPresence) &&
+    NEEDS_THE_DOCTOR_PRESENT.includes(command)
+  ) {
+    // Two errors, not one: a break is waited out and a departure ends the session,
+    // so a receptionist needs to be told which of the two they are looking at.
+    throw session.doctorPresence === 'ON_BREAK' ? new DoctorOnBreakError() : new DoctorHasLeftError();
   }
 }
 

@@ -9,7 +9,7 @@ import type {
 import { requireStaffHospital } from '../../../../lib/tenant';
 import { queueGet } from '../_run';
 import { Card, ErrorBanner, button, buttonDanger, buttonQuiet, input, label, td, th } from '../../config/ui';
-import { IST_TIME, PriorityPill, StatusPill, SuccessBanner, token } from '../ui';
+import { istTime, PriorityPill, StatusPill, SuccessBanner, token } from '../ui';
 import { Live } from '../live';
 import {
   callNext,
@@ -97,8 +97,8 @@ export default async function BoardPage({
         <div>
           <h1 className="text-h1">{doctorName}</h1>
           <p className="mt-1 text-body-lg text-ink-muted tabular-nums">
-            {IST_TIME.format(new Date(session.scheduledStart))}–
-            {IST_TIME.format(new Date(session.scheduledEnd))} ·{' '}
+            {istTime(session.scheduledStart)}–
+            {istTime(session.scheduledEnd)} ·{' '}
             <span className="text-ink">{session.status.replaceAll('_', ' ')}</span>
             {paused && <span className="text-warning"> · Paused</span>}
             {' · Doctor '}

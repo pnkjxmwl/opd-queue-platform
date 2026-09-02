@@ -312,18 +312,60 @@ describe('session state machine (P4-BE-01)', () => {
     expect(() => assertSessionAccepts('COMPLETE_CONSULTATION', left)).not.toThrow();
   });
 
-  it('does not let a late or on-break doctor block the queue', () => {
-    // docs/PRD.md 8.11 - a late doctor leaves the session and queue unaffected, and
+  it('does not let a LATE doctor block the queue', () => {
+    // docs/PRD.md 11 - a late doctor leaves the session and queue unaffected, and
     // reception calls the next patient in as the doctor walks back to the room.
-    for (const presence of ['NOT_PRESENT', 'ON_BREAK'] as const) {
-      expect(() =>
-        assertSessionAccepts('CALL_NEXT', {
-          status: 'ACTIVE',
-          pausedAt: null,
-          doctorPresence: presence,
-        }),
-      ).not.toThrow();
+    //
+    // NOT_PRESENT is also the DEFAULT for every session, so blocking on it would
+    // make marking the doctor present a mandatory ceremony before the first patient
+    // of every clinic - and the first call-next is what activates a session at all.
+    const late = { status: 'ACTIVE', pausedAt: null, doctorPresence: 'NOT_PRESENT' } as const;
+    expect(() => assertSessionAccepts('CALL_NEXT', late)).not.toThrow();
+    expect(() => assertSessionAccepts('START_CONSULTATION', late)).not.toThrow();
+  });
+
+  it('refuses to call a patient in while the doctor is ON A BREAK', () => {
+    // Phase 8. A tester marked a doctor on break and watched reception keep calling
+    // patients in and starting consultations. ON_BREAK is not NOT_PRESENT: somebody
+    // positively declared the doctor away, and a control that says so while the
+    // queue carries on regardless is a button that does nothing.
+    const onBreak = { status: 'ACTIVE', pausedAt: null, doctorPresence: 'ON_BREAK' } as const;
+
+    expect(() => assertSessionAccepts('CALL_NEXT', onBreak)).toThrow(/on a break/i);
+    // A consultation cannot BEGIN with a doctor who is not in the room - and letting
+    // it would feed a fiction to the ETA engine, which learns from those durations.
+    expect(() => assertSessionAccepts('START_CONSULTATION', onBreak)).toThrow(/on a break/i);
+  });
+
+  it('keeps the desk working while the doctor is away, in both away states', () => {
+    for (const doctorPresence of ['ON_BREAK', 'LEFT'] as const) {
+      const away = { status: 'ACTIVE', pausedAt: null, doctorPresence } as const;
+
+      // Patients keep arriving at a reception desk whatever a dropdown says.
+      expect(() => assertSessionAccepts('CHECK_IN', away)).not.toThrow();
+      expect(() => assertSessionAccepts('WALK_IN', away)).not.toThrow();
+
+      // And a consultation already under way must ALWAYS be closable. Blocking this
+      // would strand a patient IN_CONSULTATION for good the moment anyone touched
+      // presence mid-visit, with no way back out.
+      expect(() => assertSessionAccepts('COMPLETE_CONSULTATION', away)).not.toThrow();
+
+      // Fixing the situation must never be blocked by the situation.
+      expect(() => assertSessionAccepts('PRESENCE', away)).not.toThrow();
+      expect(() => assertSessionAccepts('END_SESSION', away)).not.toThrow();
     }
+  });
+
+  it('tells a receptionist WHICH kind of absence they are looking at', () => {
+    // The remedy differs: a break is waited out, a departure ends the session. One
+    // shared error would leave the desk guessing.
+    const base = { status: 'ACTIVE', pausedAt: null } as const;
+    expect(() =>
+      assertSessionAccepts('CALL_NEXT', { ...base, doctorPresence: 'ON_BREAK' }),
+    ).toThrow(/break/i);
+    expect(() =>
+      assertSessionAccepts('CALL_NEXT', { ...base, doctorPresence: 'LEFT' }),
+    ).toThrow(/left/i);
   });
 
   it('makes the session ACTIVE when the doctor calls the first patient', () => {

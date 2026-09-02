@@ -86,6 +86,18 @@ export default function MyVisits() {
                 <Text style={styles.token}>{entry.tokenLabel}</Text>
                 <EntryStatusPill status={entry.status} />
               </View>
+              {/*
+                WHO the booking is for, first and labelled.
+
+                An account holds a whole family (docs/PRD.md 3.1), so two bookings
+                can share a token label, a doctor, a department and a date and
+                differ only in this. Without it they are indistinguishable, which
+                is exactly how a father gets taken to his daughter's appointment.
+
+                "For " is not decoration: the patient and the doctor are both
+                people's names, stacked, and the label is what says which is which.
+              */}
+              <Text style={styles.patient}>For {entry.patientName}</Text>
               <Text style={styles.doctor}>{entry.doctorName}</Text>
               <Text style={styles.meta}>
                 {entry.departmentName} · {entry.hospitalName}
@@ -139,7 +151,10 @@ const styles = StyleSheet.create({
   cardTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   // Tabular numerals so a column of token numbers does not jitter (docs/Design.md 3).
   token: { ...theme.font.h2, color: theme.color.primary, fontVariant: ['tabular-nums'] },
-  doctor: { ...theme.font.h3, color: theme.color.text, marginTop: theme.space[1] },
+  // The patient reads BEFORE the doctor: when a family has several bookings it is
+  // the only thing that tells them apart.
+  patient: { ...theme.font.h3, color: theme.color.text, marginTop: theme.space[1] },
+  doctor: { ...theme.font.body, color: theme.color.textMuted },
   meta: { ...theme.font.caption, color: theme.color.textMuted },
   when: { flexDirection: 'row', alignItems: 'center', gap: theme.space[1], marginTop: theme.space[1] },
 });

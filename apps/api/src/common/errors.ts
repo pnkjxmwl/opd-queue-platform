@@ -144,6 +144,23 @@ export class NotCheckedInError extends AppError {
  * calling patients into an empty room, so the command is refused and says which of
  * the two things to do instead.
  */
+/**
+ * The doctor said they are away, and the command needs them in the room.
+ *
+ * Separate from DoctorHasLeftError because the remedy differs and a receptionist
+ * needs to be told which one they are looking at: a break is waited out, a
+ * departure means the session should be ended.
+ */
+export class DoctorOnBreakError extends AppError {
+  constructor() {
+    super(
+      'DOCTOR_ON_BREAK',
+      409,
+      'The doctor is on a break - mark them present again before calling the next patient',
+    );
+  }
+}
+
 export class DoctorHasLeftError extends AppError {
   constructor() {
     super(

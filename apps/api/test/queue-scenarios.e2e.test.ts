@@ -18,6 +18,7 @@ import { pause, resume } from '../src/modules/queue/commands/pause';
 import { presence } from '../src/modules/queue/commands/presence';
 import {
   DoctorHasLeftError,
+  DoctorOnBreakError,
   NoEligiblePatientError,
   QueuePausedError,
 } from '../src/common/errors';
@@ -397,10 +398,22 @@ describe('queue scenarios (P4-TEST-01)', () => {
     await presence(queue, sessionId, actor, { presence: 'LEFT' });
     await expect(callNext(queue, sessionId, actor)).rejects.toBeInstanceOf(DoctorHasLeftError);
 
-    // Being late or on a break must NOT block the queue (docs/PRD.md 8.11).
+    // Phase 8: a break blocks it too, with its OWN error - the remedy is different.
+    // A break is waited out; a departure ends the session.
     await presence(queue, sessionId, actor, { presence: 'ON_BREAK' });
-    const onBreak = await callNext(queue, sessionId, actor);
-    expect(onBreak.entry?.tokenNumber).toBe(2);
+    await expect(callNext(queue, sessionId, actor)).rejects.toBeInstanceOf(DoctorOnBreakError);
+
+    // Being LATE still must not block anything (docs/PRD.md 11): NOT_PRESENT is the
+    // default for every session, and nobody has actually said the doctor is away.
+    await presence(queue, sessionId, actor, { presence: 'NOT_PRESENT' });
+    const late = await callNext(queue, sessionId, actor);
+    expect(late.entry?.tokenNumber).toBe(2);
+
+    // And once they are back, the queue runs again.
+    await presence(queue, sessionId, actor, { presence: 'PRESENT' });
+    await expect(
+      startConsultation(queue, sessionId, actor, { entryId: late.entry!.id }),
+    ).resolves.toBeDefined();
   });
 
   it('reschedules the people who were present when a session ends early', async () => {

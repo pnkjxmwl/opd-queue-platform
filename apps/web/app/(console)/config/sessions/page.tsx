@@ -3,20 +3,12 @@ import { apiGet } from '../../../../lib/api';
 import { requireAdminHospital } from '../../../../lib/tenant';
 import { Card, Empty, ErrorBanner, Pager, button, buttonQuiet, input, label, td, th } from '../ui';
 import { createSession, generateSessions } from './actions';
+// One formatter for the whole console, so a session reads the same on every screen
+// it appears on - and the same as it reads in the patient's app.
+import { istTime } from '../../queue/ui';
 
 const PATH = '/config/sessions';
 const LIMIT = 20;
-
-/**
- * Instants are stored UTC and rendered in Asia/Kolkata (docs/Rules.md 5). Intl does
- * this correctly with no timezone dependency.
- */
-const IST_TIME = new Intl.DateTimeFormat('en-IN', {
-  timeZone: 'Asia/Kolkata',
-  hour: '2-digit',
-  minute: '2-digit',
-  hour12: false,
-});
 
 const rupees = (paise: number) => (paise / 100).toFixed(2);
 
@@ -226,8 +218,8 @@ export default async function SessionsPage({
                     {doctorName.get(session.originalDoctorId) ?? 'Unknown doctor'}
                   </td>
                   <td className={td + ' tabular-nums'}>
-                    {IST_TIME.format(new Date(session.scheduledStart))}–
-                    {IST_TIME.format(new Date(session.scheduledEnd))}
+                    {istTime(session.scheduledStart)}–
+                    {istTime(session.scheduledEnd)}
                   </td>
                   <td className={td + ' tabular-nums'}>₹{rupees(session.feePaise)}</td>
                   <td className={td}>

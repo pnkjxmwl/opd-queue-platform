@@ -39,6 +39,15 @@ export const ErrorCode = z.enum([
    * the session should be ended or the doctor marked present again.
    */
   'DOCTOR_HAS_LEFT',
+  /**
+   * A command that needs the doctor in the room, while they are ON_BREAK.
+   *
+   * Its own code rather than a reuse of DOCTOR_HAS_LEFT, because the fix a
+   * receptionist has to make is different and temporary: a break ends, a departure
+   * does not. Added in Phase 8 after a tester marked a doctor on break and watched
+   * the queue keep handing out patients.
+   */
+  'DOCTOR_ON_BREAK',
   // join + payment (Phase 5)
   /**
    * The session will not accept a join right now (docs/PRD.md 8.12): closed
