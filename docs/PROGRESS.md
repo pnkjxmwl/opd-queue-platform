@@ -5348,6 +5348,168 @@ has to be visible to the person maintaining it, or it is not handled - it is con
 user's to give. Nothing else in the app or the API needs changing for push to work -
 the templates, the outbox, the dedupe and the pruning are all tested, and the only
 untested link in the chain is the delivery hop itself.
+---
+
+## 2026-09-02 — Session close-out: Phases 6–8 built, tested and merged; where everything stands
+
+This entry exists to survive a context compaction. Everything a later session needs is
+here or is linked from here.
+
+### What shipped, in order
+
+| PR | What | Merged as |
+|---|---|---|
+| #5 | Phase 6 — doctor + staff consoles, signed check-in QR, the repeatable console walkthrough | `6b0bdf3` |
+| #6 | Phase 7 — realtime gateway + ETA engine | `cec7cf7` |
+| #7 | Phase 8 — notifications + the background workers | `d952702` |
+| #8 | Three defects found by device testing, plus IST 12-hour time | `d4d9e12` |
+| #9 | Push registration diagnostics | `61761c1` |
+| **open** | `chore/eas-build-profiles` — EAS CLI, build profiles, `projectId` | **not merged** |
+
+**Tagged: `phase-6-done` (6b0bdf3) and `phase-7-done` (cec7cf7).** Both earned their tags
+by passing device checkpoints on real hardware. **Phase 8 is deliberately untagged** — its
+last box needs a push to land on a phone.
+
+**311 API tests + 37 contract tests. `turbo run lint typecheck test build --force` → 16/16.**
+
+### The one branch still open
+
+`chore/eas-build-profiles` has two commits and **is pushed but has no PR**:
+
+- `edad828` — `eas-cli` as a pinned devDependency (it was never installed; `eas` was "not
+  recognised"), `expo-dev-client`, `apps/mobile/eas.json` with development / preview /
+  production profiles, and `apps/mobile/BUILDS.md`
+- `38117e4` — what `eas init` wrote: `extra.eas.projectId`, `owner`, plus the
+  `expo-updates` OTA wiring EAS adds by default
+
+Open a PR for it and merge; it is verified green.
+
+### Device testing found four defects. All fixed, all in #8 and #9.
+
+1. **A doctor `ON_BREAK` did not stop the queue.** Reception could still call patients in
+   and start consultations. That was the *documented* behaviour (PRD 10: "presence is
+   recorded, never validated, with one exception"), and the doc was too narrow — it
+   treated the console's own presence control as decoration. `CALL_NEXT` and
+   `START_CONSULTATION` now refuse for `ON_BREAK` and `LEFT`, with two distinct errors
+   because a break is waited out and a departure ends the session. **PRD 10 was rewritten.**
+
+   *What is deliberately NOT blocked matters as much:* `NOT_PRESENT` blocks nothing (it is
+   the default for every session, and blocking it would make marking the doctor present a
+   mandatory ceremony before every clinic); `CHECK_IN`/`WALK_IN` never block (patients
+   arrive whatever a dropdown says); `COMPLETE_CONSULTATION` never blocks (or a patient is
+   stranded `IN_CONSULTATION` for good).
+
+2. **My Visits never said who a booking was for.** Token, doctor, department, hospital,
+   date — and not the patient. An account holds a family, so two bookings at one doctor
+   were identical rows. Now reads "For <name>" first.
+
+3. **The session card LISTS were never subscribed to realtime.** Subscription is per
+   session room and only single-session screens joined one, so a department's list of
+   cards sat frozen. The provider was already invalidating those queries correctly;
+   nothing ever arrived. `useLiveSessions(ids)` fixes it. **A client-side invalidation
+   rule proves nothing on its own** — it looked complete in review because the handler
+   named the right keys, and nobody checked an event could reach it.
+
+4. **Push registration failed silently.** See the dedicated entry above.
+
+Plus the requested change: **IST 12-hour time everywhere** — "7 PM", "6 AM", "10:15 AM",
+`:00` dropped on the hour, ranges collapsing a shared meridiem ("10–11:30 AM", "7–10 PM",
+but "10 AM–5 PM" across noon). Both implementations verified to agree character for
+character on the same instants including noon and midnight. Storage unchanged: UTC.
+
+### THE ONLY THING LEFT IN PHASE 8
+
+A push landing on a phone. It was blocked by two things, and **both are now resolved
+except the final build**:
+
+- ✅ `eas init` ran — `projectId ffcd9434-dbeb-4629-aa00-18513362da64`, owner `pnkjsmwl`.
+  This was the actual bug: `getExpoPushTokenAsync` threw
+  `ERR_NOTIFICATIONS_NO_EXPERIENCE_ID` on every launch without it.
+- ✅ FCM V1 service-account key uploaded via `eas credentials` (Google Service Account →
+  *Key for Push Notifications (FCM V1)*, **not** the Legacy menu — Google turned the
+  legacy API off in June 2024).
+- ⏳ **Android development build `7fae5119-257b-46a2-9565-a104c95de5a9` was IN_QUEUE when
+  this session ended.** Free-tier builds queue behind paid ones. Watch it at
+  https://expo.dev/accounts/pnkjsmwl/projects/opd-queue/builds/7fae5119-257b-46a2-9565-a104c95de5a9
+
+**When the build finishes:** install the APK on the phone (scan the QR on that page), run
+`pnpm --filter @opd/mobile dev`, open **OPD Queue** (our own app now, not Expo Go), sign in
+as `testpatient@apollo.test`, allow notifications, then call that patient from the console.
+A push should land within ~30s. Then lock the phone, call another, and tap the notification
+— it must open that booking's token screen.
+
+**Verify registration worked:** `SELECT count(*) FROM "PushToken";` must no longer be 0. If
+it is, the Metro terminal now prints a `console.warn` naming the exact reason.
+
+If it all passes: tick `P8-MOB-01`, tick the Phase 8 box in §0, and
+`git tag phase-8-done d952702`.
+
+**Rebuilding the command if `eas` is "not recognised":** it is a devDependency now, so it
+is `pnpm exec eas ...` from `apps/mobile`, never a bare `eas`.
+
+### What is still NOT done, beyond Phase 8
+
+- **Two Phase 7 failure paths, skipped by choice**: the board showing *"Not live"* when the
+  socket drops, and the phone re-syncing after losing connectivity. Both implemented, both
+  unproven, both two minutes. They are the "does it admit when it is broken" half.
+- **iOS anything.** Blocked on the **$99/year Apple Developer account** — APNs keys are not
+  issued without one, so no iOS build can be made at all. docs/Phases.md Phase 10 says to
+  start that enrolment during Phase 8 *because it is calendar time, not work time*. **It is
+  now Phase 8 and the enrolment has not been started.** This is the single highest-risk
+  open item in the whole plan: it can take days and Phase 10 blocks on it entirely.
+- **Google Play developer account** ($25 once) — needed for Phase 10, not before.
+- **Phase 9 (Hardening) has not begun.** Known gaps it should pick up: no rate limiting on
+  auth/join/webhook; `apps/web` still has no hermetic tests (the 63-check walkthrough needs
+  live servers, Playwright is the upgrade path); the generic "Request validation failed"
+  wording reaching receptionists (trap 34).
+
+### Environment, for a cold start
+
+```bash
+docker compose up -d
+# if the seed refuses: the suite leaves its last fixture behind (trap 36)
+docker exec -i opd-postgres psql -U opd -d opd -c 'TRUNCATE TABLE
+  "RefreshToken","Notification","PushToken","Patient","OPDSession","DoctorSchedule",
+  "QueuePolicy","HospitalStaff","Doctor","Department","Hospital","Account"
+  RESTART IDENTITY CASCADE'
+pnpm --filter @opd/api seed
+pnpm --filter @opd/api start          # :3000
+pnpm --filter @opd/web dev            # :3001
+pnpm --filter @opd/mobile dev         # :8081 - run in YOUR terminal, it prints the QR
+```
+
+Logins are all `Demo@12345`: `reception@apollo.test`, `doctor@apollo.test`,
+`admin@apollo.test`, `admin@fortis.test` (other hospital, for tenant-isolation checks),
+and `testpatient@apollo.test` for the phone.
+
+**A test session with paid bookings** is created by a scratch script that lives outside the
+repo. It signs up the patient account, makes a live session at Apollo and writes three paid
+CONFIRMED entries — the rows the Razorpay webhook would have written. Recreate it by
+inserting a session plus `QueueEntry` + `Payment` rows the way
+`apps/web/test/fixture.mjs` does; that module is in the repo and is the pattern to copy.
+
+**The Razorpay tunnel** was alive this session at
+`educational-diagnosis-some-investigated.trycloudflare.com` with cloudflared running. It is
+a quick tunnel and **its hostname can be withdrawn while cloudflared still claims it**
+(trap 33) — diagnose with DoH, not `curl`, because this router will not resolve
+`*.trycloudflare.com` even for a live tunnel.
+
+### Traps learned or re-learned this session
+
+- **The verification suite truncates the dev database, and I ran it three times while the
+  user was mid-test**, destroying their fixtures each time (trap 11/23). **Do not run
+  `turbo run test` while somebody is testing against the dev database.**
+- **Trap 30 recurred**: `next build` while `next dev` is running corrupts `.next`. It cost
+  a failed build again. Stop dev servers first, always.
+- **Use `pnpm exec expo install`, never `pnpm add`, for Expo packages** — `pnpm add` took
+  `latest` and installed `expo-notifications@57` against SDK 54, surfacing as three
+  missing-property type errors that read like API misuse (trap 38).
+- **Never edit an applied migration** — Prisma stores a checksum per migration and
+  `migrate deploy` will refuse against every database that already has it (trap 37).
+- **Expo Go is not this app.** It is Expo's own app running our JS, so Android never sees
+  `com.opdqueue.app`. Push, our permission prompt, our deep links and handing the app to a
+  receptionist are all impossible there and no code change fixes any of them. Written up
+  in `apps/mobile/BUILDS.md`.
 # 📌 HANDOFF v6 — read this first in a new session
 
 *Supersedes v2–v5. Those are history; this is the brief.*
@@ -5362,19 +5524,23 @@ untested link in the chain is the delivery hop itself.
 | 3 — Discovery + mobile UI | ✅ `phase-3-done` |
 | 4 — Queue Engine | ✅ `phase-4-done` |
 | 5 — Join + Payment → Token | ✅ `phase-5-done` |
-| 6 — Doctor + Staff Consoles | ◐ **merged**, camera unproven |
-| 7 — Realtime + ETA | ◐ **merged**, two screens unproven |
-| 8 — Notifications + Background Jobs | ◐ **merged**, no device has buzzed |
-| 9 — Hardening | ☐ next |
+| 6 — Doctor + Staff Consoles | ✅ `phase-6-done` — device checkpoint passed |
+| 7 — Realtime + ETA | ✅ `phase-7-done` — device checkpoint passed |
+| 8 — Notifications + Background Jobs | ◐ **merged**, one box open: no push has landed |
+| 9 — Hardening | ☐ next, once Phase 8 closes |
 
-**308 API tests + 37 contract tests.** `turbo run lint typecheck test build --force` →
+**311 API tests + 37 contract tests.** `turbo run lint typecheck test build --force` →
 16/16, 0 cached. `pnpm --filter @opd/web test:console` → 63/63 against a running stack.
 
-**Nothing is tagged past `phase-5-done`, on purpose.** Phases 6, 7 and 8 are merged to
-`main` but every one of them has a `◐` checkpoint that needs a human with hardware. The
-tag is the claim that a phase is finished, and Phase 5 already had to un-tick four boxes
-it ticked on a typecheck. **Tag each phase the moment its device walkthrough passes** —
-`git tag phase-6-done <merge sha>` — and not before.
+**Phases 6 and 7 are tagged**, having passed their device checkpoints on real hardware on
+2026-09-02. **Phase 8 is deliberately untagged**: everything in it is built, merged and
+tested, but no push has reached a phone. Tag it (`git tag phase-8-done d952702`) the
+moment one does — and not before. Phase 5 once ticked four boxes on a typecheck and had
+to un-tick them.
+
+**There is one unmerged branch:** `chore/eas-build-profiles`, pushed, no PR yet, verified
+green. It carries the EAS CLI, the build profiles and the `projectId` that push depends
+on. Open a PR and merge it.
 
 ## 2. THE DEVICE CHECKS — five of six passed on 2026-09-02
 
@@ -5532,26 +5698,42 @@ with `migrate diff --exit-code`), **11/23** (the e2e suite truncates the dev dat
 > hospitals (`C:\Projects\New folder`). **The queue is the product.**
 >
 > **Read first, in this order:** `CLAUDE.md` → `docs/PROGRESS.md` from **HANDOFF v6** at
-> the very bottom → `docs/Phases.md`. `docs/Rules.md` wins on conflict.
+> the very bottom, plus the `2026-09-02 Session close-out` entry just above it →
+> `docs/Phases.md`. `docs/Rules.md` wins on conflict.
 >
-> **State:** Phases 0–5 complete and tagged. **Phases 6, 7 and 8 are merged to `main` but
-> untagged**, each with a `◐` checkpoint needing a human and a device — six checks, listed
-> in §2 of the handoff. 308 API tests, 16/16 verification, console walkthrough 63/63.
+> **State:** Phases 0–7 complete and tagged. Phase 8 is built, merged and tested with
+> **one box open** — no push notification has reached a phone. 311 API tests, 16/16
+> verification, console walkthrough 63/63.
 >
 > **Start by asking me which of these is true:**
 >
-> 1. *"I ran the six device checks and they passed"* → tick the boxes, tag
->    `phase-6-done`, `phase-7-done`, `phase-8-done` at their merge commits, then start
->    Phase 9.
-> 2. *"Something was wrong"* → fix that first. Do not start Phase 9 on an unticked
->    checkpoint.
-> 3. *"I haven't run them"* → set the environment up (§4) and hand me the walkthrough
->    again. **Do not tick anything and do not start Phase 9.**
+> 1. *"The Android build finished and I installed it"* → walk me through the push test,
+>    check `SELECT count(*) FROM "PushToken"` is no longer 0, and if a push lands and a
+>    tap opens the right token screen: tick `P8-MOB-01`, tick the Phase 8 box, and
+>    `git tag phase-8-done d952702`. Then start Phase 9.
+> 2. *"The build failed"* → read the build log at expo.dev and fix it. Build
+>    `7fae5119-257b-46a2-9565-a104c95de5a9` was IN_QUEUE when the last session ended.
+> 3. *"I haven't done it yet"* → the APK link appears on the build page when it
+>    finishes; do not start Phase 9 on an open checkpoint.
 >
-> **Standing rules — every one came from something that went wrong:**
+> **Also outstanding, in priority order:**
+> - **Merge `chore/eas-build-profiles`** — pushed, no PR yet, verified green.
+> - **Start the Apple Developer enrolment ($99/yr).** docs/Phases.md says to do this
+>   during Phase 8 *because it is calendar time, not work time*, it has not been started,
+>   and Phase 10 blocks on it entirely. Highest-risk open item in the plan.
+> - Two Phase 7 failure paths were skipped by choice and remain unproven: the board
+>   showing *"Not live"* when the socket drops, and the phone re-syncing after a
+>   connectivity loss.
+>
+> **Standing rules — every one came from something that actually went wrong:**
 > - Verify with `pnpm exec turbo run lint typecheck test build --force`. **A cached green
->   has lied.** Stop any dev server first (trap 30), and re-seed afterwards (trap 36).
-> - Run §4's four environment checks before believing anything is broken.
+>   has lied.** Stop any dev server first (trap 30 recurred on 2026-09-02), and re-seed
+>   afterwards (trap 36).
+> - **Never run the test suite while somebody is testing against the dev database** — it
+>   TRUNCATEs, and doing so destroyed the tester's fixtures three times in one session.
+> - **Expo packages: `pnpm exec expo install`, never `pnpm add`** (trap 38). **`eas` is a
+>   devDependency: `pnpm exec eas`, never a bare `eas`.**
+> - **Never edit a migration that has been applied** (trap 37).
 > - **Every list endpoint paginates.** `GET /patients` is the documented exception.
 > - **Append to `docs/PROGRESS.md` as you go** — what you did, what you decided, **why**,
 >   and what you rejected. Failures and surprises are the most valuable entries.
@@ -5559,7 +5741,9 @@ with `migrate diff --exit-code`), **11/23** (the e2e suite truncates the dev dat
 > - **Never commit, branch, push or tag unless I ask.** When I do: branch → PR → squash
 >   merge → tag after the merge.
 > - If the build must diverge from `PRD.md` / `Architecture.md` / `Design.md`, **say so
->   and update that doc.** Phase 8 rewrote Architecture.md 12 for exactly this reason.
+>   and update that doc.** Phase 8 rewrote Architecture.md 12; device testing rewrote
+>   PRD.md 10.
 >
-> **Budget a device walkthrough into anything touching a screen.** Give me exact steps
-> with expected values, never "check it works".
+> **Budget a device walkthrough into anything touching a screen.** Every defect in Phases
+> 5 through 8 was found by a human looking at a screen, never by a test. Give me exact
+> steps with expected values, never "check it works".

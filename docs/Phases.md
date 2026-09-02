@@ -1466,6 +1466,17 @@ follow-ups · visit history · documents/attachments.
 - [ ] Nobody edits `packages/contracts` mid-wave without a coordinated re-sync.
 ## Appendix 6 — Phase sign-off log
 
+| Phase | Tag | Signed off | How the checkpoint was proven |
+|---|---|---|---|
+| 0–5 | `phase-0..5-done` | earlier | see docs/PROGRESS.md |
+| 6 | `phase-6-done` (`6b0bdf3`) | 2026-09-02 | a webcam decoded a token QR off a phone screen; a declined camera permission still left a working check-in desk; a real Razorpay payment issued a token **through the webhook** (`ENTRY_CONFIRMED / SYSTEM`, 1m44s after the reservation, real gateway ids) |
+| 7 | `phase-7-done` (`cec7cf7`) | 2026-09-02 | two browser windows updated each other with no reload; a phone showed a live position and a moving ETA window |
+| 8 | — | **open** | everything but the last hop: no push has landed on a phone. Blocked on an Android development build, not on code |
+
+**Two Phase 7 failure paths remain unproven by choice**: the board showing *"Not live"*
+when the socket drops, and the phone re-syncing after a connectivity loss. Both are
+implemented and neither has been exercised.
+
 Fill a row the day a phase's integration checkpoint passes. This is your record of where you actually are —
 useful when you come back after a break, and the first thing to hand a second developer if you ever add one.
 Keep the *narrative* (what you built, what you decided, what broke) in **PROGRESS.md**; this table is the index.
@@ -1478,9 +1489,9 @@ Keep the *narrative* (what you built, what you decided, what broke) in **PROGRES
 | 3 |  |  |  |  |  |
 | 4 |  |  |  |  |  |
 | 5 | 2026-08-31 | 2026-08-31 | ~1 | `phase-5-done` | a WebView cannot host Razorpay's popup flow — every method needing a bank sat at `created` while card worked, and only the gateway's own payments API showed it; two route collisions (`/` and a bare `[id]`) that neither lint nor typecheck sees |
-| 6 |  |  |  |  |  |
-| 7 |  |  |  |  |  |
-| 8 |  |  |  |  |  |
+| 6 | 2026-09-01 | 2026-09-02 | ~1 | `phase-6-done` | every defect was found by a human looking at a screen, never by a test — including two controls labelled the same, and My Visits never saying WHICH family member a booking was for |
+| 7 | 2026-09-02 | 2026-09-02 | ~1 | `phase-7-done` | the realtime events got SMALLER under scrutiny — carrying a snapshot would have been a second definition of the live queue. And the card LISTS were subscribed to nothing: the invalidation rule was right, no event could ever reach it |
+| 8 | 2026-09-02 | — | ~1 | — | no BullMQ was needed: every worker is a sweep over state, which cannot lose work across a restart. Push then failed for a reason no test could catch — the project had never been linked to EAS, and the error was swallowed silently |
 | 9 |  |  |  |  |  |
 | 10 |  |  |  |  |  |
 
