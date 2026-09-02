@@ -4726,7 +4726,172 @@ stack, including a real socket receiving a real broadcast caused by a real butto
 someone watches two screens update. Phase 5 ticked four boxes on a typecheck and had to
 un-tick them; that is still the rule.
 
-# 📌 HANDOFF v5 — read this first in a new session
+---
+
+## 2026-09-02 — Phase 8: notifications + the timers that run the place unattended
+
+The product stops needing somebody to be looking at it. Grace periods expire on their
+own, registration closes itself when the day is full, a captured payment whose webhook
+never arrived is reconciled, and patients are told when to leave home. **41 new tests**
+(308 API total, up from 267).
+
+### The decision of the phase: the workers are sweeps, not queued jobs
+
+`docs/Architecture.md` 12 planned BullMQ, and `docs/Phases.md` briefs this phase in
+BullMQ's vocabulary — *"every job must be idempotent and carry a stable `jobId`"*,
+*"BullMQ can deliver twice"*. **No queue was added.** Every worker here is a sweep over
+database state, on a shared `Sweeper` base with an env kill switch.
+
+The argument is Phase 5's, which departed from the same plan for `reservation-expiry`
+and wrote down why:
+
+> the column, not a job, is what frees the slot — the sweeper only writes down what is
+> already true.
+
+That turns out to describe all of them. A called patient is out of time when
+`calledAt + gracePeriodSec` has passed, whether or not anything fired. Registration is
+past its cutoff when the clock and the queue say so. A payment is unreconciled when its
+row says PENDING. **The state is the schedule.** And a sweep has three properties a
+delayed job does not:
+
+- **It cannot lose work.** A job enqueued between a command committing and the process
+  restarting is gone. A sweep re-derives everything outstanding on its next pass — which
+  is precisely what docs/Phases.md asks for: *"if a worker was off, it should be able to
+  catch the system up rather than requiring manual repair."*
+- **It is idempotent by construction.** The stable-`jobId` requirement exists because a
+  queue can deliver twice. A sweep that selects rows *needing* work has nothing to
+  deliver twice: the second pass finds nothing to do. Every worker has a test that runs
+  it twice and asserts the second pass changed nothing.
+- **It needs no new dependency and no second thing to operate.**
+
+The cost is precision — a sweep acts within one interval of the moment rather than at
+it. Grace periods and cutoffs are minutes. If something ever has to fire *at* a second,
+BullMQ is still right, and `common/sweeper.ts` is the seam it goes behind. **This is a
+deliberate divergence from Architecture.md 12 and that document has been updated.**
+
+### Notifications are an outbox, not a call
+
+`NotificationsService.record()` writes a PENDING row; `dispatch()` sends it on the next
+sweep. Nothing calls Expo from inside a queue command — the same rule that keeps
+Razorpay out of one. A send that happens before the commit is a lie if the commit then
+fails, and an HTTP call under the session lock is a throughput collapse waiting to
+happen.
+
+The outbox also buys the history docs/Architecture.md 13 asks for, and it means a push
+survives a restart between the decision and the send.
+
+**The storm guard is a database constraint**: `unique(entryId, type)`. docs/Phases.md is
+blunt — *"notification storms destroy trust faster than no notifications"* — and the
+sweeps that produce these run every half-minute, so an application check loses that race
+the first time two passes overlap (docs/Rules.md 5). A duplicate insert violates the
+constraint and is swallowed as "already told them", which is the truth. Four concurrent
+`record()` calls produce exactly one row, and there is a test that fires them together.
+
+**Events become messages by reading the timeline**, not by calling into the queue
+engine. `EventNotifier` scans `QueueEvent` — the append-only record that already exists —
+so `QueueModule` does not import notifications, cannot be broken by them, and a
+notification bug can never fail a queue command. It also catches up after an outage,
+because the timeline is still there.
+
+**"Time to leave" is the one message that is a prediction**, and the one the whole
+product is for. It fires when the ETA's *early* edge is within the hospital's own
+`arriveBeforeMins`, once per booking ever. It deliberately does **not** re-notify when
+the ETA slips later: telling somebody already in a taxi that they need not have left is
+worse than saying nothing, and their screen is live anyway.
+
+### What the workers do, and what they refuse to do
+
+| Worker | Every | Refuses to act when |
+|---|---|---|
+| `grace` | 15s | the queue is paused, or the grace period is still running |
+| `cutoff` | 60s | the hospital turned `cutoffOnEtaOverrun` off, or the session is already closed |
+| `reconcile` | 5m | the payment is younger than three minutes — the patient may still be typing a PIN |
+| `notify` | 30s | the entry has no account (a walk-in has no phone and never asked) |
+| `leave-now` | 30s | the patient is already checked in, or the doctor has left, or it is paused |
+| `dispatch` | 15s | — |
+
+**Every one of them mutates state only through domain commands.** docs/Phases.md calls
+writing rows from a worker *"the single most damaging shortcut available in this
+phase"*, and there is a test that proves the opposite: after the grace sweeper acts, the
+timeline carries `ENTRY_SKIPPED` and `ENTRY_REQUEUED` and the audit row says
+`actorType: SYSTEM` — a clock did this, and the record blames a clock rather than a
+receptionist.
+
+That rule cost a new command. Closing registration needed `CLOSE_REGISTRATION` in the
+state machine plus a `SESSION_REGISTRATION_CLOSED` event type, rather than a worker
+setting `registrationClosedAt` behind everyone's back.
+
+### The fourth cutoff mechanism, three phases late
+
+`common/registration.ts` has carried an `etaOverrun` parameter since Phase 3, wired to
+nothing, with an honest comment saying so. Phase 7 built the ETA and **still did not
+pass it** — the gap was only found while writing the cutoff worker.
+
+It is now driven from both ends, by one function so they cannot disagree:
+
+- `discovery` passes `etaOverrun` on every card read, so a full session shows *closed*
+  immediately;
+- the `cutoff` worker independently issues `CLOSE_REGISTRATION`, which persists the
+  decision, audits it and broadcasts it.
+
+Both use the **early** edge of the ETA window. Closing the doors is a decision against
+the patient, so it should take the optimistic estimate running out, not merely the
+pessimistic one.
+
+### What went wrong
+
+1. **A migration was edited after it had been applied.** The `SESSION_REGISTRATION_CLOSED`
+   enum value was appended to the Phase 8 migration, which `migrate deploy` had already
+   run — so nothing happened, and worse, Prisma records a checksum per migration, so
+   editing an applied one makes `migrate deploy` refuse to run against every database
+   that already has it. Reverted and given its own migration file. **Never edit an
+   applied migration**, even one written minutes earlier in the same session.
+
+2. **`expo-notifications@57` installed against Expo SDK 54.** `pnpm add` takes `latest`;
+   the SDK-compatible version is 0.32. It typechecked as three missing-property errors on
+   the permissions object, which reads like an API misuse and is actually a version
+   mismatch. `pnpm exec expo install` picks versions the SDK agrees with — **use it for
+   every Expo package**, never `pnpm add`.
+
+3. **The state machine's exhaustiveness tests failed the moment a command was added** —
+   `QUEUE_COMMANDS` has a length assertion and `EXPECTED_SESSION_ACCEPTS` is an exhaustive
+   record. That is the test working exactly as its own name promises (*"so a new one
+   cannot slip through untested"*), and it is worth recording as a pleasant surprise
+   rather than a cost.
+
+4. **Trap 36: after the API suite runs, `pnpm seed` refuses.** `resetDb` truncates at the
+   START of each test, so the last test's fixture survives the run — and the seed's guard
+   sees a hospital it did not create and calls it real data. The guard is right. The fix
+   is to truncate first:
+   ```bash
+   docker exec -i opd-postgres psql -U opd -d opd \
+     -c 'TRUNCATE TABLE "RefreshToken","Notification","PushToken","Patient","OPDSession","DoctorSchedule","QueuePolicy","HospitalStaff","Doctor","Department","Hospital","Account" RESTART IDENTITY CASCADE'
+   ```
+   The handoff has said "re-seed after every suite run" since Phase 4; it now needs to say
+   how, because the obvious command fails.
+
+5. **An unrelated auth race, surfaced by CI on the Phase 7 branch** — see its own entry
+   above. Worth repeating here only for the lesson: the failure appeared on a branch that
+   touched nothing in auth, and the temptation to re-run CI and call it a flake was
+   considerable. It was not a flake.
+
+### Verification
+
+`pnpm exec turbo run lint typecheck test build --force` → **16/16, 0 cached**;
+**308 API tests** (was 267) + 37 contract tests.
+`pnpm --filter @opd/web test:console` → **63/63** against the running stack, unchanged by
+this phase.
+
+### Not proven, and not tickable from here
+
+- **A real push on a real phone.** The templates, the outbox, the pruning and the dedupe
+  are all tested against a fake Expo; nothing has made a device buzz. `P8-MOB-01` is `◐`.
+- **A tap opening the token screen from a locked phone.** Written, typechecked, never
+  performed.
+- **A real Razorpay order polled by the reconcile worker.** The path is tested with a
+  fake gateway; the live call has never been made.
+
+# 📌 HANDOFF v5 — SUPERSEDED by HANDOFF v6 at the very bottom
 
 *Supersedes v2, v3 and v4. Those are history; this is the brief.*
 
@@ -4886,3 +5051,190 @@ Everything in v4 §5 still applies, plus:
 > **Budget a device walkthrough into anything touching a screen.** Give me exact steps with expected
 > values, never "check it works".
 
+---
+
+# 📌 HANDOFF v6 — read this first in a new session
+
+*Supersedes v2–v5. Those are history; this is the brief.*
+
+## 1. Where the project stands
+
+| Phase | State |
+|---|---|
+| 0 — Foundation | ✅ `phase-0-done` |
+| 1 — Identity & Tenancy | ✅ `phase-1-done` |
+| 2 — Hospital Config + Admin + Seed | ✅ `phase-2-done` |
+| 3 — Discovery + mobile UI | ✅ `phase-3-done` |
+| 4 — Queue Engine | ✅ `phase-4-done` |
+| 5 — Join + Payment → Token | ✅ `phase-5-done` |
+| 6 — Doctor + Staff Consoles | ◐ **merged**, camera unproven |
+| 7 — Realtime + ETA | ◐ **merged**, two screens unproven |
+| 8 — Notifications + Background Jobs | ◐ **merged**, no device has buzzed |
+| 9 — Hardening | ☐ next |
+
+**308 API tests + 37 contract tests.** `turbo run lint typecheck test build --force` →
+16/16, 0 cached. `pnpm --filter @opd/web test:console` → 63/63 against a running stack.
+
+**Nothing is tagged past `phase-5-done`, on purpose.** Phases 6, 7 and 8 are merged to
+`main` but every one of them has a `◐` checkpoint that needs a human with hardware. The
+tag is the claim that a phase is finished, and Phase 5 already had to un-tick four boxes
+it ticked on a typecheck. **Tag each phase the moment its device walkthrough passes** —
+`git tag phase-6-done <merge sha>` — and not before.
+
+## 2. THE ONLY THINGS BLOCKING THREE PHASES
+
+All hardware, all quick, none of them possible from a build machine:
+
+| # | Phase | What has to happen |
+|---|---|---|
+| 1 | 6 | A webcam decodes a token QR off a phone screen at `/queue/<id>/check-in` |
+| 2 | 6 | Declining the camera permission still leaves a working check-in desk |
+| 3 | 6 | A real Razorpay test payment issues a token through the live webhook |
+| 4 | 7 | Two browser windows on one board: one acts, the other updates with no reload |
+| 5 | 7 | The Expo app shows a live position and an ETA window that moves |
+| 6 | 8 | A push arrives on a phone, and tapping it opens the right token screen |
+
+Everything either side of each of those is proven and has a test. The full walkthrough
+with exact steps and expected values is in the report published alongside this handoff.
+
+## 3. What the three phases built
+
+**Phase 6 — the consoles.** A signed check-in QR (`v1.<ref>.<hmac>`, signed on read,
+verified before any database access, no unsigned fallback). `GET /sessions/:id/queue`
+(the roster, in `CALL_ORDER`, no lock). `POST /sessions/:id/cancel-entry` (reception
+withdraws a booking; `cause` picks the refund tier). One role-aware console, not two.
+Plus `apps/web/test/` — a zero-dependency walkthrough that drives the real console by
+pressing the forms React renders for a client with no JavaScript.
+
+**Phase 7 — realtime + ETA.** A Socket.IO gateway with the Redis adapter, JWT verified in
+the handshake, room joins authorised server-side, and **events that carry no state**:
+`{sessionId, version}`, and the client re-reads. Emit is wired once, in `runCommand`,
+after the transaction resolves. A pure ETA engine blending seed / all-time / today with
+weights renormalised over the terms that exist, producing a window anchored to `now` — so
+an idle doctor's estimate drifts later for free.
+
+**Phase 8 — the timers.** Notifications as an **outbox** (a row is written, a sweep sends
+it), events turned into messages by reading `QueueEvent` rather than by calling into the
+queue engine, and a storm guard that is a database constraint. Three workers —
+grace-expiry, registration-cutoff, payment-reconcile — **all sweeps, no BullMQ**, all
+mutating state only through domain commands.
+
+## 4. Before touching anything, in this order
+
+```bash
+docker compose up -d
+pnpm --filter @opd/api seed          # see trap 36 if it refuses
+pnpm --filter @opd/api start         # :3000
+pnpm --filter @opd/web dev           # :3001
+pnpm --filter @opd/mobile dev -- --clear
+```
+
+Then check all four, because three fail silently:
+
+| Check | Why |
+|---|---|
+| `ipconfig` → Wi-Fi IPv4 vs `apps/mobile/.env` | trap 16. Hyper-V addresses list FIRST and a phone cannot reach them. |
+| tunnel hostname vs `PUBLIC_BASE_URL` **and** the Razorpay dashboard | trap 28/33. Diagnose with DoH — this router will not resolve `*.trycloudflare.com` even when the tunnel is alive. |
+| `netstat -ano` for a LISTENING :3001 before starting one | trap 32. A "process killed" notice is not evidence it died. |
+| Is a dev server running before `turbo run build`? | trap 30. `next build` and `next dev` share `.next`, and the build wins. |
+
+## 5. Traps — the ones that have actually cost time
+
+1–23 in HANDOFF v3, 24–29 in v4, 30–33 in v5; all still hold. The ones that bite daily:
+**1** (a cached green has lied — always `--force`), **7** (hand-write migrations; prove
+with `migrate diff --exit-code`), **11/23** (the e2e suite truncates the dev database),
+**12** (the route parameter NAME decides whether TenantGuard engages), **16** (Wi-Fi IP),
+**30** (build vs dev server), **32** (trust the port, not the notification), plus:
+
+- **34. A short "optional" reason is refused in developer English.** Typing one or two
+  characters into an optional reason field answers *"Request validation failed (reason:
+  String must contain at least 3 character(s))"*. Empty is omitted correctly, so it only
+  bites someone who types "x". The generic wording comes from the API's validation
+  envelope; rewording it is cross-cutting and belongs in Phase 9.
+- **35. Socket.IO fires `connect` on the client before the server's handshake check.** A
+  socket with a garbage token is briefly "connected" and then dropped, so a test that
+  measures at that instant reports an unauthenticated socket as accepted. Nothing is
+  wrong with the gateway. Settle for ~500ms before asserting.
+- **36. After the API suite runs, `pnpm seed` refuses.** `resetDb` truncates at the START
+  of each test, so the last fixture survives the run, and the seed's guard sees a hospital
+  it did not create and calls it real data. **The guard is right.** Truncate first:
+  ```bash
+  docker exec -i opd-postgres psql -U opd -d opd \
+    -c 'TRUNCATE TABLE "RefreshToken","Notification","PushToken","Patient","OPDSession","DoctorSchedule","QueuePolicy","HospitalStaff","Doctor","Department","Hospital","Account" RESTART IDENTITY CASCADE'
+  ```
+- **37. Never edit a migration that has been applied.** Prisma records a checksum per
+  migration; editing an applied one makes `migrate deploy` refuse against every database
+  that already has it. Add a new migration file instead, even minutes later.
+- **38. Use `pnpm exec expo install`, never `pnpm add`, for Expo packages.** `pnpm add`
+  takes `latest`, which installed `expo-notifications@57` against SDK 54 and surfaced as
+  three missing-property type errors that read like API misuse.
+
+## 6. Decisions from these three phases that constrain future work
+
+- **The QR is signed on READ, never stored signed**, and there is deliberately no
+  fallback that retries an unverified payload as a raw code.
+- **Realtime events carry no state.** `{sessionId, version}`; the client re-reads over
+  REST. Adding a payload would create a second definition of the live queue.
+- **Emit happens once, in `runCommand`, after commit** — no command can forget it.
+- **The ETA window is anchored to `now`**, which is what makes an idle queue drift.
+- **Queue health is staff-only** (`GET /sessions/:sessionId/eta`); the patient
+  `QueueSnapshot` stays frozen.
+- **Background workers are sweeps over state, not queued jobs**, on `common/sweeper.ts`
+  with a `DISABLED_WORKERS` kill switch. Architecture.md 12 is rewritten to match.
+- **Workers mutate state only through domain commands.** This is why `CLOSE_REGISTRATION`
+  exists as a command rather than a column update.
+- **Notifications are an outbox**, and the storm guard is `unique(entryId, type)` in the
+  database rather than a check in code.
+- **The console holds an access token** for the socket handshake (`/api/socket-token`) —
+  the one deliberate weakening of a Rules.md line in the build so far, bounded by a
+  15-minute TTL and an httpOnly refresh token. Reasoning in the Phase 7 entry.
+
+## 7. Known gaps carried forward
+
+- **Nothing has been on a device this session.** Six checkpoints (§2) wait on that.
+- **`apps/web` still has no hermetic tests.** `test:console` needs two live servers and
+  is deliberately outside `turbo run test`. Playwright is the upgrade path, in Phase 9.
+- **No rate limiting yet** on auth, join or the webhook (Rules.md 10 asks for it) —
+  Phase 9.
+- **Reception cannot search for an existing patient** when registering a walk-in.
+- **`GET /patients` is the one documented exception** to "every list endpoint paginates".
+- The **Apple/Google developer accounts** are calendar time and Phase 10 blocks on them.
+  docs/Phases.md says start that paperwork during Phase 8. It is now Phase 8.
+
+## 8. Prompt for the next session
+
+> Continue building the **OPD Queue Platform** — a multi-tenant OPD queue app for Indian
+> hospitals (`C:\Projects\New folder`). **The queue is the product.**
+>
+> **Read first, in this order:** `CLAUDE.md` → `docs/PROGRESS.md` from **HANDOFF v6** at
+> the very bottom → `docs/Phases.md`. `docs/Rules.md` wins on conflict.
+>
+> **State:** Phases 0–5 complete and tagged. **Phases 6, 7 and 8 are merged to `main` but
+> untagged**, each with a `◐` checkpoint needing a human and a device — six checks, listed
+> in §2 of the handoff. 308 API tests, 16/16 verification, console walkthrough 63/63.
+>
+> **Start by asking me which of these is true:**
+>
+> 1. *"I ran the six device checks and they passed"* → tick the boxes, tag
+>    `phase-6-done`, `phase-7-done`, `phase-8-done` at their merge commits, then start
+>    Phase 9.
+> 2. *"Something was wrong"* → fix that first. Do not start Phase 9 on an unticked
+>    checkpoint.
+> 3. *"I haven't run them"* → set the environment up (§4) and hand me the walkthrough
+>    again. **Do not tick anything and do not start Phase 9.**
+>
+> **Standing rules — every one came from something that went wrong:**
+> - Verify with `pnpm exec turbo run lint typecheck test build --force`. **A cached green
+>   has lied.** Stop any dev server first (trap 30), and re-seed afterwards (trap 36).
+> - Run §4's four environment checks before believing anything is broken.
+> - **Every list endpoint paginates.** `GET /patients` is the documented exception.
+> - **Append to `docs/PROGRESS.md` as you go** — what you did, what you decided, **why**,
+>   and what you rejected. Failures and surprises are the most valuable entries.
+>   Append-only. Tick `docs/Phases.md` only when the done-when genuinely passes.
+> - **Never commit, branch, push or tag unless I ask.** When I do: branch → PR → squash
+>   merge → tag after the merge.
+> - If the build must diverge from `PRD.md` / `Architecture.md` / `Design.md`, **say so
+>   and update that doc.** Phase 8 rewrote Architecture.md 12 for exactly this reason.
+>
+> **Budget a device walkthrough into anything touching a screen.** Give me exact steps
+> with expected values, never "check it works".

@@ -78,6 +78,29 @@ export const EnvSchema = z.object({
   /// than a UPI round trip on a bad connection and short enough that an abandoned
   /// checkout does not block a real patient for the rest of the clinic.
   RESERVATION_TTL_SEC: z.coerce.number().int().positive().default(600),
+
+  /**
+   * Background workers to keep switched OFF, comma-separated (Phase 8).
+   *
+   * docs/Phases.md asks for this by name: *"Give every worker its own env-flag kill
+   * switch, so a misbehaving timer can be disabled without a redeploy."* A timer that
+   * is skipping patients or sending pushes in a loop has to be stoppable in the time
+   * it takes to restart a process, not the time it takes to ship a fix.
+   *
+   * Names are the `name` on each Sweeper: grace, cutoff, reconcile, notify,
+   * reservation, eta-tick.
+   */
+  DISABLED_WORKERS: z
+    .string()
+    .default('')
+    .transform((raw) => raw.split(',').map((name) => name.trim()).filter(Boolean)),
+
+  /**
+   * Expo push access token (Phase 8). Empty disables sending, and the API still
+   * boots and still RECORDS every notification - the same posture as Razorpay above,
+   * so a contributor with no Expo account can run everything else.
+   */
+  EXPO_ACCESS_TOKEN: z.string().default(''),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

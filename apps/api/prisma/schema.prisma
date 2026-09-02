@@ -34,6 +34,8 @@ model Account {
   refreshTokens RefreshToken[]
   queueEntries  QueueEntry[]
   payments      Payment[]
+  pushTokens    PushToken[]
+  notifications Notification[]
 }
 
 /// The person actually receiving care - the account holder or a family member.
@@ -421,13 +423,14 @@ model QueueEntry {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  hospital     Hospital      @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
-  session      OPDSession    @relation(fields: [sessionId], references: [id], onDelete: Restrict)
-  patient      Patient       @relation(fields: [patientId], references: [id], onDelete: Restrict)
-  account      Account?      @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  events       QueueEvent[]
-  consultation Consultation?
-  payment      Payment?
+  hospital      Hospital       @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  session       OPDSession     @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  patient       Patient        @relation(fields: [patientId], references: [id], onDelete: Restrict)
+  account       Account?       @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  events        QueueEvent[]
+  consultation  Consultation?
+  payment       Payment?
+  notifications Notification[]
 
   @@unique([sessionId, tokenNumber])
   @@index([hospitalId])
@@ -750,6 +753,7 @@ enum QueueEventType {
   SESSION_PAUSED
   SESSION_RESUMED
   SESSION_ENDED
+  SESSION_REGISTRATION_CLOSED
   DOCTOR_PRESENCE_CHANGED
 }
 
@@ -768,4 +772,72 @@ enum RefundStatus {
   PENDING
   PROCESSED
   FAILED
+}
+
+/// A device this account can be reached on (P8-DB-01).
+///
+/// The token is Expo's, opaque and device-specific. UNIQUE on the token itself, not
+/// on (accountId, token): the same physical device can be handed to a different
+/// person, and Expo will then route the old account's pushes to the new one unless
+/// re-registering MOVES the token rather than duplicating it.
+model PushToken {
+  id        String  @id @default(uuid())
+  accountId String
+  token     String  @unique
+  platform  String?
+
+  /// Set when Expo tells us the device is gone (`DeviceNotRegistered`). Kept rather
+  /// than deleted so a device that comes back is recognised, and so the delivery
+  /// rate can be measured against something (docs/Phases.md: dead tokens are how a
+  /// delivery rate "quietly rots").
+  disabledAt DateTime?
+  lastUsedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+  @@index([disabledAt])
+}
+
+/// One thing we told, or tried to tell, one patient (P8-DB-01).
+///
+/// **A row is written first and sent afterwards.** The dispatcher is a sweep over
+/// PENDING rows, so a push survives a process restart between the queue command and
+/// the send - which a fire-and-forget call inside the command would not. It is also
+/// the history docs/Architecture.md 13 asks for, and the idempotency key.
+model Notification {
+  id        String  @id @default(uuid())
+  accountId String
+  /// The booking this is about. Null only for an account-level message.
+  entryId   String?
+
+  type  String
+  title String
+  body  String
+  /// Deep-link payload the app reads on tap. Small by design - no PII (docs/Rules.md 8).
+  data  Json?
+
+  status    String    @default("PENDING")
+  attempts  Int       @default(0)
+  sentAt    DateTime?
+  /// Why the last attempt failed. For operators; never shown to a patient.
+  lastError String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  account Account     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  entry   QueueEntry? @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  /// **The storm guard, as a database constraint rather than an application check**
+  /// (docs/Rules.md 5). "You are getting close" must fire once per patient per
+  /// booking, and the ETA tick runs every minute - an app-level check loses that race
+  /// the first time two ticks overlap. A duplicate insert violates this and is
+  /// treated as "already told them".
+  @@unique([entryId, type])
+  @@index([status, createdAt])
+  @@index([accountId])
 }

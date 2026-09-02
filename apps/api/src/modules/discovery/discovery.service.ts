@@ -515,10 +515,47 @@ export class DiscoveryService {
       ),
     );
 
+    // P7-BE-03 · "if I joined right now, when would I be seen?"
+    //
+    // One batched call for the whole page - three queries however many cards are on
+    // it - which is the same rule the rest of this method follows and the reason the
+    // ETA service takes a list rather than a session.
+    //
+    // Computed BEFORE the registration gate, because the gate now consumes it: a
+    // session whose queue already runs past its own end has to stop taking bookings
+    // (docs/PRD.md 8.12, `cutoffOnEtaOverrun`).
+    const windows = await this.eta.windowsFor(
+      rows.map((row) => ({
+        key: row.id,
+        doctorId: row.currentProviderDoctorId,
+        aheadCount: eligibleAhead.get(row.id) ?? 0,
+        currentStartedAt: consultingSince.get(row.id) ?? null,
+        estimable:
+          (row.status === 'OPEN_FOR_REGISTRATION' || row.status === 'ACTIVE') &&
+          row.doctorPresence !== 'LEFT',
+      })),
+      now,
+    );
+
     for (const row of rows) {
       const snapshot = snapshots.get(row.id);
       const policy = policies.get(row.hospitalId);
       if (snapshot === undefined || policy === undefined) continue;
+
+      const window = windows.get(row.id) ?? null;
+      // P8-BE-04 · the fourth cutoff mechanism, live at last.
+      //
+      // The EARLY edge of the window, not the late one: closing the doors is a
+      // decision against the patient, so it should take the optimistic estimate
+      // running out, not merely the pessimistic one.
+      //
+      // The `cutoff` worker independently CLOSES such a session, which persists the
+      // decision, audits it and broadcasts it. This is the same rule applied at read
+      // time so a card is right immediately rather than within a minute - and it is
+      // the same function deciding, so the two cannot disagree.
+      const etaOverrun =
+        policy.cutoffOnEtaOverrun && window !== null && new Date(window.from) > row.scheduledEnd;
+
       snapshot.registrationOpen = registrationGate({
         status: row.status,
         registrationClosedAt: row.registrationClosedAt,
@@ -528,35 +565,16 @@ export class DiscoveryService {
           maxOnlineTokens: policy.maxOnlineTokens,
         },
         onlineTokensHeld: heldBySession.get(row.id) ?? 0,
+        etaOverrun,
         now,
       }).open;
-    }
 
-    // P7-BE-03 · "if I joined right now, when would I be seen?"
-    //
-    // One batched call for the whole page - three queries however many cards are on
-    // it - which is the same rule the rest of this method follows and the reason the
-    // ETA service takes a list rather than a session.
-    //
-    // Only for a session a patient could actually join: `registrationOpen` is
-    // already the answer to that, and offering a time on a card whose Join button is
-    // disabled would be an invitation to nothing.
-    const windows = await this.eta.windowsFor(
-      rows.map((row) => ({
-        key: row.id,
-        doctorId: row.currentProviderDoctorId,
-        aheadCount: eligibleAhead.get(row.id) ?? 0,
-        currentStartedAt: consultingSince.get(row.id) ?? null,
-        estimable: (snapshots.get(row.id)?.registrationOpen ?? false) && row.doctorPresence !== 'LEFT',
-      })),
-      now,
-    );
-
-    for (const [sessionId, window] of windows) {
-      const snapshot = snapshots.get(sessionId);
-      if (snapshot === undefined || window === null) continue;
-      snapshot.joinNowEtaFrom = window.from;
-      snapshot.joinNowEtaTo = window.to;
+      // A time is only offered on a card somebody can actually act on. Showing one
+      // beside a disabled Join button is an invitation to nothing.
+      if (window !== null && snapshot.registrationOpen) {
+        snapshot.joinNowEtaFrom = window.from;
+        snapshot.joinNowEtaTo = window.to;
+      }
     }
 
     return snapshots;

@@ -20,3 +20,4 @@ export * from './queue/dto';
 export * from './payments/dto';
 export * from './realtime/dto';
 export * from './eta/dto';
+export * from './notifications/dto';

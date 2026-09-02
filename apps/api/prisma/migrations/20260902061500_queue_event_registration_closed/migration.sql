@@ -1,0 +1,13 @@
+-- The registration-cutoff worker (P8-BE-04) closes a session's doors, and every
+-- queue-affecting action writes a QueueEvent (docs/Rules.md 1.7).
+--
+-- Its OWN migration rather than an edit to the one before it: that one is already
+-- applied, and Prisma records a checksum per migration - editing an applied file
+-- makes `migrate deploy` refuse to run against every database that already has it.
+--
+-- A new value rather than reusing SESSION_ENDED, which means something else and
+-- would make the timeline lie about what happened.
+--
+-- `ADD VALUE` is not transactional on older PostgreSQL, hence IF NOT EXISTS: a
+-- partly applied migration has to be re-runnable.
+ALTER TYPE "QueueEventType" ADD VALUE IF NOT EXISTS 'SESSION_REGISTRATION_CLOSED';

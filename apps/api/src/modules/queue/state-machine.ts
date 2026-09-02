@@ -50,7 +50,9 @@ export type QueueCommand =
   | 'PAUSE'
   | 'RESUME'
   | 'END_SESSION'
-  | 'PRESENCE';
+  | 'PRESENCE'
+  /** Phase 8: the registration-cutoff worker closing a session's doors. */
+  | 'CLOSE_REGISTRATION';
 
 export const QUEUE_COMMANDS: readonly QueueCommand[] = [
   'JOIN',
@@ -71,6 +73,7 @@ export const QUEUE_COMMANDS: readonly QueueCommand[] = [
   'RESUME',
   'END_SESSION',
   'PRESENCE',
+  'CLOSE_REGISTRATION',
 ];
 
 export const ENTRY_STATUSES: readonly QueueEntryStatus[] = [
@@ -287,6 +290,9 @@ const ENTRY_TRANSITIONS: Record<
   RESUME: {},
   PRESENCE: {},
 
+  /** Touches the SESSION, never an entry - the doors close, the queue does not move. */
+  CLOSE_REGISTRATION: {},
+
   /**
    * docs/PRD.md 8.9 and 8.11 read like they disagree about end-of-session, and do
    * not: they describe different people.
@@ -385,6 +391,10 @@ const SESSION_ACCEPTS: Record<QueueCommand, readonly SessionStatus[]> = {
   RESUME: ['ACTIVE'],
   END_SESSION: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
   PRESENCE: ['SCHEDULED', 'OPEN_FOR_REGISTRATION', 'ACTIVE'],
+  // Only a session that is actually open can be closed. Re-closing a closed one is
+  // refused by the command itself rather than here, because the SESSION status does
+  // not change - `registrationClosedAt` does.
+  CLOSE_REGISTRATION: ['OPEN_FOR_REGISTRATION', 'ACTIVE'],
 };
 
 /**

@@ -7,6 +7,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { EtaModule } from './modules/eta/eta.module';
 import { RealtimeModule } from './realtime/realtime.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 import { HealthModule } from './modules/health/health.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { PatientsModule } from './modules/patients/patients.module';
@@ -64,6 +65,7 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
     PaymentsModule,
     EtaModule,
     RealtimeModule,
+    NotificationsModule,
   ],
   // Registered through DI, not app.useGlobalFilters(): nestjs-pino's PinoLogger
   // is transient-scoped and cannot be resolved with app.get().

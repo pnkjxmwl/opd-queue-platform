@@ -35,7 +35,7 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 | ☑ | 5 — Join + Payment → Token | L | 5–7 | 3 | `phase-5-done` |
 | ◐ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
 | ◐ | 7 — Realtime + ETA | L | 5–7 | 4 | `phase-7-done` |
-| ☐ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
+| ◐ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
 | ☐ | 9 — Hardening | L | 5–7 | 6 | `phase-9-done` |
 | ☐ | 10 — Staging Deploy + Pilot | M | 3–4 | 3 | `phase-10-done` |
 
@@ -1089,7 +1089,11 @@ Nudge patients via push and let the timers run themselves (Phase 8).
 **Goal:** The system nudges patients and self-manages timers unattended.
 **Prerequisites:** Phase 7 (events + ETA), Phase 5 (reservation expiry), Phase 4 (no-show flow).
 **Size:** `M` · ~4–5 focused days · up to 5 parallel agents
-**Status:** ☐ not started → tick in §0 when the integration checkpoint passes
+**Status:** ◐ **built and tested, checkpoint pending a phone** (2026-09-02)
+
+Seven of eight subtasks are ticked. `P8-MOB-01` is `◐`: permission, registration and
+tap-to-open are written and typecheck, but **nothing has made a device buzz**. 41 new
+tests (308 API total).
 
 ### 📦 What you'll have after this phase
 The "wait at home" promise fully working. Patients get **push notifications** (token issued, getting close,
@@ -1114,14 +1118,24 @@ POST /me/push-tokens     — register a device push token
 
 | ID | Task | Stream | Wave | Deps | Test / Done-when |
 |---|---|---|---|---|---|
-| ☐ P8-CONTRACT-01 | Notification + push-token DTOs | CONTRACT | 1 | — | compiles |
-| ☐ P8-DB-01 | Notification, PushToken; migration | DB | 1 | — | applies |
-| ☐ P8-BE-01 | Push-token registration + NotificationService (Expo) + templates | BE | 2 | Wave 1 | register token; test push recorded |
-| ☐ P8-BE-02 | Wire events → notification jobs | BE | 2 | P8-BE-01 | each event enqueues correct push |
-| ☐ P8-BE-03 | Worker: grace-expiry (recall→skip→requeue) | BE | 2 | Wave 1 | absent-called timer fires no-show flow |
-| ☐ P8-BE-04 | Worker: registration-cutoff | BE | 2 | Wave 1 | past ETA-end → registration closes |
-| ☐ P8-BE-05 | Worker: payment-reconcile | BE | 2 | Wave 1 | missed webhook reconciled |
-| ☐ P8-MOB-01 | Push permission + registration + foreground/background/tap→deep-link | MOB | 2 | Wave 1 | receive push; tap opens token screen |
+| ☑ P8-CONTRACT-01 | Notification + push-token DTOs | CONTRACT | 1 | — | compiles |
+| ☑ P8-DB-01 | Notification, PushToken; migration | DB | 1 | — | applied; `migrate diff --exit-code` clean |
+| ☑ P8-BE-01 | Push-token registration + NotificationService (Expo) + templates | BE | 2 | Wave 1 | 14 tests: registration moves a shared device, dispatch prunes `DeviceNotRegistered`, retries then gives up |
+| ☑ P8-BE-02 | Wire events → notification jobs | BE | 2 | P8-BE-01 | reads the timeline, not the commands; four concurrent records produce ONE row |
+| ☑ P8-BE-03 | Worker: grace-expiry (recall→skip→requeue) | BE | 2 | Wave 1 | recall then requeue, no-show once spent, thresholds from the policy, `SYSTEM` in the audit log |
+| ☑ P8-BE-04 | Worker: registration-cutoff | BE | 2 | Wave 1 | closes on ETA overrun, respects the policy switch, and the join it prevents is refused |
+| ☑ P8-BE-05 | Worker: payment-reconcile | BE | 2 | Wave 1 | a captured payment with no webhook becomes a token; twice is a no-op |
+| ◐ P8-MOB-01 | Push permission + registration + foreground/background/tap→deep-link | MOB | 2 | Wave 1 | written, typechecks; **no device has received one** |
+
+**As built, two departures from the plan above, both in `docs/PROGRESS.md`:**
+
+- **No BullMQ.** Every worker is a sweep over database state on a shared `Sweeper` base
+  with an env kill switch (`DISABLED_WORKERS`). The state IS the schedule, so a sweep
+  cannot lose work across a restart and is idempotent by construction rather than by
+  carrying a stable `jobId`. Phase 5 made the same call for `reservation-expiry`.
+- **Notifications are an outbox.** A row is written by the command's aftermath and sent
+  by a separate sweep, so a push survives a restart and Expo is never called from inside
+  a transaction. The storm guard is `unique(entryId, type)` in the database.
 
 **Parallelization:** Wave 2 → workers split across agents (BE-03 ∥ BE-04 ∥ BE-05, each its own file) ∥ BE-01/02 ∥ MOB-01.
 **Integration checkpoint:** patient gets the full push sequence on a device; no-show + cutoff timers fire automatically.
