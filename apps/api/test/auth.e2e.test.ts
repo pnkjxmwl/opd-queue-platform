@@ -133,6 +133,46 @@ describe('auth (P1-BE-01, P1-BE-02)', () => {
       .expect(401);
   });
 
+  /**
+   * The race above, run enough times that a rare interleaving cannot pass unnoticed.
+   *
+   * It got in this way: CI failed once, on a branch that touched nothing in auth,
+   * with the winner's brand-new token still alive after a replay had been detected.
+   * The ordering was
+   *   winner claims -> loser revokes the family (nothing unrevoked yet) -> winner
+   *   inserts its new token
+   * so the family died and the new token was born a moment later, outside it.
+   *
+   * **Honest limit:** this does not reproduce the race deterministically. Removing
+   * the fix and running it here still passes, because two requests through one
+   * connection pool on one machine mostly serialise anyway. It is a wider net over
+   * the invariant, not a proof - the proof is the reasoning in `token.service.ts`,
+   * and CI is where the interleaving actually showed up.
+   */
+  it('never lets a new token outlive the family that was revoked while it was minted', async () => {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const { refreshToken } = await signup(app, `race${attempt}@example.com`);
+
+      const [a, b] = await Promise.all([
+        http().post('/auth/refresh').send({ refreshToken }),
+        http().post('/auth/refresh').send({ refreshToken }),
+      ]);
+      expect([a.status, b.status].sort()).toEqual([200, 401]);
+
+      const winner = a.status === 200 ? a : b;
+      await http()
+        .post('/auth/refresh')
+        .send({ refreshToken: winner.body.refreshToken })
+        .expect(401);
+
+      // And nothing in the family is left alive to be rotated later.
+      const alive = await prisma.refreshToken.count({
+        where: { account: { email: `race${attempt}@example.com` }, revokedAt: null },
+      });
+      expect(alive, `attempt ${attempt} left ${alive} live token(s)`).toBe(0);
+    }
+  });
+
   it('rejects a date of birth in the future', async () => {
     const { accessToken } = await signup(app, 'dob@example.com');
     const tomorrow = new Date(Date.now() + 86_400_000).toISOString();
