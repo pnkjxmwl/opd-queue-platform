@@ -63,13 +63,34 @@ export function PriorityPill({ priority }: { priority: QueueEntryPriority }) {
 /** Tabular numerals: docs/Design.md 8 requires them for anything that changes. */
 export const token = 'font-semibold tabular-nums text-ink';
 
-/** Instants are stored UTC and rendered in Asia/Kolkata (docs/Rules.md 5). */
-export const IST_TIME = new Intl.DateTimeFormat('en-IN', {
+/**
+ * Instants are stored UTC and rendered in Asia/Kolkata (docs/Rules.md 5), the way
+ * the clock is read in India: "7 PM", "6 AM", "10:30 AM".
+ *
+ * 12-hour, with the ":00" dropped on the hour - the same rule and the same output
+ * as `istClock` in the mobile app, so a session reads identically to the patient
+ * and to the receptionist looking at them.
+ *
+ * `en-US` rather than `en-IN`: en-IN renders lowercase "pm", and the two apps have
+ * to agree character for character. Intl also emits a narrow no-break space before
+ * the meridiem in newer runtimes, which is normalised here so the string can be
+ * compared and tested.
+ */
+const IST_HOUR_MINUTE = new Intl.DateTimeFormat('en-US', {
   timeZone: 'Asia/Kolkata',
-  hour: '2-digit',
+  hour: 'numeric',
   minute: '2-digit',
-  hour12: false,
+  hour12: true,
 });
+
+export const istTime = (value: Date | string): string =>
+  IST_HOUR_MINUTE.format(typeof value === 'string' ? new Date(value) : value)
+    .toUpperCase()
+    .replace(':00', '')
+    // Newer ICU emits a NARROW NO-BREAK SPACE before the meridiem. Matched as
+    // whitespace rather than by codepoint so this keeps working whichever space the
+    // runtime picks, and so the output matches the mobile app character for character.
+    .replace(/\s+(AM|PM)/, ' $1');
 
 export const rupees = (paise: number): string => (paise / 100).toFixed(2);
 

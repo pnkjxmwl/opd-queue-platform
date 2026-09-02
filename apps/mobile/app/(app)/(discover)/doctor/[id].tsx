@@ -4,6 +4,7 @@ import type { Paginated, PublicDoctor, SessionCard } from '@opd/contracts';
 import { useApi } from '../../../../lib/api';
 import { Icon } from '../../../../lib/icon';
 import { MoreNote, PAGE, QueryState, SessionCardView } from '../../../../lib/discovery';
+import { useLiveSessions } from '../../../../lib/realtime';
 import { bookingStateFor, useMyActiveEntries } from '../../../../lib/visits';
 import { Avatar, SectionLabel } from '../../../../lib/ui';
 import { theme } from '../../../../theme';
@@ -23,6 +24,11 @@ export default function Doctor() {
 
   const doctor = useApi<PublicDoctor>(`/doctors/${id}`);
   const sessions = useApi<Paginated<SessionCard>>(`/doctors/${id}/sessions?limit=${PAGE}`);
+
+  // Live for every session this doctor is running, not just the one a patient has opened
+  // (P7-MOB-01). Each card carries a queue that moves on its own; without this the
+  // numbers sat frozen until the screen was navigated away from and back.
+  useLiveSessions((sessions.data?.items ?? []).map((card) => card.id));
 
   return (
     <>

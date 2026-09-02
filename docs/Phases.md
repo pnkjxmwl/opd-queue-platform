@@ -33,8 +33,8 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 | ☑ | 3 — Discovery | M | 3–4 | 4 | `phase-3-done` |
 | ☑ | 4 — Queue Engine | XL | 8–12 | 4 (with care) | `phase-4-done` |
 | ☑ | 5 — Join + Payment → Token | L | 5–7 | 3 | `phase-5-done` |
-| ◐ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
-| ◐ | 7 — Realtime + ETA | L | 5–7 | 4 | `phase-7-done` |
+| ☑ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
+| ☑ | 7 — Realtime + ETA | L | 5–7 | 4 | `phase-7-done` |
 | ◐ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
 | ☐ | 9 — Hardening | L | 5–7 | 6 | `phase-9-done` |
 | ☐ | 10 — Staging Deploy + Pilot | M | 3–4 | 3 | `phase-10-done` |
@@ -839,7 +839,14 @@ Give doctors and reception real screens to run the session (Phase 6).
 **Goal:** Staff and doctors can run a real session.
 **Prerequisites:** Phase 4 (commands), Phase 5 (real entries), Phase 1 (RBAC).
 **Size:** `L` · ~5–7 focused days · up to 4 parallel agents
-**Status:** ◐ **code complete, not merged, checkpoint pending a device** (2026-09-02)
+**Status:** ☑ **signed off 2026-09-02** — a webcam decoded a token QR off a phone screen,
+a declined camera permission still left a working check-in desk, and a real Razorpay
+payment issued a token through the live webhook (`ENTRY_CONFIRMED / SYSTEM`, 1m44s after
+the reservation, against real gateway ids).
+
+Device testing also found a defect this phase's tests could not: **My Visits never said
+which family member a booking was for**, so two bookings for one doctor were
+indistinguishable. Fixed the same day. See `docs/PROGRESS.md` 2026-09-02.
 
 All six subtasks are built and verified; five are ticked and `P6-WEB-02` is half-ticked. The phase box
 in §0 stays ☐ until a human runs the device walkthrough, because **three claims cannot be proven
@@ -889,7 +896,7 @@ See `docs/PROGRESS.md` 2026-09-01.
 | ☑ P6-CONTRACT-01 | Check-in/walk-in/QR DTOs | CONTRACT | 1 | — | compiles |
 | ☑ P6-BE-01 | Signed QR code on token; check-in accepts {code\|tokenNumber} + validates | BE | 1 | P4 | scan works; tampered rejected; double-scan idempotent |
 | ☑ P6-WEB-01 | **Doctor console** (Design 5.7): current patient + all session commands + presence | WEB | 2 | Wave 1 | run a full session vs seed entries |
-| ◐ P6-WEB-02 | **Staff: QR check-in** (camera) + manual search fallback | WEB | 2 | Wave 1 | scan token QR → CHECKED_IN; manual works |
+| ☑ P6-WEB-02 | **Staff: QR check-in** (camera) + manual search fallback | WEB | 2 | Wave 1 | ✅ 2026-09-02: a webcam decoded a token QR off a phone screen; a declined permission still leaves a working desk |
 | ☑ P6-WEB-03 | **Staff: walk-in** registration | WEB | 2 | Wave 1 | walk-in appears auto-checked-in |
 | ☑ P6-WEB-04 | **Staff: priority/emergency + cancel/requeue** (audited) | WEB | 2 | Wave 1 | emergency reorders + audited |
 
@@ -984,7 +991,16 @@ Make every screen live and predict wait times — the product's USP (Phase 7).
 **Goal:** Live position + accurate moving ETA window for everyone.
 **Prerequisites:** Phase 4 (events), Phase 6 (consoles), Phase 3 (patient views).
 **Size:** `L` · ~5–7 focused days · up to 4 parallel agents
-**Status:** ◐ **built and verified as far as a machine can, checkpoint pending two screens** (2026-09-02)
+**Status:** ☑ **signed off 2026-09-02** — two browser windows updated each other with no
+reload, and a phone showed a live position and a moving ETA window.
+
+Device testing found one real gap and it is fixed: the session card LISTS (a department's
+sessions, a doctor's sessions) were never subscribed to anything, so their counts sat
+frozen until the screen was navigated away from and back. The single-session screens were
+live; the lists were not. See `docs/PROGRESS.md` 2026-09-02.
+
+Two failure paths were skipped by choice and are still unproven: the board saying *"Not
+live"* when the socket drops, and the phone re-syncing after losing connectivity.
 
 Five of seven subtasks are ticked. `P7-WEB-01` and `P7-MOB-01` are `◐`: the socket half of
 each is proven against the real gateway, but a browser repainting a board and a phone
@@ -1021,8 +1037,8 @@ WS  connect (Socket.IO, JWT in handshake)
 | ☑ P7-BE-02 | Wire emit-after-commit into every queue command | BE | 2 | P7-BE-01 | commit → event received; **refused command → no event, no version bump** |
 | ☑ P7-BE-03 | **ETA engine** (blend seed/all-time/today; window; queue-health) | BE | 2 | Wave 1 | 19 unit + 10 e2e; no-history/idle/overrun all pinned |
 | ☑ P7-BE-04 | eta-tick worker (recompute over time) | BE | 2 | P7-BE-03 | idle session re-broadcast; version and updatedAt untouched |
-| ◐ P7-MOB-01 | Socket client + reconnect→snapshot→resubscribe + live ETA | MOB | 2 | Wave 1 | written, typechecks; **no phone has run it** |
-| ◐ P7-WEB-01 | Socket client in consoles | WEB | 2 | Wave 1 | socket proven; `router.refresh()` in a browser is not |
+| ☑ P7-MOB-01 | Socket client + reconnect→snapshot→resubscribe + live ETA | MOB | 2 | Wave 1 | ✅ 2026-09-02 on a device: live position and a moving ETA window. **The card LISTS were not subscribed at all** and were fixed the same day |
+| ☑ P7-WEB-01 | Socket client in consoles | WEB | 2 | Wave 1 | ✅ 2026-09-02: two boards updating each other in a browser, no reload |
 
 **As built, three departures from the sketch above, all recorded in `docs/PROGRESS.md`:**
 

@@ -5053,6 +5053,225 @@ Everything in v4 §5 still applies, plus:
 
 ---
 
+---
+
+## 2026-09-02 — Device testing: three findings, two of them real defects
+
+Phase 6 check 3 passed on the first attempt. The other two findings came from the
+tester looking at screens, which is now the fourth phase running for which that is
+where the defects came from.
+
+### Check 3 passed, and the evidence is worth keeping
+
+```
+razorpayOrderId    order_TX5NRwuloez4gv
+razorpayPaymentId  pay_TX5P2e1gYEPp5f     18 chars, real gateway format
+ENTRY_RESERVED     PATIENT   01:57:52
+ENTRY_CONFIRMED    SYSTEM    01:59:36
+Payment            SUCCESS   ₹400
+```
+
+`ENTRY_CONFIRMED` with actor `SYSTEM`, 1m44s after the patient reserved, is the claim
+the check exists to make: **the token was issued by the webhook, not by the client's
+success screen.** The fixture payments elsewhere in this build use 40-character
+UUID-based ids, so the 18-character `pay_…` is unambiguous proof it came from
+Razorpay rather than from a test.
+
+### Defect 1 — My Visits never said WHO a booking was for
+
+The tester saw two bookings, both labelled `A001`, and read them as a duplicate. They
+were not: token numbers restart per session (docs/PRD.md 8.1 — the token is a label,
+not a position), so two sessions legitimately both have an A001.
+
+But underneath the false alarm was a real one. The visits list rendered the token, the
+doctor, the department, the hospital and the date — and **not the patient**. An
+account holds a whole family (docs/PRD.md 3.1), so a mother who books for herself and
+for her father at the same doctor gets two rows that are identical in every visible
+field. The token DETAIL screen has always shown `Patient`; the LIST did not.
+
+That is how somebody takes the wrong person to an appointment.
+
+Fixed in `apps/mobile/app/(app)/(visits)/visits.tsx`: the patient now reads first, as
+**"For <name>"**, with the doctor demoted to secondary. The label is doing real work —
+the patient and the doctor are both people's names, stacked, and without it the two
+are indistinguishable.
+
+**The test fixture made this much worse and that is worth admitting.** The setup
+script named a patient profile *"Anita Sharma"* — the same name as a seeded doctor.
+Rendered under "Dr. Anita Sharma" with no label, the screen was genuinely unreadable,
+and the tester reasonably concluded they had booked the wrong doctor. They had not.
+The script now refuses to reuse a seeded doctor's name.
+
+### Defect 2 — a doctor on a break was not on a break
+
+The tester marked a doctor `ON_BREAK`, and reception could still call patients in and
+start consultations. That was **the documented behaviour**: docs/PRD.md 10 said
+*"presence is recorded, never validated, with one exception"* — `call-next` while
+`LEFT` — and the state machine implemented exactly that.
+
+The doc was too narrow, and the reading of it treated the console's own presence
+control as decoration. A doctor who selects **On break** and watches the queue keep
+handing out patients has been given a button that does nothing, which is trap 31 in a
+different costume.
+
+`NEEDS_THE_DOCTOR_PRESENT` (`CALL_NEXT`, `START_CONSULTATION`) is now refused for both
+away states, with **two distinct errors** because the remedy differs: a break is
+waited out, a departure ends the session. `DOCTOR_ON_BREAK` was added to the error
+contract; no client branched on the old code, so this is additive.
+
+**The three commands deliberately NOT blocked matter as much as the two that are:**
+
+- **`NOT_PRESENT` blocks nothing.** It is the DEFAULT for every session, so blocking
+  it would make marking the doctor present a mandatory ceremony before the first
+  patient of every clinic — and the first `call-next` is what activates a session at
+  all. It is also the *absence* of information rather than a statement: nobody has
+  said anything yet. docs/PRD.md 11 is explicit that a late doctor leaves the queue
+  unaffected.
+- **`CHECK_IN` and `WALK_IN` are never blocked.** Patients arrive at a reception desk
+  whether or not the doctor is in the room, and turning them away because of a
+  dropdown is a worse product than a slightly longer queue — the same argument the
+  pause rule already makes.
+- **`COMPLETE_CONSULTATION` is never blocked.** A consultation that has started must
+  always be closable; blocking it would strand a patient `IN_CONSULTATION` for good
+  the moment anyone touched presence mid-visit, with no way back out.
+
+Four tests replace the one that encoded the old rule, including one asserting that a
+receptionist is told *which* absence they are looking at.
+
+**docs/PRD.md 10 has been updated**, because the build now diverges from what it said.
+
+### The whole app now tells the time the way India reads it
+
+`istClock` and the console's formatter were both 24-hour. They are now 12-hour with
+the meridiem — **"7 PM", "6 AM", "10:15 AM"** — and the `:00` is dropped on the hour,
+because "7 PM" is what a receptionist says to a patient and "19:00" is what a server
+log says.
+
+Ranges collapse a repeated meridiem the way a person writes them: **"10–11:30 AM"**,
+**"7–10 PM"**, but **"10 AM–5 PM"** across noon.
+
+Both implementations were checked against each other on the same instants, including
+noon and midnight, and agree character for character — the mobile one on fixed-offset
+arithmetic (Hermes cannot be relied on for `Intl` with a `timeZone`), the console one
+on real `Intl`. The console's used `en-IN`, which renders a lowercase "pm"; it is now
+`en-US` so the two agree. Storage is unchanged: UTC everywhere, converted only for
+display (docs/Rules.md 5).
+
+A duplicated formatter in `config/sessions/page.tsx` was deleted in favour of the
+shared one, so a session reads identically on every screen it appears on.
+
+### A self-inflicted one, for the record
+
+Running the full verification mid-testing **truncated the tester's data** — trap 11/23,
+which this file has recorded since Phase 4 and which I walked into anyway while they
+were halfway through a checklist. The suite resets the database it runs against.
+**Do not run `turbo run test` while somebody is testing against the dev database**;
+rebuild their fixtures afterwards if you do.
+
+### Verification
+
+`pnpm exec turbo run lint typecheck test build --force` → **16/16, 0 cached**;
+**311 API tests** (was 308) + 37 contract tests.
+
+---
+
+## 2026-09-02 — A fourth finding: the session LISTS were never live
+
+Reported straight after the realtime checks passed: the token screen and the session
+detail screen updated themselves, but the **department's list of session cards** did
+not. The counts on those cards - now serving, checked in, booked - sat frozen until
+the tester navigated away and came back.
+
+### The cause, and why it was invisible
+
+A subscription is **per session room**, and only the single-session screens ever
+joined one:
+
+| Screen | Subscribes | Live |
+|---|---|---|
+| `(discover)/session/[id]` | `useLiveSession(id)` | yes |
+| `(visits)/visit/[id]` | `useLiveSession(entry.sessionId)` | yes |
+| `(discover)/department/[id]` | nothing | **no** |
+| `(discover)/doctor/[id]` | nothing | **no** |
+
+The provider was **already** invalidating `/departments/…` and `/doctors/…` queries on
+`session.updated`. That code was right and had been all along. Nothing ever arrived,
+because the app had never joined the rooms of the sessions it was displaying - a
+screen showing a dozen session cards was listening to none of them.
+
+That is why it looked like a caching bug rather than a subscription one, and why
+navigating away and back "fixed" it: a remount refetches from scratch.
+
+**The lesson worth keeping: a client-side invalidation rule proves nothing on its
+own.** It looked complete in review because the handler named the right query keys.
+Nobody checked that an event could reach it.
+
+### The fix
+
+`useLiveSessions(ids)` - the same machinery as `useLiveSession`, for a list - wired
+into both card screens. Session rooms are cheap on the server (a Set per room), and
+the alternative, a department-level room, would have meant new authorisation, a new
+payload and a contract change to save a handful of joins.
+
+The ids are joined into a string for the effect's dependency. `.map()` rebuilds the
+array on every render, so depending on it directly would unsubscribe and resubscribe
+the whole list each time - a wasted round trip, and a window in which an event is
+missed.
+
+### And a churn bug found while in there
+
+`watch` was rebuilt whenever `connected` flipped, because it sat in a `useMemo` keyed
+on it. Every watching screen therefore left its rooms and rejoined them on **every
+reconnect** - churn triggered by the exact event that already re-joins them, with a
+gap in between where an update could be lost. It touches only refs, so it is now a
+`useCallback` with no dependencies and is stable for the life of the provider.
+
+Nobody reported this one; it was sitting behind the reported bug.
+
+### Deliberately not changed
+
+**The list screens get no polling fallback.** The detail screens have one at 90s
+because a patient sits on them for a long time. Discovery is the hottest read path in
+the product and a browsing patient moves on quickly, so a timer on every card list
+would be real load bought for very little - the socket covers it, and the provider
+already refetches everything when the app returns to the foreground.
+
+**The hospital and city lists are still not live**, and that is correct: they show a
+session COUNT, which only changes when a session is created, not a live queue number.
+
+### Verification
+
+`pnpm exec turbo run lint typecheck test build --force` -> 16/16, 0 cached; 311 API
+tests + 37 contract. Confirmed on a device by the tester: the card's checked-in count
+now moves while the list is on screen.
+
+### Two more things the tester saw work, unprompted
+
+Both Phase 8 workers fired during the session without being asked:
+
+- **grace-expiry**: a patient was called at 10:13:40, nobody came, and at 10:15:06
+  `ENTRY_SKIPPED` + `ENTRY_REQUEUED` were written by `SYSTEM`, audited *"No response
+  within the 20s grace period"*. The recall count went to 1 and the patient went to
+  the back of the queue.
+- **registration-cutoff**: with the session shortened to 20 minutes and three people
+  waiting at 12 minutes each, it closed the doors by itself -
+  `SESSION_REGISTRATION_CLOSED / SYSTEM`, *"Anyone joining now would not be seen
+  before the session ends"*.
+
+The notification pipeline ran too: `CALLED`, `SKIPPED` and `LEAVE_NOW` rows were
+created, deduped, and marked `FAILED` with `no registered device` - the correct
+outcome when nothing is registered to send to.
+
+### Push delivery is blocked on tooling, not on us
+
+`expo-notifications` **removed Android remote push from Expo Go in SDK 53**, and Expo
+Go on iOS never supported it. So `P8-MOB-01` cannot be closed from Expo Go at all: it
+needs a development build (`eas build --profile development`), which is ~20 minutes of
+cloud build and, for iOS, the $99/year Apple account that docs/Phases.md already says
+to start during this phase.
+
+Everything up to the final delivery hop is proven. The hop itself is untested.
+
 # 📌 HANDOFF v6 — read this first in a new session
 
 *Supersedes v2–v5. Those are history; this is the brief.*
@@ -5081,18 +5300,40 @@ tag is the claim that a phase is finished, and Phase 5 already had to un-tick fo
 it ticked on a typecheck. **Tag each phase the moment its device walkthrough passes** —
 `git tag phase-6-done <merge sha>` — and not before.
 
-## 2. THE ONLY THINGS BLOCKING THREE PHASES
+## 2. THE DEVICE CHECKS — five of six passed on 2026-09-02
 
-All hardware, all quick, none of them possible from a build machine:
-
-| # | Phase | What has to happen |
+| # | Phase | Result |
 |---|---|---|
-| 1 | 6 | A webcam decodes a token QR off a phone screen at `/queue/<id>/check-in` |
-| 2 | 6 | Declining the camera permission still leaves a working check-in desk |
-| 3 | 6 | A real Razorpay test payment issues a token through the live webhook |
-| 4 | 7 | Two browser windows on one board: one acts, the other updates with no reload |
-| 5 | 7 | The Expo app shows a live position and an ETA window that moves |
-| 6 | 8 | A push arrives on a phone, and tapping it opens the right token screen |
+| 1 | 6 | ✅ a webcam decoded a token QR off a phone screen |
+| 2 | 6 | ✅ declining the camera still leaves a working check-in desk |
+| 3 | 6 | ✅ a real Razorpay payment issued a token **through the webhook** — `ENTRY_CONFIRMED / SYSTEM`, 1m44s after the reservation, against real gateway ids |
+| 4 | 7 | ✅ two boards update each other with no reload |
+| 5 | 7 | ✅ live position and a moving ETA window on the phone |
+| 6 | 8 | ⛔ **blocked on tooling, not on us** — see below |
+
+**Phase 8's push cannot be tested from Expo Go.** `expo-notifications` removed Android
+remote push from Expo Go in SDK 53, and Expo Go on iOS never had it. Closing
+`P8-MOB-01` needs a development build:
+
+```bash
+pnpm --filter @opd/mobile exec eas build --profile development --platform android
+```
+
+~20 minutes of cloud build, free tier, no paid account for Android. iOS needs the
+$99/year Apple account that §7 already says to start now. Everything up to the final
+delivery hop is proven — notification rows are created, deduped and marked
+`FAILED / no registered device`, which is correct when nothing is registered.
+
+**Two Phase 7 failure paths were skipped by choice and remain unproven:** a board
+showing *"Not live"* when the socket drops, and the phone re-syncing after losing
+connectivity. Both are implemented; both are the "does it admit when it is broken"
+half, and both are worth two minutes before a pilot.
+
+**What the testing found** (all fixed, see the 2026-09-02 entries): a doctor marked
+ON_BREAK did not stop the queue; My Visits never said which family member a booking
+was for; the session card LISTS were never subscribed to realtime at all. Two Phase 8
+workers were also observed firing unprompted — grace-expiry passing over an absent
+patient, and registration-cutoff closing a session that could not finish its queue.
 
 Everything either side of each of those is proven and has a test. The full walkthrough
 with exact steps and expected values is in the report published alongside this handoff.
