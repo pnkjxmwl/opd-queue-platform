@@ -5,9 +5,11 @@ import type {
   Paginated,
   QueueEntryStatus,
   QueueEntryView,
+  SessionEta,
 } from '@opd/contracts';
 import { requireStaffHospital } from '../../../../lib/tenant';
 import { queueGet } from '../_run';
+import { Pace } from '../pace';
 import { Card, ErrorBanner, button, buttonDanger, buttonQuiet, input, label, td, th } from '../../config/ui';
 import { istTime, PriorityPill, StatusPill, SuccessBanner, token } from '../ui';
 import { Live } from '../live';
@@ -67,10 +69,14 @@ export default async function BoardPage({
   const query = await searchParams;
   const hospital = await requireStaffHospital();
 
-  const [session, queue, doctors] = await Promise.all([
+  const [session, queue, doctors, eta] = await Promise.all([
     queueGet<OPDSession>(`/hospitals/${hospital.id}/sessions/${sessionId}`),
     queueGet<Paginated<QueueEntryView>>(`/sessions/${sessionId}/queue?limit=${LIMIT}`),
     queueGet<Paginated<Doctor>>(`/hospitals/${hospital.id}/doctors?limit=100`),
+    // Fourth request, in the same round trip rather than after it. The board already
+    // waits on three; making this a fifth sequential await would have added latency
+    // to the screen a receptionist reloads most often.
+    queueGet<SessionEta>(`/sessions/${sessionId}/eta`),
   ]);
 
   const doctorName =
@@ -128,6 +134,8 @@ export default async function BoardPage({
           </Link>
         </div>
       </div>
+
+      <Pace eta={eta} />
 
       <div className="mt-6">
         <ErrorBanner message={query.error} />

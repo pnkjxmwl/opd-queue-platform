@@ -158,6 +158,33 @@ check(
   visible(page).slice(0, 200),
 );
 
+// --- how the clinic is running (P9-WEB-02) ---------------------------------
+// The engine has produced these numbers since Phase 7 and no screen ever asked for
+// them. A receptionist deciding whether to warn the room had to guess at something
+// the server already knew.
+check(
+  'the board says how fast the clinic is moving',
+  visible(page).includes('How today is running'),
+  visible(page).slice(0, 300),
+);
+check(
+  'it shows the pace and the handover gap, not just a total',
+  /Per patient/.test(visible(page)) && /Between patients/.test(visible(page)),
+  section(page, 'How today is running').slice(0, 300),
+);
+check(
+  'and says what each figure stands on, so a guess is not read as a measurement',
+  /default|measured|consultation|handover|starting estimate/i.test(
+    section(page, 'How today is running'),
+  ),
+  section(page, 'How today is running').slice(0, 300),
+);
+check(
+  'punctuality is stated in words, never colour alone',
+  /Running behind|usual pace/i.test(visible(page)),
+  section(page, 'How today is running').slice(0, 200),
+);
+
 page = await press(page, { button: 'Call next' });
 check(
   `Call next calls ${anita.tokenLabel} - the server's order, and the client never sorted`,
