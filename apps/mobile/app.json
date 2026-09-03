@@ -12,7 +12,8 @@
       "bundleIdentifier": "com.opdqueue.app"
     },
     "android": {
-      "package": "com.opdqueue.app"
+      "package": "com.opdqueue.app",
+      "googleServicesFile": "./google-services.json"
     },
     "plugins": [
       "expo-router",
@@ -21,6 +22,19 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "ffcd9434-dbeb-4629-aa00-18513362da64"
+      }
+    },
+    "owner": "pnkjsmwl",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/ffcd9434-dbeb-4629-aa00-18513362da64"
     }
   }
 }

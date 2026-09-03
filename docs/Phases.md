@@ -35,7 +35,7 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 | ☑ | 5 — Join + Payment → Token | L | 5–7 | 3 | `phase-5-done` |
 | ☑ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
 | ☑ | 7 — Realtime + ETA | L | 5–7 | 4 | `phase-7-done` |
-| ◐ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
+| ✅ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
 | ☐ | 9 — Hardening | L | 5–7 | 6 | `phase-9-done` |
 | ☐ | 10 — Staging Deploy + Pilot | M | 3–4 | 3 | `phase-10-done` |
 
@@ -1113,18 +1113,25 @@ response within the 20s grace period"*, actor `SYSTEM`), and registration-cutoff
 session that could not finish its queue (*"Anyone joining now would not be seen before the
 session ends"*).
 
-`P8-MOB-01` stays `◐`, and the reason is **not** a defect in this code. `PushToken` has
-never had a row in it, for two independent reasons found on 2026-09-02:
+`P8-MOB-01` was closed on **2026-09-03** on a physical Android device: `PushToken` holds
+an `android` row and `Notification` rows reach `SENT`.
 
-1. the project has never been linked to EAS, so `getExpoPushTokenAsync` throws
-   `ERR_NOTIFICATIONS_NO_EXPERIENCE_ID` — `eas init` fixes it, and this would have failed
-   in a development build too;
-2. Expo Go cannot receive remote push at all — Android support was removed in SDK 53 and
-   iOS never had it.
+It had been blocked by **three** things, none of them a defect in this code, and each one
+hidden behind the one before it:
 
-Everything up to the delivery hop is proven: rows are created with the right content,
-deduped by the database, and marked `FAILED / no registered device`, which is the correct
-outcome when nothing is registered. See `docs/PROGRESS.md` 2026-09-02.
+1. the project was never linked to EAS, so `getExpoPushTokenAsync` threw
+   `ERR_NOTIFICATIONS_NO_EXPERIENCE_ID` — fixed by `eas init`;
+2. Expo Go cannot receive remote push at all (removed from Android in SDK 53, never on
+   iOS), so a development build was mandatory;
+3. `google-services.json` was missing. On Android `expo-notifications` **is** Firebase
+   Messaging, so `FirebaseApp` never initialised and no token could be obtained. The FCM
+   V1 service-account key in EAS is only the *server* half; this is the client half, and
+   it is referenced by `android.googleServicesFile` in `app.json`.
+
+Everything up to the delivery hop had been proven all along: rows were created with the
+right content, deduped by the database, and marked `FAILED / no registered device` —
+the correct outcome when nothing is registered. See `docs/PROGRESS.md` 2026-09-02 and
+2026-09-03.
 
 ### 📦 What you'll have after this phase
 The "wait at home" promise fully working. Patients get **push notifications** (token issued, getting close,
@@ -1156,7 +1163,7 @@ POST /me/push-tokens     — register a device push token
 | ☑ P8-BE-03 | Worker: grace-expiry (recall→skip→requeue) | BE | 2 | Wave 1 | recall then requeue, no-show once spent, thresholds from the policy, `SYSTEM` in the audit log |
 | ☑ P8-BE-04 | Worker: registration-cutoff | BE | 2 | Wave 1 | closes on ETA overrun, respects the policy switch, and the join it prevents is refused |
 | ☑ P8-BE-05 | Worker: payment-reconcile | BE | 2 | Wave 1 | a captured payment with no webhook becomes a token; twice is a no-op |
-| ◐ P8-MOB-01 | Push permission + registration + foreground/background/tap→deep-link | MOB | 2 | Wave 1 | written; **blocked on tooling, not code** — needs `eas init` (no projectId exists) then a development build, because Expo Go lost Android remote push in SDK 53 |
+| ✅ P8-MOB-01 | Push permission + registration + foreground/background/tap→deep-link | MOB | 2 | Wave 1 | **proven on a physical Android device 2026-09-03.** Needed three things, none of them code: `eas init` for the projectId, `google-services.json` + `android.googleServicesFile` for the FCM client half, and a development build (Expo Go lost Android remote push in SDK 53) |
 
 **As built, two departures from the plan above, both in `docs/PROGRESS.md`:**
 
@@ -1466,6 +1473,17 @@ follow-ups · visit history · documents/attachments.
 - [ ] Nobody edits `packages/contracts` mid-wave without a coordinated re-sync.
 ## Appendix 6 — Phase sign-off log
 
+| Phase | Tag | Signed off | How the checkpoint was proven |
+|---|---|---|---|
+| 0–5 | `phase-0..5-done` | earlier | see docs/PROGRESS.md |
+| 6 | `phase-6-done` (`6b0bdf3`) | 2026-09-02 | a webcam decoded a token QR off a phone screen; a declined camera permission still left a working check-in desk; a real Razorpay payment issued a token **through the webhook** (`ENTRY_CONFIRMED / SYSTEM`, 1m44s after the reservation, real gateway ids) |
+| 7 | `phase-7-done` (`cec7cf7`) | 2026-09-02 | two browser windows updated each other with no reload; a phone showed a live position and a moving ETA window |
+| 8 | — | **open** | everything but the last hop: no push has landed on a phone. Blocked on an Android development build, not on code |
+
+**Two Phase 7 failure paths remain unproven by choice**: the board showing *"Not live"*
+when the socket drops, and the phone re-syncing after a connectivity loss. Both are
+implemented and neither has been exercised.
+
 Fill a row the day a phase's integration checkpoint passes. This is your record of where you actually are —
 useful when you come back after a break, and the first thing to hand a second developer if you ever add one.
 Keep the *narrative* (what you built, what you decided, what broke) in **PROGRESS.md**; this table is the index.
@@ -1478,9 +1496,9 @@ Keep the *narrative* (what you built, what you decided, what broke) in **PROGRES
 | 3 |  |  |  |  |  |
 | 4 |  |  |  |  |  |
 | 5 | 2026-08-31 | 2026-08-31 | ~1 | `phase-5-done` | a WebView cannot host Razorpay's popup flow — every method needing a bank sat at `created` while card worked, and only the gateway's own payments API showed it; two route collisions (`/` and a bare `[id]`) that neither lint nor typecheck sees |
-| 6 |  |  |  |  |  |
-| 7 |  |  |  |  |  |
-| 8 |  |  |  |  |  |
+| 6 | 2026-09-01 | 2026-09-02 | ~1 | `phase-6-done` | every defect was found by a human looking at a screen, never by a test — including two controls labelled the same, and My Visits never saying WHICH family member a booking was for |
+| 7 | 2026-09-02 | 2026-09-02 | ~1 | `phase-7-done` | the realtime events got SMALLER under scrutiny — carrying a snapshot would have been a second definition of the live queue. And the card LISTS were subscribed to nothing: the invalidation rule was right, no event could ever reach it |
+| 8 | 2026-09-02 | — | ~1 | — | no BullMQ was needed: every worker is a sweep over state, which cannot lose work across a restart. Push then failed for a reason no test could catch — the project had never been linked to EAS, and the error was swallowed silently |
 | 9 |  |  |  |  |  |
 | 10 |  |  |  |  |  |
 

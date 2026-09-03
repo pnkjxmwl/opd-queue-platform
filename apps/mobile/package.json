@@ -5,8 +5,8 @@
   "main": "expo-router/entry",
   "scripts": {
     "dev": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
     "build": "echo \"mobile builds ship via EAS (Phase 10)\" && exit 0",
     "lint": "node ./scripts/check-pressable-style.cjs && eslint .",
     "typecheck": "node ./scripts/generate-router-types.cjs && tsc -p tsconfig.json --noEmit",
@@ -20,6 +20,7 @@
     "@tanstack/react-query": "^5.62.11",
     "expo": "~54.0.37",
     "expo-constants": "~18.0.14",
+    "expo-dev-client": "~6.0.21",
     "expo-device": "^8.0.10",
     "expo-font": "~14.0.12",
     "expo-linking": "~8.0.12",
@@ -27,6 +28,7 @@
     "expo-router": "~6.0.24",
     "expo-secure-store": "~15.0.8",
     "expo-status-bar": "~3.0.9",
+    "expo-updates": "~29.0.20",
     "react": "19.1.0",
     "react-native": "0.81.5",
     "react-native-qrcode-svg": "^6.3.21",
@@ -39,6 +41,7 @@
   "devDependencies": {
     "@opd/config": "workspace:*",
     "@types/react": "~19.1.17",
+    "eas-cli": "^23.2.0",
     "eslint": "^9.17.0",
     "typescript": "^5.7.2"
   }
