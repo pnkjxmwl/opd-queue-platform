@@ -1478,7 +1478,7 @@ follow-ups · visit history · documents/attachments.
 | 0–5 | `phase-0..5-done` | earlier | see docs/PROGRESS.md |
 | 6 | `phase-6-done` (`6b0bdf3`) | 2026-09-02 | a webcam decoded a token QR off a phone screen; a declined camera permission still left a working check-in desk; a real Razorpay payment issued a token **through the webhook** (`ENTRY_CONFIRMED / SYSTEM`, 1m44s after the reservation, real gateway ids) |
 | 7 | `phase-7-done` (`cec7cf7`) | 2026-09-02 | two browser windows updated each other with no reload; a phone showed a live position and a moving ETA window |
-| 8 | — | **open** | everything but the last hop: no push has landed on a phone. Blocked on an Android development build, not on code |
+| 8 | `phase-8-done` (`58bba66`) | 2026-09-03 | a push landed on a physical Android phone from a development build: `PushToken` holds an `android` row and `Notification` rows reach `SENT`. The last hop needed no code - an EAS `projectId`, `google-services.json` for the FCM client half, and a build that is not Expo Go |
 
 **Two Phase 7 failure paths remain unproven by choice**: the board showing *"Not live"*
 when the socket drops, and the phone re-syncing after a connectivity loss. Both are
