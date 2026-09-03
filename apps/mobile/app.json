@@ -12,7 +12,8 @@
       "bundleIdentifier": "com.opdqueue.app"
     },
     "android": {
-      "package": "com.opdqueue.app"
+      "package": "com.opdqueue.app",
+      "googleServicesFile": "./google-services.json"
     },
     "plugins": [
       "expo-router",

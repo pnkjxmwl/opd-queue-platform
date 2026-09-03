@@ -9,6 +9,7 @@
       "distribution": "internal",
       "channel": "development",
       "android": {
+        "image": "latest",
         "buildType": "apk"
       },
       "ios": {
@@ -19,6 +20,7 @@
       "distribution": "internal",
       "channel": "preview",
       "android": {
+        "image": "latest",
         "buildType": "apk"
       }
     },
@@ -26,6 +28,7 @@
       "channel": "production",
       "autoIncrement": true,
       "android": {
+        "image": "latest",
         "buildType": "app-bundle"
       }
     }

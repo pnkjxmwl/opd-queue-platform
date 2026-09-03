@@ -35,7 +35,7 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 | ☑ | 5 — Join + Payment → Token | L | 5–7 | 3 | `phase-5-done` |
 | ☑ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
 | ☑ | 7 — Realtime + ETA | L | 5–7 | 4 | `phase-7-done` |
-| ◐ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
+| ✅ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
 | ☐ | 9 — Hardening | L | 5–7 | 6 | `phase-9-done` |
 | ☐ | 10 — Staging Deploy + Pilot | M | 3–4 | 3 | `phase-10-done` |
 
@@ -1113,18 +1113,25 @@ response within the 20s grace period"*, actor `SYSTEM`), and registration-cutoff
 session that could not finish its queue (*"Anyone joining now would not be seen before the
 session ends"*).
 
-`P8-MOB-01` stays `◐`, and the reason is **not** a defect in this code. `PushToken` has
-never had a row in it, for two independent reasons found on 2026-09-02:
+`P8-MOB-01` was closed on **2026-09-03** on a physical Android device: `PushToken` holds
+an `android` row and `Notification` rows reach `SENT`.
 
-1. the project has never been linked to EAS, so `getExpoPushTokenAsync` throws
-   `ERR_NOTIFICATIONS_NO_EXPERIENCE_ID` — `eas init` fixes it, and this would have failed
-   in a development build too;
-2. Expo Go cannot receive remote push at all — Android support was removed in SDK 53 and
-   iOS never had it.
+It had been blocked by **three** things, none of them a defect in this code, and each one
+hidden behind the one before it:
 
-Everything up to the delivery hop is proven: rows are created with the right content,
-deduped by the database, and marked `FAILED / no registered device`, which is the correct
-outcome when nothing is registered. See `docs/PROGRESS.md` 2026-09-02.
+1. the project was never linked to EAS, so `getExpoPushTokenAsync` threw
+   `ERR_NOTIFICATIONS_NO_EXPERIENCE_ID` — fixed by `eas init`;
+2. Expo Go cannot receive remote push at all (removed from Android in SDK 53, never on
+   iOS), so a development build was mandatory;
+3. `google-services.json` was missing. On Android `expo-notifications` **is** Firebase
+   Messaging, so `FirebaseApp` never initialised and no token could be obtained. The FCM
+   V1 service-account key in EAS is only the *server* half; this is the client half, and
+   it is referenced by `android.googleServicesFile` in `app.json`.
+
+Everything up to the delivery hop had been proven all along: rows were created with the
+right content, deduped by the database, and marked `FAILED / no registered device` —
+the correct outcome when nothing is registered. See `docs/PROGRESS.md` 2026-09-02 and
+2026-09-03.
 
 ### 📦 What you'll have after this phase
 The "wait at home" promise fully working. Patients get **push notifications** (token issued, getting close,
@@ -1156,7 +1163,7 @@ POST /me/push-tokens     — register a device push token
 | ☑ P8-BE-03 | Worker: grace-expiry (recall→skip→requeue) | BE | 2 | Wave 1 | recall then requeue, no-show once spent, thresholds from the policy, `SYSTEM` in the audit log |
 | ☑ P8-BE-04 | Worker: registration-cutoff | BE | 2 | Wave 1 | closes on ETA overrun, respects the policy switch, and the join it prevents is refused |
 | ☑ P8-BE-05 | Worker: payment-reconcile | BE | 2 | Wave 1 | a captured payment with no webhook becomes a token; twice is a no-op |
-| ◐ P8-MOB-01 | Push permission + registration + foreground/background/tap→deep-link | MOB | 2 | Wave 1 | written; **blocked on tooling, not code** — needs `eas init` (no projectId exists) then a development build, because Expo Go lost Android remote push in SDK 53 |
+| ✅ P8-MOB-01 | Push permission + registration + foreground/background/tap→deep-link | MOB | 2 | Wave 1 | **proven on a physical Android device 2026-09-03.** Needed three things, none of them code: `eas init` for the projectId, `google-services.json` + `android.googleServicesFile` for the FCM client half, and a development build (Expo Go lost Android remote push in SDK 53) |
 
 **As built, two departures from the plan above, both in `docs/PROGRESS.md`:**
 

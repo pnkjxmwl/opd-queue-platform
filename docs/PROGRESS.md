@@ -5747,3 +5747,170 @@ with `migrate diff --exit-code`), **11/23** (the e2e suite truncates the dev dat
 > **Budget a device walkthrough into anything touching a screen.** Every defect in Phases
 > 5 through 8 was found by a human looking at a screen, never by a test. Give me exact
 > steps with expected values, never "check it works".
+
+---
+
+## 2026-09-03 — Getting a build onto a phone: why Windows cannot do it, and the four things that were actually broken
+
+Goal for the session was small - install a development build and prove a push lands.
+It took four distinct failures to get there, none of them in our code, and each one is
+worth recording because each will recur.
+
+### 1. The EAS build was being killed by the clock, not by an error
+
+`buildDuration: 2700003` ms - exactly 45:00, the free-tier cap. The phase log showed
+everything before Gradle took **41 seconds**, and then `RUN_GRADLEW` spent ~30 of its 45
+minutes on `Installing Android SDK Build-Tools 36`. It never reached compiling our code.
+
+**Fix: `"image": "latest"` on every profile in `eas.json`.** Expo SDK 54 compiles against
+SDK 36; the *default* builder image does not ship those build-tools, so every build
+re-downloaded them. Result: **45 min (killed) -> 12.1 min**, and queue time went from
+~60 min to 6 seconds.
+
+Reading the build log needs a note of its own: `logFiles` are served
+`Content-Encoding: br` and the server ignores `Accept-Encoding: identity`, so Python's
+urllib hands back binary. Node's `fetch` decompresses brotli automatically -
+`fetch(url).then(r => r.text())` is the one-liner that works.
+
+### 2. Local Windows builds are structurally impossible for this project
+
+Not a configuration problem. `CMAKE_OBJECT_PATH_MAX` is 250, and **CMake mangles the full
+source path into the object filename**, so the project prefix is counted twice - once in
+the output directory and again inside the filename.
+
+Measured worst case across the native modules:
+
+| configuration | object path | limit |
+|---|---|---|
+| as-is | **430** | 250 |
+| repo moved to `C:\opd` | 398 | 250 |
+| + pnpm store at `C:\v` | 376 | 250 |
+
+**A 180-character deficit that no path shortening closes.** Two consequences that were
+each checked rather than assumed:
+
+- **Going bare React Native would not help.** The worst offender is
+  `react-native-safe-area-context`, a plain RN library, not an Expo one.
+  `react-native-screens` is the other. Bare keeps both.
+- **Disabling the New Architecture would not help either.** `expo-modules-core` compiles
+  C++ regardless and lands around 383.
+
+The symptom, if it recurs: ninja printing `Re-running CMake...` in a loop (200 times
+here) and the task failing with `ProcessException`, with the real cause only in a CMake
+*warning* further up saying the object file "cannot be safely placed under this
+directory". **The loop is the symptom; the warning is the cause.**
+
+**Route taken: WSL2** (already installed for Docker) plus EAS. Linux `PATH_MAX` is 4096,
+so the problem does not exist there. Ubuntu + JDK 17 + SDK 36 + NDK 27 installed under
+`/opt/android-sdk`, and the repo is rsync'd to ext4 rather than built over `/mnt/c`,
+where Gradle's per-file overhead is punishing.
+
+### 3. `virtual-store-dir-max-length` - the fix that was still worth making
+
+Before measuring the 430, the first attempt was to shorten pnpm's store names, which the
+first failure (`configureCMakeDebug`, a 272-char `CreateProcess` limit) genuinely needed:
+
+```
+virtual-store-dir-max-length=50    # default 120
+```
+
+272 -> 204, and `configureCMake` started passing. It is **not** enough for the object
+paths, but it is correct and should stay: the usual advice (`node-linker=hoisted`) is
+ruled out by our own `.npmrc`, which requires isolated linking because web is on React 19
+and mobile is not.
+
+Reinstalling to apply it surfaced two more things:
+
+- pnpm prompts *"modules directory will be removed, Proceed?"* and hangs with no stdin.
+  Needs `--config.confirmModulesPurge=false`.
+- It then fails `EPERM` on `next-swc.win32-x64-msvc.node` and `@node-rs/argon2` while
+  dev servers hold them open. **Every node process must be stopped first** - including
+  the API running as a bare `node dist/main.js`, which does not match a filter on the
+  repo path or `@opd/`.
+
+### 4. After any reinstall, `prisma generate` - or the API silently will not build
+
+The reinstall left a *default* Prisma client with no schema applied. 48 errors of the
+form `Namespace '...'.Prisma has no exported member 'QueueEntryGetPayload'`, `nest build`
+failed, port 3000 never opened, and the web console looked broken while being fine. The
+postinstall log said `@prisma/client postinstall: Done`, which is what makes this
+misleading. `pnpm --filter @opd/api exec prisma generate` fixes it.
+
+Docker also has to be running: installing the Ubuntu distro restarted the WSL subsystem
+and took `docker-desktop` down with it. Postgres is on **5433** and Redis on **6380**, not
+the default ports - checking 5432 proves nothing.
+
+### 5. Push: the *client* half of FCM was missing all along
+
+`PushToken` was still 0 after the first successful dev build, and the `Notification` rows
+told the whole story - the server side was flawless:
+
+```
+title      Time to head to Apollo Clinic
+body       2 ahead of you. Please arrive and check in at reception.
+status     FAILED     attempts 4     lastError  no registered device
+```
+
+`eas init` (the `projectId`) was only half the problem. On Android `expo-notifications`
+**is** Firebase Messaging, so `FirebaseApp` cannot initialise without
+`google-services.json`; no token is ever obtained, so nothing registers.
+
+- **server half** = the FCM V1 service-account key, uploaded to EAS. A real secret.
+- **client half** = `google-services.json` in `apps/mobile`, referenced by
+  `android.googleServicesFile` in `app.json`.
+
+**`google-services.json` must NOT be gitignored**, and it was, briefly, by this session's
+own hand. It looks like a credential and is not one: it carries the sender id and an API
+key that ships inside every copy of the APK, restricted by package name and signing
+certificate rather than by secrecy. Ignoring it breaks every cloud build twice over - EAS
+archives according to `.gitignore`, and the Google Services Gradle plugin hard-fails when
+the file is absent. The `.gitignore` now carries that reasoning so it is not re-ignored.
+
+### 6. The seed now produces a clinic, not an empty shell
+
+The e2e suite truncates the dev database (trap 11/23, again), so a testing session began
+with `ETA Hospital` and two `@eta.test` accounts and nothing else. Rather than restore
+the old seed, it was extended:
+
+| | before | after |
+|---|---|---|
+| cities | 2 | **6** - Mumbai, Bengaluru, New Delhi, Hyderabad, Pune, Chennai |
+| hospitals / departments / doctors | 2 / 5 / 6 | **6 / 14 / 17** |
+| live sessions | 2 (empty) | **6, ACTIVE, doctor PRESENT** |
+| queue entries | 0 | **42** |
+| patient account | none | `testpatient@apollo.test` + 3 family profiles |
+
+Each live session is seeded **mid-clinic**: two consultations completed, one
+`IN_CONSULTATION`, two `CHECKED_IN`, one `NO_SHOW` with `recallCount: 2`, plus one online
+booking belonging to the patient account.
+
+**Why an empty seed was a real gap:** "you are 4th, about 35 minutes" cannot be tested
+without three people ahead of you, a doctor console has nobody to call, and the ETA
+engine cannot blend a history that does not exist.
+
+Decisions inside it:
+
+- **Rows, not commands.** The commands are the only legal path at runtime; a fixture that
+  replayed them would need a fake caller, clock and lock and still would not be the thing
+  under test. What must hold is the *shape* - every timestamp is consistent with its
+  status, because a COMPLETED entry without `completedAt` makes the console lie.
+- **Live sessions are ACTIVE with the doctor PRESENT**, because the queue contains an
+  `IN_CONSULTATION` entry and, since the ON_BREAK fix, calling is refused otherwise. A
+  seeded state the engine would reject teaches the wrong thing.
+- **The cancelled booking is `REFUNDED`, not deleted** - a refund is a new fact, not the
+  erasure of an old one.
+- **`reception@max.test` added** so tenant scoping can be seen rather than only
+  asserted: that login must not reach Apollo.
+- **Three patient profiles**, because the "For <name>" line is unverifiable with one.
+- `checkInCode` is left null - signing needs `CHECKIN_SECRET` through `env()`, and a seed
+  that throws after a truncate is worse than a seed without QR codes. Book from the phone
+  to test that path.
+
+### Still open
+
+- **Push has not yet been proven end to end.** Build `507f02a6` carries the Firebase
+  config; the test is `SELECT count(*) FROM "PushToken"` moving off 0, then a call
+  landing on the phone. Until that happens `P8-MOB-01` stays unticked.
+- The WSL first build had not finished when this was written. Only the first is slow.
+- **Apple Developer enrolment still not started.** Unchanged, and still the highest-risk
+  item on the board.
