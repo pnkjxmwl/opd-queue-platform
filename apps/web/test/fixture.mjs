@@ -15,12 +15,40 @@ import { randomUUID, createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 /** Runs one statement in the dev database. `|`-separated rows, no headers. */
-export function sql(statement) {
-  const out = execFileSync(
+/**
+ * Two ways to reach the database, tried in order.
+ *
+ * `psql $DATABASE_URL` first, because that is the only one that works anywhere the
+ * database is not a container called `opd-postgres` on this laptop - CI runs Postgres
+ * as a service on localhost, and the docker form there fails with "no such container"
+ * rather than anything that explains itself. Hard-coding that name is why these 63
+ * checks had never run in CI: not a missing test framework, a fixture that only knew
+ * how to talk to one machine.
+ *
+ * The docker form stays as the fallback, because a Windows dev box usually has Docker
+ * Desktop and no psql client on PATH.
+ */
+const PSQL_ARGS = ['-t', '-A', '-F', '|', '-c'];
+
+function runPsql(statement) {
+  const url = process.env.DATABASE_URL;
+  if (url !== undefined && url !== '') {
+    try {
+      return execFileSync('psql', [url, ...PSQL_ARGS, statement], { encoding: 'utf8' });
+    } catch (error) {
+      // Only fall through when psql itself is absent. A SQL error must surface.
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+  return execFileSync(
     'docker',
-    ['exec', '-i', 'opd-postgres', 'psql', '-U', 'opd', '-d', 'opd', '-t', '-A', '-F', '|', '-c', statement],
+    ['exec', '-i', 'opd-postgres', 'psql', '-U', 'opd', '-d', 'opd', ...PSQL_ARGS, statement],
     { encoding: 'utf8' },
   );
+}
+
+export function sql(statement) {
+  const out = runPsql(statement);
   return out
     .split('\n')
     .map((line) => line.trim())

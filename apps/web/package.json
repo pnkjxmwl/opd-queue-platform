@@ -8,7 +8,7 @@
     "start": "next start -p 3001",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "echo \"no hermetic web tests - run test:console against a live stack\" && exit 0",
+    "test": "node test/with-servers.mjs",
     "test:console": "node test/console-walkthrough.mjs"
   },
   "dependencies": {
