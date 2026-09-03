@@ -5914,3 +5914,228 @@ Decisions inside it:
 - The WSL first build had not finished when this was written. Only the first is slow.
 - **Apple Developer enrolment still not started.** Unchanged, and still the highest-risk
   item on the board.
+
+---
+
+## 2026-09-04 — Phase 9 (Hardening): what the plan expected, and what was actually broken
+
+Eight tasks. **Five of them turned out to be smaller than planned and one turned out
+to be a different problem entirely**, which is the honest summary of the phase: most
+of the hardening had been built in earlier phases and never measured, so the work was
+finding out which guarantees were real.
+
+### Task 0 — the suite stops wiping the dev database (done first, on purpose)
+
+`resetDb()` TRUNCATEd every table between tests, against the **development** database.
+The reasoning was written into `helpers.ts` and was correct when the seed was two
+hospitals and no queue: local data is regenerable, so losing it costs a re-seed. That
+comment also said what to do when it stopped being true - *"give the suite its own
+database once seed data becomes expensive to rebuild"*.
+
+It had stopped being true. The seed is six hospitals, 42 entries mid-clinic, a patient
+account and a registered push token, and rebuilding costs a truncate that needs
+approval, a re-seed, a re-login on the phone and a fresh push registration. **The
+suite destroyed a working test environment twice in one day**, both times by my own
+hand, before this was fixed.
+
+`test/use-test-database.ts` rewrites `DATABASE_URL` to `<db>_test` in vitest's
+`setupFiles` - before `PrismaClient` is constructed, and without anybody having to
+remember to create a `.env.test`, since the failure mode of forgetting is losing your
+data. `global-setup.ts` creates and migrates it, using Prisma against the `postgres`
+maintenance database rather than adding `pg` for one `CREATE DATABASE`.
+
+The third guard in `resetDb` is the one that matters: **refuse any database not named
+`*_test`**. Not-production and not-remote were both true of the dev database it kept
+wiping.
+
+### P9-ETA-01 — the estimate learns about the gaps between patients
+
+The headline change, and it came out of planning rather than the plan. `etaWindow()`
+computed `remaining_current + aheadCount × expected_consult`: time *inside* the room
+and nothing between patients - an implicit claim that handover is instantaneous.
+
+Two real gaps were already on every entry and had never been read:
+`consultStartedAt − calledAt` (the patient walking in from the waiting area) and the
+next `calledAt − completedAt` (doctor turnaround). At ~3 minutes with eight ahead that
+is **24 unaccounted minutes**, and the error runs in the harmful direction: patients
+told to arrive before they were needed, which is the exact failure this product
+exists to prevent.
+
+Three decisions inside it worth keeping:
+
+- **Median, not mean, plus a hard cap.** Handovers cluster around a minute or two and
+  every outlier is a long one - a break, a phone call, a doctor stepping out. One
+  25-minute lunch across six handovers would add four minutes to every remaining
+  patient's estimate. Gaps over `MAX_CREDIBLE_GAP_MIN` are discarded outright, because
+  a break is a different event rather than an extreme handover.
+- **Seeded at two minutes, not zero.** Zero is not a neutral default; it is a wrong
+  claim in the direction that hurts. Same shape as `Doctor.defaultConsultMins` seeding
+  the consult blend.
+- **Measured per session, not per doctor.** Turnaround belongs to the room and the day
+  - who fetches patients, how far the waiting area is. `EtaRequest` gained `sessionId`
+  so the patient-facing path measures it too: a patient's estimate disagreeing with the
+  staff board would be worse than either being wrong alone.
+
+**`predictedCallFrom` / `predictedCallTo`** are written once, at the LEAVE_NOW push -
+the one moment the estimate stops being a number and becomes something a patient puts
+their shoes on for. Two columns because the patient is shown a *window*; grading a
+midpoint invented afterwards would measure something nobody was told. Written under
+the existing `isNew` guard, so a later sweep cannot replace the promise with a
+fresher, flattering one - a record that always agrees with the present measures
+nothing.
+
+**The user's instruction reshaped this task**: they wanted the dead time *used by the
+engine*, not reported on a dashboard. Admin reports were deferred as a result.
+
+### P9-BE-01 — rate limiting, and a test that could not fail
+
+Limits: 10/min on signup, login, google and accept-invite; 20/min on join; 120/min
+globally; **the Razorpay webhook exempt**.
+
+Two things got this wrong first, and both are the interesting part.
+
+**The webhook test was fake.** It replayed twenty times and passed - and still passed
+with `@SkipThrottle` deleted, because twenty never reaches any limit. It now sends
+130, past the global ceiling, and was confirmed to fail without the exemption before
+being restored. The failure it guards is expensive: Razorpay reads 429 as failure,
+retries harder, gives up, and a payment already taken from a patient never becomes a
+token.
+
+**`auth/refresh` was throttled and should not have been.** The first version limited
+the whole controller. A refresh token is a high-entropy secret rather than a guess,
+and the defence is already stronger than counting: reuse revokes the entire family, so
+a stolen token is worth one attempt and then kills itself. Limits moved to the four
+routes where somebody actually guesses.
+
+Test infrastructure: counters are in-memory and per process, so they leaked between
+tests - the eleventh signup in a file got a 429 unrelated to its subject. `resetDb`
+now clears the limiter too. **That had its own silent bug**: `storage` is a `Map`, and
+the obvious `Object.keys()` version did nothing at all, so thirteen payments tests
+kept failing for a reason the code claimed to have handled.
+
+### P9-SEC-01 — no findings, which is the point
+
+Every route was already guarded; `JwtGuard → TenantGuard → RolesGuard` have been
+global since Phase 1. Nothing **proved** it, so the guarantee held only as long as
+everyone remembered.
+
+The route list is now read from the running Express router. A hand-maintained list
+drifts the day somebody adds a controller, and it drifts *silently* - the test keeps
+passing because it only checks what it already knew about. The only hand-written part
+is the ten deliberately-public routes, asserted exact in both directions: a route that
+quietly becomes public fails, and so does a **stale entry for a route that no longer
+exists**. The second is how such a list rots - a route is renamed, the exemption
+stays, and the next route to take that name inherits a bypass nobody reviewed.
+
+**Falsified before trusting it**: adding `@Public()` to `GET /patients` was caught
+immediately as `get /patients -> 500` (the handler running with no account). A
+security test that cannot fail is worse than no test.
+
+The IDOR sweep re-reads the row after a rejected write, because a handler answering
+404 while still doing the work would pass a status-only assertion.
+
+### P9-OBS-01 — half of it already existed
+
+Request-id generation, propagation and the error envelope were built earlier. Nothing
+on either **client** read them, so "the console said someone acted first" had no
+shared identifier with any server log - the actual gap.
+
+`common/scrub.ts` is an **egress guard, not a logging filter**. docs/Rules.md 10 says
+to log access and scrub PII from error reports; conflating those makes both worse.
+Local pino logs keep full detail - in-region, on infrastructure we control, and a bug
+is undebuggable without knowing which hospital and which token. What must never leave
+the country is the patient.
+
+Its tests earned their place immediately: the first version redacted `tokenLabel`,
+because "tokenLabel" contains "token". A report reading *"which patient? the one whose
+token is [redacted]"* protects nothing and destroys the one field that made it
+legible.
+
+**Sentry was deliberately not installed.** A dependency that does nothing until a DSN
+exists is dead weight. What must exist now is the scrubbing, tested, so that turning
+reporting on in Phase 10 is a config change rather than a compliance decision somebody
+makes under time pressure.
+
+### P9-WEB-01 — and a regression the walkthrough caught
+
+Most screens already had `Empty` and `ErrorBanner`. Added error/not-found boundaries,
+a `global-error` for the one case that is otherwise a blank white page, and fixed
+trap 34 - `"Request validation failed (startTime: must be HH:mm)"` reads like a stack
+trace to a receptionist, so for validation failures the details now *replace* the
+message rather than decorate it.
+
+**The loading file had to be scoped to `/config`.** At the console root it made Next
+stream every route: the shell goes out immediately, headers with it, and `notFound()`
+can no longer set a 404 afterwards. A cross-tenant request for another hospital's
+board turned from a 404 into a 200 with a skeleton. Act VIII went red and caught it.
+The tenant boundary is a security property with a test behind it; a skeleton on the
+board is a nicety.
+
+### P9-MOB-01 — the app was already careful; one thing was missing
+
+`QueryState` covered loading, error, empty and retry on all twelve data screens;
+AppState refetched on foreground; the socket's connect handler re-joined rooms and
+then invalidated every query, which **is** the reconnect contract in docs/Rules.md 8.
+
+What was missing: `connected` was tracked and surfaced nowhere. That matters more here
+than a generic "connection lost" banner, because a dropped socket does not blank these
+screens - it **freezes** them, and a frozen queue position is indistinguishable from a
+true one. A patient reading "2 checked in ahead" on a phone that lost signal will sit
+down and wait for a turn that has already passed.
+
+`LiveState` renders nothing while connected: a permanent green "Live" badge trains
+people to stop seeing it, and then it cannot warn them.
+
+### P9-TEST-01 — the blocker was a container name
+
+One test now walks discover → join → pay → check-in → consult → complete, asserting
+the **exact ordered** QueueEvent sequence and that timestamps are ordered rather than
+merely present. A COMPLETED entry whose `completedAt` precedes its `calledAt` would
+satisfy every not-null check and is now the shape the ETA engine measures dead time
+from, so a scrambled timeline would quietly poison estimates rather than fail loudly.
+
+**`apps/web` had 63 passing checks that had never run in CI**, and its `test` script
+was literally an `echo` saying so. The cause was not a missing browser framework:
+`fixture.mjs` reached the database through `docker exec opd-postgres`, a container
+name that exists only on a developer's laptop, while CI runs Postgres as a service on
+localhost. `sql()` now prefers `psql $DATABASE_URL` and keeps the docker form as a
+fallback, and `with-servers.mjs` starts whatever is not already up.
+
+**Playwright was not added**, which is a change from the approved plan. A browser
+would add a ~300MB download to every CI run to re-prove checks that already pass, and
+this harness drives Next's server actions over plain HTTP deliberately. What a browser
+*would* add is client-side JavaScript coverage - the error boundaries added above are
+client components no HTTP-level test can execute. **That gap is real and still open.**
+
+Writing that runner cost three bugs worth remembering, all in cleanup:
+
+1. `child.kill()` with `shell: true` kills the shell, not the Node grandchild - every
+   failed run leaked a server holding port 3001 while answering nothing, so the *next*
+   run failed with a misleading "the console never came up".
+2. Switching to an async `taskkill` meant the process exited before it ran. Same leak,
+   quieter.
+3. Making it synchronous inside `process.on('exit')` tripped a libuv assertion - Node
+   forbids spawning during exit. The thorough cleanup now happens while the event loop
+   is alive, with a light `kill()` as the last resort.
+
+Each was caught by checking the port afterwards rather than trusting "63 passed".
+
+### Deferred, with reasons
+
+- **Admin reports (`P9-BE-02`, `P9-WEB-02`)** - the user chose the ETA engine change
+  over reporting on it. They remain a PRD feature and need their own phase.
+- **Playwright** - see above.
+
+### Traps added
+
+- **A loading file changes HTTP semantics.** It makes Next stream the route, so
+  `notFound()` can no longer set a 404. Never place one above a route whose status
+  code is a security property.
+- **`URL.pathname` on Windows** yields `/C:/...` and leaves spaces percent-encoded.
+  Hit twice in two days - once as an ENOENT on cmd.exe, once as MODULE_NOT_FOUND.
+  `fileURLToPath`, always.
+- **Prisma cannot regenerate while the API holds the query engine.** `EPERM` on
+  `query_engine-windows.dll.node`; stop the API first. The API also runs as a bare
+  `node dist/main.js`, which does not match a process filter on the repo path.
+- **A test that cannot fail proves nothing.** Both the webhook exemption and the authz
+  matrix were falsified deliberately before being trusted.
