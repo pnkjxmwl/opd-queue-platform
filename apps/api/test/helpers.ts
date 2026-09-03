@@ -57,17 +57,33 @@ export async function createTestApp(
 /**
  * Wipes every table between tests.
  *
- * ponytail: runs against the DEVELOPMENT database rather than a dedicated test one.
- * Local dev data is regenerable (`prisma migrate reset && pnpm seed`) so the cost of
- * losing it is a re-seed. Give the suite its own database once seed data becomes
- * expensive to rebuild. The guard below is what keeps that shortcut from being
- * catastrophic instead of merely annoying.
+ * Runs against a dedicated `<database>_test`, which `test/use-test-database.ts`
+ * selects and `test/global-setup.ts` creates. It used to run against the DEVELOPMENT
+ * database on the reasoning that local dev data is regenerable, so losing it cost a
+ * re-seed - true when the seed was two hospitals and no queue, and false once it
+ * became six hospitals, a mid-clinic queue and a registered push token. The suite
+ * destroyed a working test environment twice in one day before this changed
+ * (docs/PROGRESS.md 2026-09-03).
+ *
+ * Three guards, because this statement is irreversible and the cost of getting it
+ * wrong is somebody's real data: not production, not remote, and not a database
+ * whose name does not end in `_test`. The last one is the one that matters now -
+ * the first two were both true of the dev database it kept wiping.
  */
 export async function resetDb(prisma: PrismaService): Promise<void> {
   const url = process.env.DATABASE_URL ?? '';
+  const safe = url.replace(/:[^:@]*@/, ':***@');
   const isLocal = /@(localhost|127\.0\.0\.1|postgres)[:/]/.test(url);
   if (process.env.NODE_ENV === 'production' || !isLocal) {
-    throw new Error(`Refusing to TRUNCATE a non-local database: ${url.replace(/:[^:@]*@/, ':***@')}`);
+    throw new Error(`Refusing to TRUNCATE a non-local database: ${safe}`);
+  }
+
+  const name = url === '' ? '' : new URL(url).pathname.replace(/^\//, '');
+  if (!name.endsWith('_test')) {
+    throw new Error(
+      `Refusing to TRUNCATE "${name}": the suite only ever runs against a *_test ` +
+        `database. Something bypassed test/use-test-database.ts. (${safe})`,
+    );
   }
 
   await prisma.$executeRawUnsafe(`
