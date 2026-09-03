@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Header, Headers, Param, Post, Query, Req } from '@nestjs/common';
+import { SkipThrottle, Throttle } from '@nestjs/throttler';
 import type { RawBodyRequest } from '@nestjs/common';
 import type { Request } from 'express';
 import {
@@ -38,6 +39,14 @@ import { PaymentsService } from './payments.service';
 export class PaymentsController {
   constructor(private readonly payments: PaymentsService) {}
 
+  /**
+   * Tighter than the global ceiling because a join reserves a real seat and creates
+   * a Razorpay order - a script looping this holds slots real patients cannot book
+   * and leaves orders behind. Twenty a minute is far beyond a person choosing a
+   * doctor, and the idempotency rule (ALREADY_IN_QUEUE) covers honest double-taps
+   * rather than this.
+   */
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Post('sessions/:id/join')
   join(
     @Param('id') sessionId: string,
@@ -83,9 +92,17 @@ export class PaymentsController {
  * was parsed and re-serialised, which would pass or fail for reasons unrelated to
  * authenticity.
  *
- * Rate limiting is Phase 9's list, and must never throttle legitimate Razorpay
- * retries (docs/Rules.md 10).
+ * **Never rate limited.** Razorpay retries a webhook it believes failed, and those
+ * retries are exactly what makes payment confirmation reliable - a 429 would be read
+ * as a failure, retried harder, and eventually abandoned, losing a payment that had
+ * already been taken from a patient (docs/Rules.md 10). The gate here is the HMAC
+ * signature, not a request count: an unsigned flood is rejected on arrival and a
+ * signed one could only have come from Razorpay.
+ *
+ * The public `GET /checkout-complete` below is exempt for a duller reason - it
+ * decides nothing and returns static HTML.
  */
+@SkipThrottle()
 @Controller('webhooks')
 export class RazorpayWebhookController {
   constructor(private readonly payments: PaymentsService) {}

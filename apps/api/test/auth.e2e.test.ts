@@ -1,7 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { auth, createTestApp, request, resetDb, signup } from './helpers';
+import { auth, createTestApp, request, resetDb, resetThrottle, signup } from './helpers';
 
 describe('auth (P1-BE-01, P1-BE-02)', () => {
   let app: INestApplication;
@@ -151,6 +151,11 @@ describe('auth (P1-BE-01, P1-BE-02)', () => {
    */
   it('never lets a new token outlive the family that was revoked while it was minted', async () => {
     for (let attempt = 0; attempt < 12; attempt += 1) {
+      // Twelve signups is past the rate limit on signup, and that limit is not what
+      // this test is about - it is about a token family being revoked mid-rotation.
+      // Clearing the counter each round keeps the race the subject rather than
+      // trading away attempts and making the race harder to catch.
+      resetThrottle();
       const { refreshToken } = await signup(app, `race${attempt}@example.com`);
 
       const [a, b] = await Promise.all([

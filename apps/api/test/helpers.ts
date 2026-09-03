@@ -1,4 +1,5 @@
 import { Controller, Get, INestApplication, Module } from '@nestjs/common';
+import { ThrottlerStorage } from '@nestjs/throttler';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
@@ -51,11 +52,35 @@ export async function createTestApp(
   const app = moduleRef.createNestApplication({ rawBody: true });
   app.useGlobalFilters(new AllExceptionsFilter());
   await app.init();
+  lastApp = app;
   return { app, prisma: app.get(PrismaService) };
 }
 
 /**
- * Wipes every table between tests.
+ * The most recently created test app, so `resetDb` can clear the rate limiter the
+ * same way it clears the database. Module-scoped rather than a parameter because
+ * every existing test file already calls `resetDb(prisma)`, and none of them should
+ * have to learn about throttling to keep working.
+ */
+let lastApp: INestApplication | null = null;
+
+/**
+ * Rate-limit counters are in-memory and per process, so without this they persist
+ * across tests inside a file: the eleventh signup in a suite gets a 429 that has
+ * nothing to do with what that test was checking. Clearing them alongside the
+ * database is the same idea - each test starts from a known state.
+ */
+export function resetThrottle(): void {
+  const storage = lastApp?.get<ThrottlerStorage>(ThrottlerStorage, { strict: false });
+  // A Map, not a plain object - `Object.keys` on it returns nothing, so the obvious
+  // version of this function silently did no work at all and every payments test
+  // failed on a 429 from a previous test's signups.
+  const bucket = (storage as { storage?: Map<string, unknown> } | undefined)?.storage;
+  bucket?.clear();
+}
+
+/**
+ * Wipes every table between tests, and the rate limiter with it.
  *
  * Runs against a dedicated `<database>_test`, which `test/use-test-database.ts`
  * selects and `test/global-setup.ts` creates. It used to run against the DEVELOPMENT
@@ -71,6 +96,7 @@ export async function createTestApp(
  * the first two were both true of the dev database it kept wiping.
  */
 export async function resetDb(prisma: PrismaService): Promise<void> {
+  resetThrottle();
   const url = process.env.DATABASE_URL ?? '';
   const safe = url.replace(/:[^:@]*@/, ':***@');
   const isLocal = /@(localhost|127\.0\.0\.1|postgres)[:/]/.test(url);
