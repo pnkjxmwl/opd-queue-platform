@@ -45,6 +45,14 @@
       // Depending on its own build also means the suite exercises what ships.
       "dependsOn": ["^build", "build"]
     },
+    "@opd/web#test": {
+      // The console walkthrough drives a REAL API, which it starts itself with
+      // `node dist/main.js`. Turbo cannot infer that: apps/web does not depend on
+      // apps/api as a package, so without this it happily runs this task in parallel
+      // with @opd/api#build and the runner finds no dist to start. CI failed exactly
+      // that way - "the API never came up" with MODULE_NOT_FOUND underneath it.
+      "dependsOn": ["^build", "build", "@opd/api#build"]
+    },
     "clean": { "cache": false }
   }
 }
