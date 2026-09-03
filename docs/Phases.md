@@ -36,7 +36,7 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 | ☑ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
 | ☑ | 7 — Realtime + ETA | L | 5–7 | 4 | `phase-7-done` |
 | ☑ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
-| ☐ | 9 — Hardening | L | 5–7 | 6 | `phase-9-done` |
+| ☑ | 9 — Hardening | L | 5–7 | 6 | `phase-9-done` |
 | ☐ | 10 — Staging Deploy + Pilot | M | 3–4 | 3 | `phase-10-done` |
 
 **MVP total: ~47–66 focused days.**
@@ -1505,6 +1505,8 @@ follow-ups · visit history · documents/attachments.
 | 6 | `phase-6-done` (`6b0bdf3`) | 2026-09-02 | a webcam decoded a token QR off a phone screen; a declined camera permission still left a working check-in desk; a real Razorpay payment issued a token **through the webhook** (`ENTRY_CONFIRMED / SYSTEM`, 1m44s after the reservation, real gateway ids) |
 | 7 | `phase-7-done` (`cec7cf7`) | 2026-09-02 | two browser windows updated each other with no reload; a phone showed a live position and a moving ETA window |
 | 8 | `phase-8-done` (`58bba66`) | 2026-09-03 | a push landed on a physical Android phone from a development build: `PushToken` holds an `android` row and `Notification` rows reach `SENT`. The last hop needed no code - an EAS `projectId`, `google-services.json` for the FCM client half, and a build that is not Expo Go |
+
+| 9 | `phase-9-done` (`5ffd937`) | 2026-09-04 | 16/16 green uncached; 361 API tests (up from 311) plus 63 console checks now runnable unattended. The security pass found **nothing** - every route was already guarded - and both new guarantees were falsified before being trusted: `@Public()` on `GET /patients` was caught as an unguarded route, and deleting `@SkipThrottle` was confirmed to break the webhook test |
 
 **Two Phase 7 failure paths remain unproven by choice**: the board showing *"Not live"*
 when the socket drops, and the phone re-syncing after a connectivity loss. Both are
