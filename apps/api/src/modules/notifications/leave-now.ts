@@ -103,6 +103,7 @@ export class LeaveNowNotifier extends Sweeper {
         [
           {
             key: session.id,
+            sessionId: session.id,
             doctorId: session.currentProviderDoctorId,
             aheadCount: present.length,
             currentStartedAt: null,

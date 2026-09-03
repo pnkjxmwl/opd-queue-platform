@@ -91,6 +91,7 @@ export class CutoffSweeper extends Sweeper {
     const windows = await this.eta.windowsFor(
       wanted.map((session) => ({
         key: session.id,
+        sessionId: session.id,
         doctorId: session.currentProviderDoctorId,
         aheadCount: aheadBySession.get(session.id) ?? 0,
         // Not needed for a join-now estimate at this resolution: whoever is in the

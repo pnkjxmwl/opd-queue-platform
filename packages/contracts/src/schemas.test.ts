@@ -8,7 +8,7 @@ import {
   accountRoom,
   sessionRoom,
 } from './realtime/dto';
-import { EtaBasis, SessionEta } from './eta/dto';
+import { DeadTimeBasis, EtaBasis, SessionEta } from './eta/dto';
 import {
   CancellationRules,
   ClockTime,
@@ -341,6 +341,9 @@ describe('realtime + eta (P7-CONTRACT-01)', () => {
       basis: 'SEED',
       sampleSize: 0,
       runningBehind: false,
+      deadTimeMins: 2,
+      deadTimeBasis: 'SEED',
+      deadTimeSamples: 0,
       joinNowEtaFrom: null,
       joinNowEtaTo: null,
     });
@@ -348,5 +351,33 @@ describe('realtime + eta (P7-CONTRACT-01)', () => {
     // A zero or negative estimate is never a valid answer - it would produce a
     // window that has already passed.
     expect(SessionEta.safeParse({ ...eta, expectedConsultMins: 0 }).success).toBe(false);
+  });
+
+  it('reports handover time separately from consultation time', () => {
+    // Two bases, not three: turnaround belongs to the room and the day rather than
+    // to the doctor, so a doctor's history from last month says nothing useful about
+    // this morning. Either this session has shown its own handovers or it has not.
+    expect(DeadTimeBasis.options).toEqual(['SEED', 'MEASURED']);
+
+    const base = {
+      sessionId,
+      expectedConsultMins: 12.5,
+      basis: 'SEED' as const,
+      sampleSize: 0,
+      runningBehind: false,
+      deadTimeBasis: 'SEED' as const,
+      deadTimeSamples: 1,
+      joinNowEtaFrom: null,
+      joinNowEtaTo: null,
+    };
+
+    // Zero IS a valid handover time - a clinic where the next patient is already at
+    // the door - unlike expectedConsultMins, where zero would be nonsense.
+    expect(SessionEta.safeParse({ ...base, deadTimeMins: 0 }).success).toBe(true);
+    expect(SessionEta.safeParse({ ...base, deadTimeMins: -1 }).success).toBe(false);
+
+    // Samples counts what was SEEN, so it may exceed zero while the basis is still
+    // SEED: one handover is an anecdote, and the schema must not forbid saying so.
+    expect(SessionEta.parse({ ...base, deadTimeMins: 2 }).deadTimeSamples).toBe(1);
   });
 });

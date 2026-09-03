@@ -527,6 +527,7 @@ export class DiscoveryService {
     const windows = await this.eta.windowsFor(
       rows.map((row) => ({
         key: row.id,
+        sessionId: row.id,
         doctorId: row.currentProviderDoctorId,
         aheadCount: eligibleAhead.get(row.id) ?? 0,
         currentStartedAt: consultingSince.get(row.id) ?? null,

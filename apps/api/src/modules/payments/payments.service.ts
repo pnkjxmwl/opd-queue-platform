@@ -826,6 +826,7 @@ export class PaymentsService {
         const position = live.eligibleOrder.indexOf(row.id);
         return {
           key: row.id,
+          sessionId: row.sessionId,
           doctorId: row.session.currentProvider.id,
           // The same rule the visible "ahead of you" count uses, deliberately: a
           // patient must never be shown a position and a time that disagree. Not in
