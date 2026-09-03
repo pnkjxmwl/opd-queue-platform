@@ -58,11 +58,30 @@ export function sql(statement) {
 
 const one = (statement) => sql(statement)[0];
 
-/** The same secret the API signs with - so a QR built here is one it will accept. */
+/**
+ * The same secret the API signs with - so a QR built here is one it will accept.
+ *
+ * The environment first, and the file only as a fallback. CI has no `.env` (it is
+ * gitignored, correctly) and passes CHECKIN_SECRET as a variable, so reading the file
+ * unconditionally made this crash before the walkthrough had run a single check -
+ * the same shape of assumption as `docker exec opd-postgres`, which is that a
+ * developer's laptop is the only place this ever runs.
+ */
 export function checkInSecret(envPath) {
-  const line = readFileSync(envPath, 'utf8')
-    .split('\n')
-    .find((l) => l.startsWith('CHECKIN_SECRET='));
+  const fromEnv = process.env.CHECKIN_SECRET;
+  if (fromEnv !== undefined && fromEnv !== '') return fromEnv;
+
+  let contents;
+  try {
+    contents = readFileSync(envPath, 'utf8');
+  } catch {
+    throw new Error(
+      `CHECKIN_SECRET is not set and ${envPath} does not exist. Set the variable, or ` +
+        'create the file - it must be the same secret the API signs with.',
+    );
+  }
+
+  const line = contents.split('\n').find((l) => l.startsWith('CHECKIN_SECRET='));
   if (!line) throw new Error(`CHECKIN_SECRET missing from ${envPath}`);
   return line.slice('CHECKIN_SECRET='.length).trim().replace(/^["']|["']$/g, '');
 }
