@@ -35,7 +35,7 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 | ☑ | 5 — Join + Payment → Token | L | 5–7 | 3 | `phase-5-done` |
 | ☑ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
 | ☑ | 7 — Realtime + ETA | L | 5–7 | 4 | `phase-7-done` |
-| ✅ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
+| ☑ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
 | ☐ | 9 — Hardening | L | 5–7 | 6 | `phase-9-done` |
 | ☐ | 10 — Staging Deploy + Pilot | M | 3–4 | 3 | `phase-10-done` |
 
