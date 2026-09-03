@@ -75,8 +75,38 @@ export function resetThrottle(): void {
   // A Map, not a plain object - `Object.keys` on it returns nothing, so the obvious
   // version of this function silently did no work at all and every payments test
   // failed on a 429 from a previous test's signups.
-  const bucket = (storage as { storage?: Map<string, unknown> } | undefined)?.storage;
-  bucket?.clear();
+  const bucket = (storage as { storage?: Map<string, ThrottlerRecord> } | undefined)?.storage;
+  if (bucket === undefined) return;
+
+  // **Emptied, never deleted.** The storage service schedules a timer per key to
+  // expire it, and that callback destructures the record it expects to still be
+  // there. Calling `bucket.clear()` left those timers armed over nothing, so every
+  // one of them threw `Cannot destructure property 'totalHits' of undefined` from
+  // inside a setTimeout - after the tests had finished. The suite reported 361
+  // passed and then exited non-zero on 15 uncaught exceptions, which is a
+  // particularly confusing way to fail: nothing was wrong with any test.
+  //
+  // Zeroing the counters gives every test the clean limiter it needs while leaving
+  // the entries for their own timers to remove.
+  // Zeroed, not cleared, for the same reason at one level deeper. `increment` does
+  // `totalHits.set(name, totalHits.get(name) + 1)` with no fallback, so removing the
+  // KEY makes that `undefined + 1` - NaN, which is never greater than the limit. The
+  // limiter then silently stops limiting: the tests kept passing while the thing they
+  // test had been switched off, which is the worst of the three versions of this
+  // function so far.
+  for (const record of bucket.values()) {
+    for (const name of record.totalHits.keys()) record.totalHits.set(name, 0);
+    record.isBlocked = false;
+    record.blockExpiresAt = 0;
+  }
+}
+
+/** The shape `@nestjs/throttler` keeps per key. Not exported by the package. */
+interface ThrottlerRecord {
+  totalHits: Map<string, number>;
+  expiresAt: number;
+  isBlocked: boolean;
+  blockExpiresAt: number;
 }
 
 /**

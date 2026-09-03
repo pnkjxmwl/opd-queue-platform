@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -57,6 +57,8 @@ function start(name, args) {
   const child = spawn('pnpm', args, {
     cwd: REPO_ROOT,
     shell: true,
+    // So a POSIX kill can signal the whole group rather than just the shell.
+    detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
     env: process.env,
   });
@@ -70,13 +72,46 @@ function start(name, args) {
 
 const started = [];
 
+/**
+ * `child.kill()` is not enough here.
+ *
+ * These are spawned with `shell: true`, so the child IS the shell and the server is
+ * its grandchild. Killing the shell on Windows leaves that grandchild holding port
+ * 3001 while answering nothing - a zombie that makes the NEXT run fail with
+ * EADDRINUSE and a misleading "the console never came up". Found exactly that way.
+ *
+ * taskkill /T walks the tree on Windows; elsewhere a negative pid signals the
+ * process group, which needs `detached` so the group exists in the first place.
+ */
 function stopAll() {
   for (const { child } of started) {
-    if (child.exitCode === null) child.kill();
+    if (child.exitCode !== null || child.pid === undefined) continue;
+    try {
+      if (process.platform === 'win32') {
+        // spawnSync, not spawn: this runs from a process 'exit' handler, which
+        // cannot await anything - an async kill is simply never delivered, and the
+        // server survives to break the next run.
+        spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+      } else {
+        process.kill(-child.pid, 'SIGTERM');
+      }
+    } catch {
+      child.kill();
+    }
   }
 }
 
-process.on('exit', stopAll);
+/**
+ * Last resort only, and deliberately NOT the thorough version: Node forbids spawning
+ * a process from an 'exit' handler, and libuv does not decline politely - it aborts
+ * with `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`. Every ordinary path
+ * calls stopAll() while the event loop is still alive.
+ */
+process.on('exit', () => {
+  for (const { child } of started) {
+    if (child.exitCode === null) child.kill();
+  }
+});
 process.on('SIGINT', () => {
   stopAll();
   process.exit(130);
@@ -86,7 +121,10 @@ const apiUp = await isUp(`http://localhost:${API_PORT}/health`);
 const webUp = await isUp(`http://localhost:${WEB_PORT}/login`);
 
 if (!apiUp) started.push(start('api', ['--filter', '@opd/api', 'start']));
-if (!webUp) started.push(start('web', ['--filter', '@opd/web', 'dev']));
+// `start`, not `dev`: turbo runs this after the build, so serving the built output
+// is both faster to boot and closer to what ships. It also keeps `next build` and a
+// dev server off the same .next directory, which is what broke this the first time.
+if (!webUp) started.push(start('web', ['--filter', '@opd/web', 'start']));
 
 if (started.length > 0) {
   console.log(`starting ${started.map((s) => s.name).join(' and ')}…`);
