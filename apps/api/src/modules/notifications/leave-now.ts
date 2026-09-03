@@ -132,7 +132,27 @@ export class LeaveNowNotifier extends Sweeper {
           hospitalName: session.hospital.name,
           aheadCount: present.length,
         });
-        if (isNew) told.push(entry.id);
+        if (isNew) {
+          told.push(entry.id);
+          // Write down the promise at the moment it is made.
+          //
+          // This is the only place the ETA stops being a number computed on demand
+          // and becomes a commitment somebody acts on - they put their shoes on
+          // because of it. Recording the window here is what makes the estimate
+          // falsifiable afterwards: `calledAt` is already stored, so the pair says
+          // whether we kept our word.
+          //
+          // Guarded by `isNew`, so the storm guard on the notification doubles as
+          // the write-once guard here: a second sweep must not overwrite the window
+          // the patient actually saw with a fresher, flattering one.
+          await this.prisma.queueEntry.update({
+            where: { id: entry.id },
+            data: {
+              predictedCallFrom: new Date(window.from),
+              predictedCallTo: new Date(window.to),
+            },
+          });
+        }
       }
     }
 

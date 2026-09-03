@@ -345,6 +345,56 @@ describe('notifications (P8-BE-01, P8-BE-02)', () => {
       expect(await prisma.notification.count({ where: { type: 'LEAVE_NOW' } })).toBe(1);
     });
 
+    it('writes down the window it promised, so the estimate can be graded later', async () => {
+      // The ETA is computed on demand and thrown away everywhere else. Here it stops
+      // being a number and becomes a commitment somebody puts their shoes on for, so
+      // it is recorded - `calledAt` already is, and the pair is the only way to ask
+      // afterwards whether we kept our word.
+      await leaveNow().nudge();
+
+      const entry = await prisma.queueEntry.findFirstOrThrow({ where: { id: entryId } });
+      expect(entry.predictedCallFrom).not.toBeNull();
+      expect(entry.predictedCallTo).not.toBeNull();
+      expect(entry.predictedCallTo!.getTime()).toBeGreaterThan(entry.predictedCallFrom!.getTime());
+    });
+
+    it('never rewrites the promise on a later sweep', async () => {
+      // A second nudge must not replace the window the patient actually saw with a
+      // fresher, more flattering one - that would make the record unfalsifiable by
+      // always agreeing with the present.
+      await leaveNow().nudge();
+      const first = await prisma.queueEntry.findFirstOrThrow({ where: { id: entryId } });
+
+      await leaveNow().nudge();
+      const second = await prisma.queueEntry.findFirstOrThrow({ where: { id: entryId } });
+
+      expect(second.predictedCallFrom!.getTime()).toBe(first.predictedCallFrom!.getTime());
+      expect(second.predictedCallTo!.getTime()).toBe(first.predictedCallTo!.getTime());
+    });
+
+    it('leaves the promise null for anyone never nudged', async () => {
+      // Null means "we never told them anything", which is honest. Scoring those as
+      // a miss would blame the engine for patients it never spoke to.
+      const person = await prisma.patient.create({ data: { name: 'Never told' } });
+      const quiet = await prisma.queueEntry.create({
+        data: {
+          hospitalId,
+          sessionId,
+          patientId: person.id,
+          tokenNumber: 900,
+          tokenLabel: 'A900',
+          type: 'WALK_IN',
+          status: 'CHECKED_IN',
+        },
+      });
+
+      await leaveNow().nudge();
+
+      const row = await prisma.queueEntry.findFirstOrThrow({ where: { id: quiet.id } });
+      expect(row.predictedCallFrom).toBeNull();
+      expect(row.predictedCallTo).toBeNull();
+    });
+
     it('says nothing while the wait is longer than the hospital asks them to allow', async () => {
       // Twenty people ahead at ten minutes each is over three hours; nobody should
       // be told to leave the house for that.
