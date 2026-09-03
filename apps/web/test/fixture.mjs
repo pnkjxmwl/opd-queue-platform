@@ -30,11 +30,34 @@ import { readFileSync } from 'node:fs';
  */
 const PSQL_ARGS = ['-t', '-A', '-F', '|', '-c'];
 
+/**
+ * Prisma's connection string carries options psql has never heard of - `?schema=` is
+ * on every one of ours - and psql does not ignore them, it refuses the whole URI with
+ * "invalid URI query parameter". Stripping the Prisma-only keys leaves anything psql
+ * does understand (sslmode, connect_timeout) intact.
+ */
+const PRISMA_ONLY = [
+  'schema',
+  'connection_limit',
+  'pool_timeout',
+  'pgbouncer',
+  'socket_timeout',
+  'statement_cache_size',
+  'sslidentity',
+  'sslpassword',
+];
+
+function psqlUrl(url) {
+  const parsed = new URL(url);
+  for (const key of PRISMA_ONLY) parsed.searchParams.delete(key);
+  return parsed.toString();
+}
+
 function runPsql(statement) {
   const url = process.env.DATABASE_URL;
   if (url !== undefined && url !== '') {
     try {
-      return execFileSync('psql', [url, ...PSQL_ARGS, statement], { encoding: 'utf8' });
+      return execFileSync('psql', [psqlUrl(url), ...PSQL_ARGS, statement], { encoding: 'utf8' });
     } catch (error) {
       // Only fall through when psql itself is absent. A SQL error must surface.
       if (error?.code !== 'ENOENT') throw error;

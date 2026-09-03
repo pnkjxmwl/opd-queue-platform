@@ -59,6 +59,15 @@ jobs:
       # Integration tests need the schema applied, not just the client generated.
       - run: pnpm --filter @opd/api exec prisma migrate deploy
 
+      # The console walkthrough drives a REAL clinic - it looks up a hospital, a
+      # department and a doctor, then builds a session around them. A migrated but
+      # empty database has none of those, so without this the 63 checks fail on the
+      # first query rather than on anything they are testing.
+      #
+      # Safe here: the seed refuses to run against a database holding a hospital it
+      # did not create, and CI's is always fresh.
+      - run: pnpm --filter @opd/api seed
+
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
