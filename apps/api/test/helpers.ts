@@ -76,7 +76,22 @@ export function resetThrottle(): void {
   // version of this function silently did no work at all and every payments test
   // failed on a 429 from a previous test's signups.
   const bucket = (storage as { storage?: Map<string, ThrottlerRecord> } | undefined)?.storage;
-  if (bucket === undefined) return;
+
+  // Fail loudly if the library's shape is not what this reaches into.
+  //
+  // This function has been wrong three times, and the expensive version each time
+  // was the one that did nothing quietly: the first left stale counters and produced
+  // 429s in unrelated tests, and a later one switched the limiter off entirely while
+  // its own tests kept passing. It touches private internals of @nestjs/throttler, so
+  // an upgrade CAN change them - and the failure must be a red test on the day of the
+  // upgrade rather than a rate limiter that stopped working months earlier.
+  if (bucket === undefined || typeof bucket.values !== 'function') {
+    throw new Error(
+      'resetThrottle: @nestjs/throttler no longer exposes `storage` as a Map. ' +
+        'The rate limiter cannot be reset between tests, which means it is either ' +
+        'leaking counters or not limiting. Fix this before trusting any rate-limit test.',
+    );
+  }
 
   // **Emptied, never deleted.** The storage service schedules a timer per key to
   // expire it, and that callback destructures the record it expects to still be

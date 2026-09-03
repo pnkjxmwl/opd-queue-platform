@@ -123,7 +123,12 @@ const quote = (s) => `'${String(s).replace(/'/g, "''")}'`;
  * policy past its free window, so the refund tier under test is the interesting one.
  */
 export function createSession({ hospital = 'Apollo', booked = ['Anita Sharma', 'Rahul Verma', 'Priya Nair'], feePaise = 60000 }) {
-  const [hospitalId, departmentId, doctorId, doctorName] = one(`
+  // Deliberately built on the SEED rather than inventing its own hospital: the point
+  // of this walkthrough is to drive the console against a realistic clinic, and the
+  // seed is that clinic. The cost is a dependency on seeded data, so when it is
+  // missing this says so plainly - the bare lookup returned undefined and failed as
+  // "undefined is not iterable", which tells nobody to run the seed.
+  const row = one(`
     SELECT h.id, d.id, doc.id, doc.name
       FROM "Hospital" h
       JOIN "Department" d ON d."hospitalId" = h.id
@@ -131,6 +136,14 @@ export function createSession({ hospital = 'Apollo', booked = ['Anita Sharma', '
      WHERE h.name ILIKE ${quote(`${hospital}%`)}
      ORDER BY d.name, doc.name
      LIMIT 1`);
+
+  if (row === undefined) {
+    throw new Error(
+      `No hospital matching "${hospital}" with a department and a doctor. This ` +
+        'walkthrough runs against seeded data - run `pnpm --filter @opd/api seed` first.',
+    );
+  }
+  const [hospitalId, departmentId, doctorId, doctorName] = row;
 
   const sessionId = randomUUID();
   sql(`
