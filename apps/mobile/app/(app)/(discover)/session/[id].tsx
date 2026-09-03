@@ -3,7 +3,13 @@ import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'r
 import type { Patient, SessionDetail } from '@opd/contracts';
 import { useApi } from '../../../../lib/api';
 import { Icon } from '../../../../lib/icon';
-import { JoinButton, PresencePill, QueryState, SessionStatusPill } from '../../../../lib/discovery';
+import {
+  JoinButton,
+  LiveState,
+  PresencePill,
+  QueryState,
+  SessionStatusPill,
+} from '../../../../lib/discovery';
 import { calendarDate, istRange, rupees } from '../../../../lib/format';
 import { Avatar, Button, SectionLabel, pressable } from '../../../../lib/ui';
 import { bookingStateFor, useMyActiveEntries } from '../../../../lib/visits';
@@ -51,7 +57,7 @@ export default function Session() {
 
   // Live for as long as this screen is open (P7-MOB-01). Unsubscribes on unmount, so
   // a patient browsing ten doctors does not end up listening to ten queues.
-  useLiveSession(id);
+  const { connected } = useLiveSession(id);
 
   // What this account already holds here, and whether anyone is left to book for.
   // Both are server data; joining them is rendering, not a queue decision.
@@ -86,7 +92,7 @@ export default function Session() {
           error={session.error}
           onRetry={() => void session.refetch()}
         />
-        {data ? <SessionBody detail={data} /> : null}
+        {data ? <SessionBody detail={data} connected={connected} /> : null}
       </ScrollView>
 
 {/*
@@ -163,7 +169,7 @@ export default function Session() {
   );
 }
 
-function SessionBody({ detail }: { detail: SessionDetail }) {
+function SessionBody({ detail, connected }: { detail: SessionDetail; connected: boolean }) {
   const { snapshot } = detail;
 
   return (
@@ -182,6 +188,7 @@ function SessionBody({ detail }: { detail: SessionDetail }) {
         <View style={styles.pills}>
           <SessionStatusPill status={detail.status} />
           <PresencePill presence={detail.doctorPresence} />
+          <LiveState connected={connected} />
         </View>
 
         <View style={styles.line}>

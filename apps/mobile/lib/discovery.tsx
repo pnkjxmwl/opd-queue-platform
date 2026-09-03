@@ -73,6 +73,27 @@ export function SessionStatusPill({ status }: { status: SessionStatus }) {
   return <Pill {...SESSION_LABEL[status]} />;
 }
 
+/**
+ * Whether the numbers on this screen are still arriving.
+ *
+ * **The one thing a live screen owes the person reading it.** A dropped socket does
+ * not blank the screen - it freezes it, and a frozen queue position is
+ * indistinguishable from a true one. A patient reading "3 ahead of you" while the
+ * phone has been out of signal in a hospital basement will sit down and wait, and
+ * miss the turn that has already passed. Saying so is the difference between a
+ * stale number and a lie.
+ *
+ * Renders nothing while connected: a permanent green "Live" badge trains people to
+ * stop seeing it, and then it cannot warn them. This only speaks up when it has
+ * something to say - which also matches docs/Design.md, where status is a label and
+ * an icon rather than a colour, so it survives being read in sunlight by somebody
+ * who does not distinguish red from green.
+ */
+export function LiveState({ connected }: { connected: boolean }) {
+  if (connected) return null;
+  return <Pill label="Not live - reconnecting" tone="warning" icon="wifi-off" />;
+}
+
 export function PresencePill({ presence }: { presence: DoctorPresence }) {
   return <Pill {...PRESENCE_LABEL[presence]} />;
 }

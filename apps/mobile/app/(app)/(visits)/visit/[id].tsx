@@ -13,6 +13,7 @@ import {
 } from '../../../../lib/visits';
 import { Button, ErrorNote, SectionLabel } from '../../../../lib/ui';
 import { useLiveSession } from '../../../../lib/realtime';
+import { LiveState } from '../../../../lib/discovery';
 import { calendarDate, istClock, istRange, rupees } from '../../../../lib/format';
 import { theme } from '../../../../theme';
 
@@ -45,7 +46,7 @@ export default function TokenCard() {
     query.data?.items.find((e) => e.id === id) ?? past.data?.items.find((e) => e.id === id) ?? null;
 
   // Watch the queue this token is in, so the ETA and "ahead of you" move with it.
-  useLiveSession(entry?.sessionId);
+  const { connected } = useLiveSession(entry?.sessionId);
 
   const cancel = useApiPost<{ reason?: string }, CancelEntryResponse>(`/queue-entries/${id}/cancel`);
 
@@ -114,6 +115,15 @@ export default function TokenCard() {
               <Text style={styles.overline}>YOUR TOKEN</Text>
               <Text style={styles.token}>{entry.tokenLabel}</Text>
               <EntryStatusPill status={entry.status} />
+              {/*
+                The most important place in the app for this. Every number below -
+                the token, both "ahead" counts, the ETA window - is only true while
+                updates are arriving. A dropped socket freezes them rather than
+                clearing them, so a patient reading "2 checked in ahead" on a phone
+                that lost signal will sit down and wait for a turn that has already
+                passed. Nothing is rendered while connected.
+              */}
+              <LiveState connected={connected} />
 
               {entry.checkInCode !== null ? (
                 <View style={styles.qr}>
