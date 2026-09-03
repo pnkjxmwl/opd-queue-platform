@@ -7,10 +7,11 @@ export default [
   {
     // The console walkthrough is a Node script, not part of the bundle: it talks to
     // a running server and prints what it found. Globals listed by hand rather than
-    // pulling in `globals` for six names.
+    // pulling in `globals` for a handful of names.
     files: ['test/**/*.mjs'],
     languageOptions: {
       globals: {
+        AbortSignal: 'readonly',
         Buffer: 'readonly',
         FormData: 'readonly',
         URL: 'readonly',

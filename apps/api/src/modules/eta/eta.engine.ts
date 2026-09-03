@@ -1,4 +1,4 @@
-import type { EtaBasis } from '@opd/contracts';
+import type { DeadTimeBasis, EtaBasis } from '@opd/contracts';
 
 /**
  * P7-BE-03 · the ETA engine (docs/Architecture.md 8).
@@ -40,6 +40,32 @@ const PAD_FRACTION = 0.25;
  */
 const BEHIND_RATIO = 1.25;
 const MIN_BEHIND_SAMPLES = 3;
+
+/**
+ * The opening assumption for the gap between one consultation ending and the next
+ * beginning, until the session has shown us its own. Two minutes: long enough to
+ * call a name and have somebody walk in from a waiting area, short enough that it
+ * does not dominate an estimate when it turns out to be wrong.
+ *
+ * A seed rather than zero, which is what the engine effectively assumed before. Zero
+ * is not a neutral choice - it is a claim that handover is instantaneous, and it is
+ * wrong in the direction that hurts: it tells patients to arrive early.
+ */
+export const SEED_DEAD_TIME_MIN = 2;
+
+/**
+ * A gap longer than this is not a handover.
+ *
+ * Doctors take breaks, step out, and sessions pause. Those show up in the same
+ * arithmetic as turnaround and would drag an average up for the rest of the day -
+ * one twenty-five minute lunch across six handovers adds four minutes to every
+ * patient's estimate. Gaps above this are discarded rather than winsorised, because
+ * they are a different event, not an extreme example of this one.
+ */
+export const MAX_CREDIBLE_GAP_MIN = 15;
+
+/** Below this many handovers the measurement is noise; keep the seed. */
+export const MIN_DEAD_TIME_SAMPLES = 2;
 
 const MS_PER_MIN = 60_000;
 
@@ -102,6 +128,44 @@ export function blendExpectedMins(input: ExpectedInputs): ExpectedResult {
   };
 }
 
+export interface DeadTimeResult {
+  /** Minutes to add per patient ahead, on top of the consultation itself. */
+  mins: number;
+  basis: DeadTimeBasis;
+  /** Credible handovers behind `mins`. 0 means the seed. */
+  sampleSize: number;
+}
+
+/**
+ * How long the queue takes to hand over from one patient to the next.
+ *
+ * `samples` are gap durations in minutes, each measured as one patient's call time
+ * minus the previous patient's completion time - the interval where the room is
+ * empty and nothing the engine used to model was happening.
+ *
+ * **Median, not mean.** The distribution is not symmetric: handovers cluster tightly
+ * around a minute or two, and the outliers are all long ones (a break, a phone call,
+ * a doctor stepping out). A mean chases those; a median ignores them. With the cap
+ * below this is belt and braces, and deliberately so - the cost of overestimating
+ * dead time is every patient in the queue told to arrive late.
+ */
+export function measureDeadTime(samples: readonly number[]): DeadTimeResult {
+  const credible = samples.filter(
+    (gap) => Number.isFinite(gap) && gap >= 0 && gap <= MAX_CREDIBLE_GAP_MIN,
+  );
+
+  if (credible.length < MIN_DEAD_TIME_SAMPLES) {
+    return { mins: SEED_DEAD_TIME_MIN, basis: 'SEED', sampleSize: credible.length };
+  }
+
+  const sorted = [...credible].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  const median =
+    sorted.length % 2 === 0 ? (sorted[middle - 1]! + sorted[middle]!) / 2 : sorted[middle]!;
+
+  return { mins: median, basis: 'MEASURED', sampleSize: credible.length };
+}
+
 export interface QueuePosition {
   /** Eligible patients who will be called before this one. */
   aheadCount: number;
@@ -120,9 +184,15 @@ export function etaWindow(
   expectedMins: number,
   position: QueuePosition,
   now: Date,
+  deadTimeMins: number = SEED_DEAD_TIME_MIN,
 ): { from: Date; to: Date } {
   const expected = safePositive(expectedMins, FALLBACK_SEED_MIN);
   const ahead = Math.max(0, Math.floor(position.aheadCount));
+  // Zero is a legitimate measurement here (a clinic that really does hand over
+  // instantly), so this floors at zero rather than falling back to the seed the way
+  // safePositive would.
+  const dead =
+    Number.isFinite(deadTimeMins) && deadTimeMins >= 0 ? deadTimeMins : SEED_DEAD_TIME_MIN;
 
   const elapsedMins = Math.max(0, (position.currentElapsedSec ?? 0) / 60);
   const remainingCurrent =
@@ -130,7 +200,11 @@ export function etaWindow(
       ? 0
       : Math.max(MIN_REMAINING_MIN, expected - elapsedMins);
 
-  const etaMins = remainingCurrent + ahead * expected;
+  // Every patient ahead costs a consultation AND a handover, and one more handover
+  // separates the person in the room now from the first of them. An empty room owes
+  // no handover - nobody has to leave it before the next patient is called.
+  const handovers = position.currentElapsedSec === null ? ahead : ahead + 1;
+  const etaMins = remainingCurrent + ahead * expected + handovers * dead;
   const pad = Math.min(MAX_PAD_MIN, Math.max(MIN_PAD_MIN, PAD_FRACTION * etaMins));
 
   const centre = now.getTime() + etaMins * MS_PER_MIN;

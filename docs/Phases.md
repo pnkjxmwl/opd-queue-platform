@@ -36,7 +36,7 @@ Narrative history, decisions and surprises go in **PROGRESS.md**; this table is 
 | ☑ | 6 — Doctor + Staff Consoles | L | 5–7 | 4 | `phase-6-done` |
 | ☑ | 7 — Realtime + ETA | L | 5–7 | 4 | `phase-7-done` |
 | ☑ | 8 — Notifications + Background Jobs | M | 4–5 | 5 | `phase-8-done` |
-| ☐ | 9 — Hardening | L | 5–7 | 6 | `phase-9-done` |
+| ☑ | 9 — Hardening | L | 5–7 | 6 | `phase-9-done` |
 | ☐ | 10 — Staging Deploy + Pilot | M | 3–4 | 3 | `phase-10-done` |
 
 **MVP total: ~47–66 focused days.**
@@ -1255,14 +1255,40 @@ Almost fully parallel — largely independent workstreams.
 
 | ID | Task | Stream | Wave | Deps | Test / Done-when |
 |---|---|---|---|---|---|
-| ☐ P9-BE-01 | Rate limiting (auth, join, webhook) | BE | 1 | — | over limit → 429 |
-| ☐ P9-SEC-01 | Security pass: guards on every route; IDOR sweep; authz/tenant test matrix | TEST/BE | 1 | — | matrix covers all endpoints |
-| ☐ P9-OBS-01 | Sentry + request tracing (BE + clients) | INFRA | 1 | — | error appears in Sentry with request id |
-| ☐ P9-WEB-01 | Console error/empty/offline states | WEB | 1 | — | every screen has the states |
-| ☐ P9-MOB-01 | Patient error/empty/offline states | MOB | 1 | — | airplane-mode graceful; retries |
-| ☐ P9-BE-02 | Admin reports queries | BE | 1 | — | report matches known data |
-| ☐ P9-WEB-02 | Reports UI | WEB | 2 | P9-BE-02 | reports render |
-| ☐ P9-TEST-01 | E2E core flows + coverage gaps | TEST | 2 | all | discover→join→pay→check-in→consult→complete green |
+| ✅ P9-BE-01 | Rate limiting (auth, join, webhook) | BE | 1 | — | **done.** 10/min on the four guessable auth routes, 20/min on join, 120/min global; webhook exempt and tested at 130 replays. `auth/refresh` deliberately NOT limited - family revocation on reuse is a stronger guard than counting |
+| ✅ P9-SEC-01 | Security pass: guards on every route; IDOR sweep; authz/tenant test matrix | TEST/BE | 1 | — | **done, no findings.** Route list generated from the Express router, not hand-written; 10 public routes asserted exact in both directions; IDOR sweep on patients, bookings and push tokens. Falsified by exposing GET /patients and watching it fail |
+| ✅ P9-OBS-01 | Request tracing + PII scrubbing (BE + clients) | INFRA | 1 | — | **done, scope changed.** Tracing already existed server-side; both clients now carry the request id onto errors. `common/scrub.ts` is an egress guard with 13 tests. **Sentry SDK deliberately not installed** - `SENTRY_DSN` is declared and empty, and Phase 10 turns it on with the India-hosting decision |
+| ✅ P9-WEB-01 | Console error/empty/offline states | WEB | 1 | — | **done.** Empty/ErrorBanner already covered most screens; added error/not-found/loading boundaries and global-error. Trap 34 fixed: validation details replace the generic message. Loading scoped to /config after it turned a cross-tenant 404 into a streamed 200 |
+| ✅ P9-MOB-01 | Patient error/empty/offline states | MOB | 1 | — | **done, smaller than planned.** QueryState already covered all 12 data screens, and reconnect already re-joined rooms then refetched. The real gap was `connected` being surfaced nowhere: a dropped socket FREEZES the queue numbers rather than clearing them. LiveState now says so on the token and session screens |
+| ⏸ P9-BE-02 | Admin reports queries | BE | 1 | — | **deferred by decision, not dropped.** See the note under this table |
+| ⏸ P9-WEB-02 | Reports UI | WEB | 2 | P9-BE-02 | **deferred with P9-BE-02** |
+| ✅ P9-TEST-01 | E2E core flows + coverage gaps | TEST | 2 | all | **done.** One test walks discover→join→pay→check-in→consult→complete asserting the exact QueueEvent order and that timestamps are ORDERED. `apps/web` tests now run unattended - the blocker was a hard-coded `docker exec opd-postgres`, not a missing framework. **Playwright deliberately not added**; see the note |
+
+### 📌 Two deliberate changes to this phase's scope
+
+**Admin reports (`P9-BE-02`, `P9-WEB-02`) were deferred, and dead time went into the
+engine instead.** Planning this phase surfaced that `etaWindow()` modelled only time
+*inside* the consulting room - it assumed the queue advances the instant a
+consultation ends. Two real gaps were already recorded on every entry and had never
+been read: `consultStartedAt − calledAt` (the patient walking in) and the next
+`calledAt − completedAt` (doctor turnaround). At ~3 minutes with eight ahead that is
+24 unaccounted minutes, biasing **every estimate early** - telling patients to arrive
+before they were needed, which is the failure this product exists to prevent.
+
+The user's call was to fix the engine rather than report on it. `predictedCallFrom` /
+`predictedCallTo` are still written at LEAVE_NOW so the change is falsifiable, but
+there is no report endpoint and no reports UI. **Admin reports remain a PRD feature
+and need their own phase** - this is a deferral with a reason, not a silent drop.
+
+**Playwright was not added (`P9-TEST-01`).** The plan assumed `apps/web` had no CI
+tests because it lacked a browser framework. It did not: the 63-check walkthrough
+existed and passed, and had never run in CI because `fixture.mjs` reached the
+database through `docker exec opd-postgres` - a container name that only exists on a
+developer's laptop. Fixing that, plus a runner that starts whatever is not up, closed
+the actual gap. A browser would have added a ~300MB download to every CI run to
+re-prove passing checks. What it *would* add is client-side JavaScript coverage - the
+error boundaries added in `P9-WEB-01` are client components no HTTP-level test can
+execute. **That is still an open gap**, and worth its own decision.
 
 **Parallelization:** Wave 1 is 5–6 independent agents. Very high parallelism.
 **Integration checkpoint:** security/observability/error-state checklists pass; P9-TEST-01 E2E green.
@@ -1479,6 +1505,8 @@ follow-ups · visit history · documents/attachments.
 | 6 | `phase-6-done` (`6b0bdf3`) | 2026-09-02 | a webcam decoded a token QR off a phone screen; a declined camera permission still left a working check-in desk; a real Razorpay payment issued a token **through the webhook** (`ENTRY_CONFIRMED / SYSTEM`, 1m44s after the reservation, real gateway ids) |
 | 7 | `phase-7-done` (`cec7cf7`) | 2026-09-02 | two browser windows updated each other with no reload; a phone showed a live position and a moving ETA window |
 | 8 | `phase-8-done` (`58bba66`) | 2026-09-03 | a push landed on a physical Android phone from a development build: `PushToken` holds an `android` row and `Notification` rows reach `SENT`. The last hop needed no code - an EAS `projectId`, `google-services.json` for the FCM client half, and a build that is not Expo Go |
+
+| 9 | `phase-9-done` (`5ffd937`) | 2026-09-04 | 16/16 green uncached; 361 API tests (up from 311) plus 63 console checks now runnable unattended. The security pass found **nothing** - every route was already guarded - and both new guarantees were falsified before being trusted: `@Public()` on `GET /patients` was caught as an unguarded route, and deleting `@SkipThrottle` was confirmed to break the webhook test |
 
 **Two Phase 7 failure paths remain unproven by choice**: the board showing *"Not live"*
 when the socket drops, and the phone re-syncing after a connectivity loss. Both are

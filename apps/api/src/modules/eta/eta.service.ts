@@ -4,7 +4,14 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { NotFoundError } from '../../common/errors';
 import { istToUtc, istToday } from '../../common/ist';
 import { ELIGIBLE_TO_CALL } from '../queue/state-machine';
-import { blendExpectedMins, etaWindow, isRunningBehind, type ExpectedResult } from './eta.engine';
+import {
+  blendExpectedMins,
+  etaWindow,
+  isRunningBehind,
+  measureDeadTime,
+  type DeadTimeResult,
+  type ExpectedResult,
+} from './eta.engine';
 
 /**
  * P7-BE-03 · the ETA engine's connection to the database.
@@ -36,6 +43,12 @@ import { blendExpectedMins, etaWindow, isRunningBehind, type ExpectedResult } fr
  */
 export interface EtaRequest {
   key: string;
+  /**
+   * The session being queued in. Needed because handover time is measured per
+   * session, not per doctor - it is a property of the room and the day, and it is
+   * what stops a patient's estimate disagreeing with the staff board's.
+   */
+  sessionId: string;
   /** The CURRENT provider, never the originally booked doctor (docs/PRD.md 8.11). */
   doctorId: string;
   /** How many patients will be seen before the person being estimated for. */
@@ -83,7 +96,10 @@ export class EtaService {
     const estimable = inputs.filter((i) => i.estimable);
     if (estimable.length === 0) return out;
 
-    const paces = await this.pacesFor([...new Set(estimable.map((i) => i.doctorId))], now);
+    const [paces, deadTimes] = await Promise.all([
+      this.pacesFor([...new Set(estimable.map((i) => i.doctorId))], now),
+      this.deadTimesFor([...new Set(estimable.map((i) => i.sessionId))]),
+    ]);
 
     for (const input of estimable) {
       const pace = paces.get(input.doctorId);
@@ -100,6 +116,7 @@ export class EtaService {
               : Math.round((now.getTime() - input.currentStartedAt.getTime()) / 1000),
         },
         now,
+        (deadTimes.get(input.sessionId) ?? measureDeadTime([])).mins,
       );
       out.set(input.key, { from: window.from.toISOString(), to: window.to.toISOString() });
     }
@@ -148,6 +165,7 @@ export class EtaService {
       todaySamples: 0,
     };
     const expected: ExpectedResult = blendExpectedMins(resolved);
+    const deadTime = await this.deadTimeFor(sessionId);
 
     const window = ETA_IS_MEANINGFUL.has(session.status) && session.doctorPresence !== 'LEFT'
       ? etaWindow(
@@ -160,6 +178,7 @@ export class EtaService {
                 : Math.round((now.getTime() - serving.consultStartedAt.getTime()) / 1000),
           },
           now,
+          deadTime.mins,
         )
       : null;
 
@@ -175,9 +194,71 @@ export class EtaService {
         // against a number today is already half of would flatten the signal.
         baselineMins: resolved.allTimeMins ?? resolved.seedMins,
       }),
+      deadTimeMins: Number(deadTime.mins.toFixed(1)),
+      deadTimeBasis: deadTime.basis,
+      deadTimeSamples: deadTime.sampleSize,
       joinNowEtaFrom: window === null ? null : window.from.toISOString(),
       joinNowEtaTo: window === null ? null : window.to.toISOString(),
     };
+  }
+
+  /**
+   * How long this session takes to hand over from one patient to the next.
+   *
+   * The gap between a consultation ending and the next patient being called is real
+   * - somebody has to walk in from the waiting room - and the engine used to model
+   * none of it, which made every estimate optimistic in proportion to the queue
+   * length. Both timestamps were already being recorded; nothing had ever read them.
+   *
+   * **Measured per session, not per doctor.** Turnaround is a property of the room
+   * and the day: who is fetching patients, how far the waiting area is, how busy
+   * reception is. The same doctor in a different clinic hands over differently, so a
+   * doctor's history from last month says little about this morning.
+   *
+   * Computed in Node rather than SQL because it is a window function over pairs of
+   * consecutive rows, and a session's entries number in the tens - there is nothing
+   * here worth the raw SQL that docs/Rules.md keeps for locking and reporting.
+   */
+  private async deadTimeFor(sessionId: string): Promise<DeadTimeResult> {
+    const all = await this.deadTimesFor([sessionId]);
+    return all.get(sessionId) ?? measureDeadTime([]);
+  }
+
+  /** The same measurement for many sessions, in one query. */
+  private async deadTimesFor(sessionIds: string[]): Promise<Map<string, DeadTimeResult>> {
+    const out = new Map<string, DeadTimeResult>();
+    if (sessionIds.length === 0) return out;
+
+    const finished = await this.prisma.queueEntry.findMany({
+      where: {
+        sessionId: { in: sessionIds },
+        calledAt: { not: null },
+        completedAt: { not: null },
+      },
+      select: { sessionId: true, calledAt: true, completedAt: true },
+      orderBy: [{ sessionId: 'asc' }, { calledAt: 'asc' }],
+    });
+
+    const bySession = new Map<string, { calledAt: Date; completedAt: Date }[]>();
+    for (const row of finished) {
+      if (row.calledAt === null || row.completedAt === null) continue;
+      const list = bySession.get(row.sessionId) ?? [];
+      list.push({ calledAt: row.calledAt, completedAt: row.completedAt });
+      bySession.set(row.sessionId, list);
+    }
+
+    for (const sessionId of sessionIds) {
+      const rows = bySession.get(sessionId) ?? [];
+      const gaps: number[] = [];
+      for (let i = 1; i < rows.length; i += 1) {
+        const previousDone = rows[i - 1]!.completedAt;
+        const nextCalled = rows[i]!.calledAt;
+        gaps.push((nextCalled.getTime() - previousDone.getTime()) / 60_000);
+      }
+      out.set(sessionId, measureDeadTime(gaps));
+    }
+
+    return out;
   }
 
   /**

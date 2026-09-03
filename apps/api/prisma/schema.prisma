@@ -406,6 +406,17 @@ model QueueEntry {
   /// running. The sweeper only writes down what is already true.
   reservationExpiresAt DateTime?
 
+  /// The ETA window this patient was SHOWN when the "leave now" push was sent, so
+  /// the promise can be compared with `calledAt` afterwards. Written once, never
+  /// updated: the point is what we committed to at the moment they acted on it, not
+  /// the estimate as it drifted.
+  ///
+  /// Two columns rather than one because a window is what the patient sees - grading
+  /// a midpoint invented after the fact would measure something nobody was told.
+  /// Null means no nudge was ever sent, which is honest rather than a zero score.
+  predictedCallFrom DateTime?
+  predictedCallTo   DateTime?
+
   joinedAt         DateTime  @default(now())
   checkedInAt      DateTime?
   /// Set when a skipped patient is put back in the pool (docs/PRD.md 8.8,

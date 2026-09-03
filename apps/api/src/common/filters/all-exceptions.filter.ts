@@ -64,8 +64,18 @@ export class AllExceptionsFilter implements ExceptionFilter {
         body: {
           error: {
             code:
-              status === 404 ? 'NOT_FOUND' : status < 500 ? 'VALIDATION_FAILED' : 'INTERNAL_ERROR',
-            message: exception.message,
+              status === 404
+                ? 'NOT_FOUND'
+                : // ThrottlerGuard throws a plain HttpException, so without this a
+                  // rate-limited caller is told their REQUEST was invalid and will
+                  // "fix" it and retry - the opposite of what 429 asks for.
+                  status === 429
+                  ? 'RATE_LIMITED'
+                  : status < 500
+                    ? 'VALIDATION_FAILED'
+                    : 'INTERNAL_ERROR',
+            message:
+              status === 429 ? 'Too many requests. Please wait and try again.' : exception.message,
             ...withId,
           },
         },

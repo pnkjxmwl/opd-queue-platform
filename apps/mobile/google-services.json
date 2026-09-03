@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "563385723318",
+    "project_id": "opd-queue-b047e",
+    "storage_bucket": "opd-queue-b047e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:563385723318:android:4efce1900af4076676b917",
+        "android_client_info": {
+          "package_name": "com.opdqueue.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBoOT2ylKcG1b6r7ONT-Oas7CkRdduZvNw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

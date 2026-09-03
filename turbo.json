@@ -12,6 +12,7 @@
     "REDIS_URL",
     "PORT",
     "LOG_LEVEL",
+    "SENTRY_DSN",
     "JWT_ACCESS_SECRET",
     "JWT_REFRESH_SECRET",
     "JWT_ACCESS_TTL_SEC",
@@ -37,7 +38,13 @@
     "dev": { "cache": false, "persistent": true },
     "lint": { "dependsOn": ["^build"] },
     "typecheck": { "dependsOn": ["^build"] },
-    "test": { "dependsOn": ["^build"] },
+    "test": {
+      // `build` as well as `^build`: apps/web's test starts a server, and Next
+      // cannot build and serve the same .next directory at once - turbo running
+      // `next build` beside it left the console unable to start at all (trap 30).
+      // Depending on its own build also means the suite exercises what ships.
+      "dependsOn": ["^build", "build"]
+    },
     "clean": { "cache": false }
   }
 }

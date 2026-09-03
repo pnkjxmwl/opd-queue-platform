@@ -29,6 +29,23 @@ export const EtaBasis = z.enum([
 ]);
 export type EtaBasis = z.infer<typeof EtaBasis>;
 
+/**
+ * How much the dead-time figure has behind it.
+ *
+ * Deliberately only two values, unlike `EtaBasis`. Turnaround is a property of the
+ * room and the clinic on the day - who is fetching patients, how far the waiting
+ * area is - far more than of the doctor, so a doctor's history from last month says
+ * little about this morning. Either this session has shown us its own handovers or
+ * it has not.
+ */
+export const DeadTimeBasis = z.enum([
+  /** No completed handovers yet. The opening assumption, and say so. */
+  'SEED',
+  /** Measured from handovers in this session. */
+  'MEASURED',
+]);
+export type DeadTimeBasis = z.infer<typeof DeadTimeBasis>;
+
 export const SessionEta = z.object({
   sessionId: z.string().uuid(),
 
@@ -44,6 +61,38 @@ export const SessionEta = z.object({
    * to warn the room, and a precise figure invites arguing with it.
    */
   runningBehind: z.boolean(),
+
+  /**
+   * The gap between consultations, which the estimate used to ignore entirely.
+   *
+   * A queue does not advance the instant a consultation ends: the next patient has
+   * to walk in from the waiting room, and the doctor needs a moment between them.
+   * Modelling only time *inside* the room made every estimate optimistic by roughly
+   * this much per person ahead - with eight ahead and three minutes of gap, twenty
+   * four unaccounted minutes, and a patient told to arrive before they needed to.
+   *
+   * Surfaced rather than hidden because staff comparing the board against the clock
+   * deserve to see which part of the estimate is consultation and which is
+   * turnaround - and because a turnaround that climbs through the day is a real
+   * signal about how the clinic is running.
+   */
+  deadTimeMins: z.number().nonnegative(),
+  /**
+   * Whether `deadTimeMins` was measured from this session or is still the opening
+   * assumption. Same honesty as `basis` above: a number with nothing behind it and
+   * a number drawn from a dozen handovers are not the same claim.
+   */
+  deadTimeBasis: DeadTimeBasis,
+  /**
+   * Credible handovers observed in this session so far.
+   *
+   * Counts what was *seen*, not what was used, so it can be non-zero while the basis
+   * is still SEED - one handover is an anecdote and the engine says so rather than
+   * pretending a single measurement is a rate. Reading "SEED, 1 sample" tells staff
+   * the estimate is about to start learning; reading "SEED, 0" tells them nothing
+   * has finished yet.
+   */
+  deadTimeSamples: z.number().int().nonnegative(),
 
   /**
    * When somebody joining right now would be seen. The same pair
