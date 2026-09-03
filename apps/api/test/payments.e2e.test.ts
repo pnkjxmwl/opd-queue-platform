@@ -3,6 +3,7 @@ import { INestApplication } from '@nestjs/common';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { auth, createTestApp, request, resetDb, signup } from './helpers';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { FakeRazorpay, WEBHOOK_SECRET } from './razorpay.fake';
 import { RazorpayClient, type RazorpayApi } from '../src/modules/payments/razorpay.client';
 import { ReservationSweeper } from '../src/modules/queue/reservation-sweeper';
 import { QueuePolicyService } from '../src/modules/config/queue-policy.service';
@@ -18,33 +19,7 @@ import { dateColumnFromString, istToday } from '../src/common/ist';
  * ones - they are what these tests are about.
  */
 
-const WEBHOOK_SECRET = 'test-webhook-secret-value';
 const FEE_PAISE = 50_000;
-
-class FakeRazorpay implements RazorpayApi {
-  readonly keyId = 'rzp_test_fake';
-  readonly configured = true;
-  orders: { id: string; amount: number; receipt: string }[] = [];
-  refunds: { id: string; paymentId: string; amount: number }[] = [];
-
-  async createOrder(input: { amountPaise: number; receipt: string }) {
-    const order = { id: `order_${this.orders.length + 1}`, amount: input.amountPaise, receipt: input.receipt };
-    this.orders.push(order);
-    return { id: order.id, amount: order.amount, currency: 'INR' };
-  }
-
-  async refund(input: { paymentId: string; amountPaise: number }) {
-    const refund = { id: `rfnd_${this.refunds.length + 1}`, paymentId: input.paymentId, amount: input.amountPaise };
-    this.refunds.push(refund);
-    return { id: refund.id, amount: refund.amount, status: 'processed' };
-  }
-
-  verifyWebhookSignature(rawBody: Buffer, signature: string | undefined): boolean {
-    if (signature === undefined) return false;
-    const expected = createHmac('sha256', WEBHOOK_SECRET).update(rawBody).digest('hex');
-    return expected === signature;
-  }
-}
 
 describe('join -> pay -> token (Phase 5)', () => {
   let app: INestApplication;
