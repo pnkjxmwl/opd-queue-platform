@@ -96,12 +96,21 @@ describe('rate limiting (P9-BE-01)', () => {
   });
 
   it('leaves an authenticated console alone under normal use', async () => {
-    // Staff working a queue must never meet a limiter. Thirty reads of a public
-    // discovery route in a burst is more than a console produces and well under the
-    // global ceiling.
-    const statuses = await Promise.all(
-      Array.from({ length: 30 }, () => request(app.getHttpServer()).get('/cities').then((r) => r.status)),
-    );
+    // Staff working a queue must never meet a limiter. Thirty reads of a discovery
+    // route is more than a console produces in a minute and well under the global
+    // ceiling of 120.
+    //
+    // Sequential, not `Promise.all`. The first version opened thirty connections at
+    // once and passed on a developer machine while failing in CI with ECONNRESET -
+    // a slower runner simply reset some of them. That was the test being unrealistic
+    // rather than the limiter being wrong: "normal console use" is a person clicking
+    // through screens, not thirty simultaneous sockets, so the concurrent version
+    // was measuring the runner's connection backlog and calling it rate limiting.
+    const statuses: number[] = [];
+    for (let i = 0; i < 30; i += 1) {
+      const res = await request(app.getHttpServer()).get('/cities');
+      statuses.push(res.status);
+    }
     expect(statuses).not.toContain(429);
   });
 });
