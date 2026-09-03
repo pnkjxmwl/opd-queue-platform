@@ -44,6 +44,16 @@ export const EnvSchema = z.object({
    */
   CHECKIN_SECRET: z.string().min(32),
 
+  /// Where crash and error reports are sent.
+  ///
+  /// Empty by default and empty today, deliberately. The PII scrubber that must run
+  /// before anything is sent lives in common/scrub.ts and is tested; the exporter
+  /// itself arrives in Phase 10 alongside the deployment and the India-hosting
+  /// decision for the whole stack. Declaring the variable now means turning error
+  /// reporting on is a config change, not a moment where somebody has to remember a
+  /// DPDP obligation under time pressure.
+  SENTRY_DSN: z.string().default(''),
+
   /// Comma-separated Google OAuth client ids (iOS, Android and web each have one).
   /// Empty disables POST /auth/google rather than failing boot - Google is optional.
   GOOGLE_CLIENT_IDS: z

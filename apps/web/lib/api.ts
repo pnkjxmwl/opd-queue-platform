@@ -13,6 +13,18 @@ export class ApiCallError extends Error {
   constructor(
     readonly code: string,
     message: string,
+    /**
+     * The server's request id for the failing call.
+     *
+     * The API stamps every response with `x-request-id` and repeats it in the error
+     * envelope; until now nothing on this side read it. Without it, "the console
+     * said someone acted first" cannot be matched to a server log - there is no
+     * shared identifier between the two halves of one failure (P9-OBS-01).
+     *
+     * Not part of the message: a receptionist needs the sentence, and support needs
+     * the id.
+     */
+    readonly requestId?: string,
   ) {
     super(message);
     this.name = 'ApiCallError';
@@ -84,8 +96,16 @@ async function toError(res: Response): Promise<Error> {
             .map(([field, message]) => `${field}: ${String(message)}`)
             .join('; ')})`
         : '';
-    return new ApiCallError(body.error.code, `${body.error.message}${details}`);
+    const requestId =
+      (body.error as { requestId?: string }).requestId ??
+      res.headers.get('x-request-id') ??
+      undefined;
+    return new ApiCallError(body.error.code, `${body.error.message}${details}`, requestId);
   } catch {
-    return new Error(`Request failed with ${res.status}`);
+    // Even a body we could not parse still has the header, and an unreadable 500 is
+    // exactly when a request id is worth most.
+    const requestId = res.headers.get('x-request-id');
+    const suffix = requestId === null ? '' : ` (ref ${requestId})`;
+    return new Error(`Request failed with ${res.status}${suffix}`);
   }
 }

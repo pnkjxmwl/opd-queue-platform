@@ -12,6 +12,7 @@
     "REDIS_URL",
     "PORT",
     "LOG_LEVEL",
+    "SENTRY_DSN",
     "JWT_ACCESS_SECRET",
     "JWT_REFRESH_SECRET",
     "JWT_ACCESS_TTL_SEC",

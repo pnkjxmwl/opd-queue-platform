@@ -45,7 +45,11 @@ export function useApi<T>(path: string, enabled = true, refetchMs?: number) {
         // The API's envelope is written to be shown to a human and carries no
         // internals (docs/Rules.md 7).
         const body = (await res.json().catch(() => null)) as ApiError | null;
-        throw new Error(body?.error.message ?? 'Something went wrong. Please try again.');
+        throw withRequestId(
+          new Error(body?.error.message ?? 'Something went wrong. Please try again.'),
+          res,
+          body,
+        );
       }
 
       return res.json() as Promise<T>;
@@ -76,7 +80,11 @@ export function useApiPost<TBody, TResult>(path: string) {
 
       if (!res.ok) {
         const parsed = (await res.json().catch(() => null)) as ApiError | null;
-        const error = new Error(parsed?.error.message ?? 'Something went wrong. Please try again.');
+        const error = withRequestId(
+          new Error(parsed?.error.message ?? 'Something went wrong. Please try again.'),
+          res,
+          parsed,
+        );
         // The CODE is what a screen should branch on, never the message
         // (docs/Rules.md 7). Attached rather than parsed again at each call site.
         (error as Error & { code?: string }).code = parsed?.error.code;
@@ -86,4 +94,25 @@ export function useApiPost<TBody, TResult>(path: string) {
       return res.json() as Promise<TResult>;
     },
   });
+}
+
+/**
+ * Carries the server's request id onto the client-side Error.
+ *
+ * The API already stamps every response with `x-request-id` and repeats it in the
+ * error envelope; nothing on the phone was reading it. Without it a patient's "it
+ * said something went wrong" is unmatchable against the logs - there is no shared
+ * identifier between the two halves of one failure, which is precisely the gap
+ * P9-OBS-01 exists to close.
+ *
+ * Attached to the Error rather than shown in the message: a patient does not need a
+ * UUID, and a support conversation or a future crash report does.
+ */
+function withRequestId(error: Error, res: Response, body: ApiError | null): Error {
+  const fromHeader = res.headers.get('x-request-id');
+  const fromBody = (body?.error as { requestId?: string } | undefined)?.requestId;
+  const id = fromBody ?? fromHeader ?? undefined;
+  if (id !== undefined) (error as Error & { requestId?: string }).requestId = id;
+  (error as Error & { status?: number }).status = res.status;
+  return error;
 }
