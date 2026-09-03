@@ -6139,3 +6139,67 @@ Each was caught by checking the port afterwards rather than trusting "63 passed"
   `node dist/main.js`, which does not match a process filter on the repo path.
 - **A test that cannot fail proves nothing.** Both the webhook exemption and the authz
   matrix were falsified deliberately before being trusted.
+
+---
+
+## 2026-09-04 — Two things CI proved, and one thing only reading the code could
+
+### CI runs the console walkthrough now, after five red rounds
+
+The 63 checks had been passing for two phases and had never once run outside this
+laptop. Getting them into CI took five attempts, and every failure was a different
+thing the tests had quietly been standing on:
+
+| Round | Failure | What it actually was |
+|---|---|---|
+| 1 | `ECONNRESET` | the test opened 30 sockets at once; a slower runner reset some |
+| 2 | `Cannot find module dist/main.js` | turbo ran the web test beside the API build it needs |
+| 3 | `ENOENT: apps/api/.env` | the secret was read from a gitignored file |
+| 4 | `invalid URI query parameter: "schema"` | psql refuses Prisma's connection string |
+| 5 | `Cannot find module '@opd/contracts'` | the seed step ran before the build it imports |
+
+None of it was visible while the only place these tests ran was the machine that
+happened to have a container named `opd-postgres`, a built `dist`, an `.env`, and a
+seeded database. **CI is the only environment that tells the truth about what a test
+depends on** - which was the point of the task, independent of any bug it finds.
+
+The one design question worth recording: should the walkthrough depend on seeded data
+at all? It signs in as `reception@apollo.test` and `doctor@apollo.test`, seeded
+accounts with real argon2 hashes and role memberships. Making the fixture
+self-sufficient would mean duplicating the seed. The dependency stays deliberately;
+CI seeds after building, and `createSession` now says "run the seed first" rather
+than failing as `undefined is not iterable`.
+
+### The staff board was missing, and no test would ever have said so
+
+Prompted by the user pushing back on a run of green-the-build fixes: *"don't just
+resolve the issue - make sure the code aligns with everything else."*
+
+So the Phase 9 ETA work was audited for whether it CONNECTED, rather than whether it
+passed. Result:
+
+- **Patients: wired.** Mobile reads `etaFrom`/`etaTo`, which come from `windowsFor()`.
+  The dead-time fix reaches phones and makes the token screen's estimate honest.
+- **Staff: not wired at all.** `GET /sessions/:id/eta` has served pace, basis,
+  sample size and `runningBehind` since Phase 7, and no screen ever asked. Three
+  dead-time fields had just been added to a contract nobody read.
+
+`runningBehind` is named in docs/PRD.md 195 as a staff-facing flag. It had never
+been rendered. A receptionist deciding whether to warn the room was guessing at a
+number the server already knew.
+
+The board now carries it, one question per figure, and **every figure states what it
+stands on** - on the seeded clinic, "2.4 min from 18 consultations, today weighted
+highest" beside "2 min, starting estimate - 1 so far, needs 2". One is a measurement
+and the other an admission; showing them identically would be the board's first lie.
+
+**The lesson is the method, not the panel.** Tests answer "does it work". Only reading
+the code answers "is it connected to anything". Everything was green while three
+fields went nowhere.
+
+### Trap: a passing build can serve stale HTML
+
+The four new walkthrough checks failed on their first run and the panel looked broken.
+It was not. `pnpm --filter @opd/web test` runs the package script directly and bypasses
+turbo, so `next start` was serving the previous build. Run it through turbo, or build
+first, when testing a UI change.
