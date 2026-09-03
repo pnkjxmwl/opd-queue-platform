@@ -90,12 +90,29 @@ async function toError(res: Response): Promise<Error> {
     // there - a queue rejection carries `{command, from}` - and pasting that after a
     // sentence written for a receptionist turned "someone acted first" into
     // "(command: COMPLETE_CONSULTATION; from: COMPLETED)".
-    const details =
-      body.error.code === 'VALIDATION_FAILED' && body.error.details
-        ? ` (${Object.entries(body.error.details)
-            .map(([field, message]) => `${field}: ${String(message)}`)
-            .join('; ')})`
-        : '';
+    // A validation failure is the one error whose server message is useless to the
+    // person reading it: "Request validation failed" tells a receptionist nothing
+    // they can act on, and appending `(startTime: must be HH:mm)` reads like a stack
+    // trace. The DETAILS are the message here, so they replace it rather than
+    // decorate it (trap 34; docs/Rules.md 9 - surface server rejections clearly).
+    //
+    // Every other error already carries a sentence written for a human, and its
+    // `details` are machine context - a queue rejection carries {command, from} -
+    // so pasting those after it turned "someone acted first" into
+    // "(command: COMPLETE_CONSULTATION; from: COMPLETED)".
+    if (body.error.code === 'VALIDATION_FAILED' && body.error.details) {
+      const fields = Object.entries(body.error.details).map(
+        ([field, message]) => `${fieldLabel(field)} — ${String(message)}`,
+      );
+      if (fields.length > 0) {
+        const requestId =
+          (body.error as { requestId?: string }).requestId ??
+          res.headers.get('x-request-id') ??
+          undefined;
+        return new ApiCallError(body.error.code, fields.join('; '), requestId);
+      }
+    }
+    const details = '';
     const requestId =
       (body.error as { requestId?: string }).requestId ??
       res.headers.get('x-request-id') ??
@@ -108,4 +125,23 @@ async function toError(res: Response): Promise<Error> {
     const suffix = requestId === null ? '' : ` (ref ${requestId})`;
     return new Error(`Request failed with ${res.status}${suffix}`);
   }
+}
+
+/**
+ * `startTime` -> `Start time`.
+ *
+ * The keys come from the Zod schema, so they are the API's field names rather than
+ * anything a receptionist has seen. Splitting camelCase and capitalising the first
+ * word is enough to make them recognisable next to the form labels beside them - and
+ * it is worth doing here rather than maintaining a translation table that silently
+ * falls out of date the moment a schema gains a field.
+ */
+function fieldLabel(field: string): string {
+  if (field === '(root)') return 'This form';
+  const words = field
+    .split('.')
+    .pop()!
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
