@@ -4,7 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { auth, createTestApp, request, resetDb, signup } from './helpers';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { FakeRazorpay, WEBHOOK_SECRET } from './razorpay.fake';
-import { RazorpayClient, type RazorpayApi } from '../src/modules/payments/razorpay.client';
+import { RazorpayClient } from '../src/modules/payments/razorpay.client';
 import { ReservationSweeper } from '../src/modules/queue/reservation-sweeper';
 import { QueuePolicyService } from '../src/modules/config/queue-policy.service';
 import { dateColumnFromString, istToday } from '../src/common/ist';
