@@ -65,7 +65,9 @@ const listableSession = (date?: Date): Prisma.OPDSessionWhereInput => ({
 const SESSION_INCLUDE = {
   hospital: { select: { id: true, name: true, area: true, address: true } },
   department: { select: { id: true, name: true } },
-  currentProvider: { select: { id: true, name: true, specialization: true, defaultConsultMins: true } },
+  currentProvider: {
+    select: { id: true, name: true, specialization: true, defaultConsultMins: true, photoUrl: true },
+  },
 } as const;
 
 type SessionRow = Prisma.OPDSessionGetPayload<{ include: typeof SESSION_INCLUDE }>;
@@ -170,6 +172,7 @@ export class DiscoveryService {
         name: row.name,
         city: row.city,
         area: row.area,
+        photoUrl: row.photoUrl,
         todaySessionCount: counts.get(row.id) ?? 0,
       })),
       total,
@@ -192,6 +195,7 @@ export class DiscoveryService {
       city: row.city,
       area: row.area,
       address: row.address,
+      photoUrl: row.photoUrl,
       todaySessionCount: counts.get(row.id) ?? 0,
     };
   }
@@ -610,6 +614,7 @@ const toDoctorDto = (row: DoctorRow): PublicDoctor => ({
   id: row.id,
   name: row.name,
   specialization: row.specialization,
+  photoUrl: row.photoUrl,
   defaultConsultMins: row.defaultConsultMins,
   departmentId: row.departmentId,
   departmentName: row.department.name,
@@ -631,6 +636,7 @@ const toCardDto = (row: SessionRow, snapshot: QueueSnapshot): SessionCard => ({
   doctorId: row.currentProvider.id,
   doctorName: row.currentProvider.name,
   doctorSpecialization: row.currentProvider.specialization,
+  doctorPhotoUrl: row.currentProvider.photoUrl,
   isSubstitute: row.currentProviderDoctorId !== row.originalDoctorId,
 
   // @db.Date comes back as UTC midnight; slicing the ISO string is the only safe
