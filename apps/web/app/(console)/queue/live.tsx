@@ -94,21 +94,42 @@ export function Live({ sessionId }: { sessionId: string }) {
   }, [router, sessionId]);
 
   return (
-    <p className="mt-6 text-caption text-ink-muted" role="status">
-      {status === 'live' ? (
-        <>
-          <span aria-hidden>●</span> Live — this board updates itself as the queue moves.
-        </>
-      ) : status === 'connecting' ? (
-        'Connecting for live updates…'
-      ) : (
-        // Never silently stale. If the connection is gone the receptionist needs to
-        // know the screen has stopped moving, because two staff on one stale board is
-        // exactly how a patient gets called twice.
-        <>
-          <span aria-hidden>○</span> Not live — reload to see the latest.
-        </>
-      )}
+    <p
+      role="status"
+      className={
+        'inline-flex items-center gap-1.5 self-start rounded-full border px-2.5 py-1 text-caption ' +
+        (status === 'live'
+          ? 'border-line bg-surface text-ink-muted'
+          : status === 'connecting'
+            ? 'border-line bg-surface text-ink-disabled'
+            : 'border-warning-line bg-warning-bg text-warning')
+      }
+    >
+      {/*
+        A dot AND a word. The dot is the thing an eye catches from a metre away and
+        the word is what makes it mean something - docs/Design.md 8 forbids the dot
+        on its own, and this is the indicator that decides whether a receptionist
+        trusts the numbers above it.
+      */}
+      <span
+        aria-hidden
+        className={
+          'h-1.5 w-1.5 rounded-full ' +
+          (status === 'live'
+            ? 'animate-breathe bg-success'
+            : status === 'connecting'
+              ? 'bg-ink-disabled'
+              : 'bg-warning')
+        }
+      />
+      {status === 'live'
+        ? 'Live — this board updates itself'
+        : status === 'connecting'
+          ? 'Connecting for live updates…'
+          : // Never silently stale. If the connection is gone the receptionist needs
+            // to know the screen has stopped moving, because two staff on one stale
+            // board is exactly how a patient gets called twice.
+            'Not live — reload to see the latest'}
     </p>
   );
 }

@@ -4,7 +4,6 @@ import type { MeResponse, Patient } from '@opd/contracts';
 import { useApi } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
 import { useCity } from '../../../lib/city';
-import { Icon } from '../../../lib/icon';
 import { QueryState, Row } from '../../../lib/discovery';
 import { Avatar, Button, Screen, SectionLabel } from '../../../lib/ui';
 import { theme } from '../../../theme';
@@ -49,14 +48,19 @@ export default function Profile() {
         />
 
         <SectionLabel>Your visits</SectionLabel>
-        {/* Honest about what does not exist yet, rather than an empty list that
-            looks broken - the same rule the disabled Join button follows. */}
-        <View style={styles.soon}>
-          <Icon name="clock" size={20} color={theme.color.primary} />
-          <Text style={styles.soonText}>
-            Your tokens and past visits will appear here once booking is switched on.
-          </Text>
-        </View>
+        {/*
+          This said "your tokens and past visits will appear here once booking is
+          switched on" - written in Phase 3, still on screen four phases after
+          booking shipped and a My Visits tab appeared next to this one. Stale copy
+          that describes a product as unfinished is worse than no copy: it is the
+          app telling a paying patient not to trust it.
+        */}
+        <Row
+          icon="clipboard"
+          title="Tokens and past visits"
+          subtitle="Open the My Visits tab"
+          onPress={() => router.push('/visits')}
+        />
 
         <View style={styles.signOut}>
           <Button title="Sign out" variant="secondary" icon="log-out" onPress={() => void signOut()} />
@@ -72,21 +76,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.space[4],
-    paddingVertical: theme.space[4],
+    paddingVertical: theme.space[2],
+    paddingBottom: theme.space[4],
   },
   identityText: { flex: 1, gap: 2 },
-  name: { ...theme.font.h1, color: theme.color.text },
+  // H2, not H1. This is a list screen with a person at the top of it, not a title
+  // page - at 28px the name outweighed every row beneath it and the screen read as
+  // a profile card with some links stuck underneath.
+  name: { ...theme.font.h2, color: theme.color.text },
   muted: { ...theme.font.body, color: theme.color.textMuted },
-
-  soon: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.space[3],
-    backgroundColor: theme.color.teal[50],
-    borderRadius: theme.radius.lg,
-    padding: theme.space[4],
-  },
-  soonText: { ...theme.font.body, color: theme.color.text, flex: 1 },
 
   signOut: { marginTop: theme.space[4] },
 });

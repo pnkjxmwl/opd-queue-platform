@@ -1,27 +1,43 @@
+import Link from 'next/link';
 import type { Doctor, OPDSession, Paginated } from '@opd/contracts';
 import { apiGet } from '../../../../lib/api';
 import { requireAdminHospital } from '../../../../lib/tenant';
-import { Card, Empty, ErrorBanner, Pager, button, buttonQuiet, input, label, td, th } from '../ui';
+import { Icon } from '../../../../components/icon';
+import {
+  Banner,
+  Card,
+  Disclosure,
+  EmptyState,
+  ErrorBanner,
+  Field,
+  Pager,
+  TableCard,
+  btn,
+  input,
+  table,
+  td,
+  th,
+  tr,
+} from '../../../../components/ui';
 import { createSession, generateSessions } from './actions';
 // One formatter for the whole console, so a session reads the same on every screen
 // it appears on - and the same as it reads in the patient's app.
-import { istTime } from '../../queue/ui';
+import { SessionStatusBadge, istDateLabel, istTime } from '../../queue/ui';
 
 const PATH = '/config/sessions';
 const LIMIT = 20;
 
 const rupees = (paise: number) => (paise / 100).toFixed(2);
 
-/** Status is never colour alone - each carries its own word. */
-const STATUS_STYLE: Record<string, string> = {
-  OPEN_FOR_REGISTRATION: 'bg-success-bg text-success',
-  ACTIVE: 'bg-info-bg text-info',
-  SCHEDULED: 'bg-canvas text-ink-muted',
-  COMPLETED: 'bg-canvas text-ink-muted',
-  CANCELLED: 'bg-danger-bg text-danger',
-  ENDED_EARLY: 'bg-warning-bg text-warning',
-};
-
+/**
+ * Sessions - dated instances of the working blocks.
+ *
+ * **Generating is the everyday action; adding one by hand is the exception**, and
+ * the page used to give them two identical cards stacked in the order they were
+ * written. Generate is now the primary action with its own card; the one-off form
+ * sits behind a disclosure under it, because an admin needs it perhaps once a month
+ * and it is seven fields wide.
+ */
 export default async function SessionsPage({
   searchParams,
 }: {
@@ -47,138 +63,117 @@ export default async function SessionsPage({
 
   const doctorName = new Map(doctors.items.map((d) => [d.id, d.name] as const));
 
-  const generated = params.created !== undefined;
-
   return (
     <>
       <ErrorBanner message={params.error} />
 
-      {generated && (
-        <p
-          role="status"
-          className="flex items-start gap-2 rounded-md bg-success-bg px-3 py-2 text-body text-success"
-        >
-          <span aria-hidden="true">✓</span>
+      {params.created !== undefined && (
+        <Banner tone="success">
           <span className="tabular-nums">
             <strong className="font-semibold">{params.created}</strong> session
             {params.created === '1' ? '' : 's'} created,{' '}
             <strong className="font-semibold">{params.skipped}</strong> already existed
             {params.skipped !== '0' && ' — running this twice is safe'}.
           </span>
-        </p>
+        </Banner>
       )}
 
-      <Card title="Generate sessions from schedules">
+      <Card
+        title="Generate sessions from schedules"
+        description="Safe to run twice — a session that already exists is skipped, not duplicated."
+      >
         <form action={generateSessions} className="flex flex-wrap items-end gap-3">
-          <div className="w-48">
-            <label className={label} htmlFor="generate-date">
-              Date <span className="text-ink-disabled">(blank = today)</span>
-            </label>
-            <input id="generate-date" name="date" type="date" className={input + ' mt-1'} />
-          </div>
-          <button type="submit" className={button}>
+          <Field
+            id="generate-date"
+            label="Date"
+            optional
+            className="w-48"
+            hint="Blank uses today in Asia/Kolkata."
+          >
+            <input id="generate-date" name="date" type="date" className={input} />
+          </Field>
+          <button type="submit" className={btn('primary')}>
+            <Icon name="refresh-cw" className="h-4 w-4" />
             Generate
           </button>
         </form>
-        <p className="mt-3 text-caption text-ink-muted">
-          Safe to run twice — a session that already exists is skipped, not duplicated. Leave the
-          date blank and the server uses today in Asia/Kolkata.
-        </p>
+
+        <div className="mt-4 border-t border-line-soft pt-3">
+          <Disclosure summary="Or add a single session by hand">
+            {doctors.items.length === 0 ? (
+              <p className="text-body text-ink-muted">Add a doctor first.</p>
+            ) : (
+              <form action={createSession} className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                <Field id="session-doctor" label="Doctor">
+                  <select id="session-doctor" name="doctorId" required className={input}>
+                    {doctors.items.map((doctor) => (
+                      <option key={doctor.id} value={doctor.id}>
+                        {doctor.name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field id="session-date" label="Date">
+                  <input id="session-date" name="date" type="date" required className={input} />
+                </Field>
+                <Field id="session-prefix" label="Token prefix">
+                  <input
+                    id="session-prefix"
+                    name="tokenPrefix"
+                    maxLength={4}
+                    defaultValue="A"
+                    className={input}
+                  />
+                </Field>
+                <Field id="session-start" label="Start">
+                  <input
+                    id="session-start"
+                    name="startTime"
+                    type="time"
+                    required
+                    defaultValue="10:00"
+                    className={input + ' tabular-nums'}
+                  />
+                </Field>
+                <Field id="session-end" label="End">
+                  <input
+                    id="session-end"
+                    name="endTime"
+                    type="time"
+                    required
+                    defaultValue="13:00"
+                    className={input + ' tabular-nums'}
+                  />
+                </Field>
+                <Field id="session-fee" label="Fee (₹)">
+                  <input
+                    id="session-fee"
+                    name="feeRupees"
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    required
+                    defaultValue={500}
+                    className={input + ' tabular-nums'}
+                  />
+                </Field>
+                <div className="sm:col-span-2 xl:col-span-3">
+                  <button type="submit" className={btn('quiet')}>
+                    Create session
+                  </button>
+                </div>
+              </form>
+            )}
+          </Disclosure>
+        </div>
       </Card>
 
-      <Card title="Add a one-off session">
-        {doctors.items.length === 0 ? (
-          <Empty>Add a doctor first.</Empty>
-        ) : (
-          <form action={createSession} className="flex flex-wrap items-end gap-3">
-            <div className="min-w-52">
-              <label className={label} htmlFor="session-doctor">
-                Doctor
-              </label>
-              <select id="session-doctor" name="doctorId" required className={input + ' mt-1'}>
-                {doctors.items.map((doctor) => (
-                  <option key={doctor.id} value={doctor.id}>
-                    {doctor.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="w-44">
-              <label className={label} htmlFor="session-date">
-                Date
-              </label>
-              <input
-                id="session-date"
-                name="date"
-                type="date"
-                required
-                className={input + ' mt-1'}
-              />
-            </div>
-            <div className="w-32">
-              <label className={label} htmlFor="session-start">
-                Start
-              </label>
-              <input
-                id="session-start"
-                name="startTime"
-                type="time"
-                required
-                defaultValue="10:00"
-                className={input + ' mt-1 tabular-nums'}
-              />
-            </div>
-            <div className="w-32">
-              <label className={label} htmlFor="session-end">
-                End
-              </label>
-              <input
-                id="session-end"
-                name="endTime"
-                type="time"
-                required
-                defaultValue="13:00"
-                className={input + ' mt-1 tabular-nums'}
-              />
-            </div>
-            <div className="w-32">
-              <label className={label} htmlFor="session-fee">
-                Fee (₹)
-              </label>
-              <input
-                id="session-fee"
-                name="feeRupees"
-                type="number"
-                min={0}
-                step="0.01"
-                required
-                defaultValue={500}
-                className={input + ' mt-1 tabular-nums'}
-              />
-            </div>
-            <div className="w-28">
-              <label className={label} htmlFor="session-prefix">
-                Token prefix
-              </label>
-              <input
-                id="session-prefix"
-                name="tokenPrefix"
-                maxLength={4}
-                defaultValue="A"
-                className={input + ' mt-1'}
-              />
-            </div>
-            <button type="submit" className={buttonQuiet}>
-              Create session
-            </button>
-          </form>
-        )}
-      </Card>
-
-      <Card title="Sessions">
-        <form className="mb-4 flex flex-wrap items-end gap-3">
-          <div className="w-48">
-            <label className={label} htmlFor="filter-date">
+      <TableCard
+        title="Sessions"
+        description={params.date ? `Filtered to ${istDateLabel(params.date)}` : 'All dates'}
+        actions={
+          <form className="flex items-end gap-2">
+            <label className="sr-only" htmlFor="filter-date">
               Filter by date
             </label>
             <input
@@ -186,23 +181,29 @@ export default async function SessionsPage({
               name="date"
               type="date"
               defaultValue={params.date ?? ''}
-              className={input + ' mt-1'}
+              className={input + ' w-[10.5rem]'}
             />
-          </div>
-          <button type="submit" className={buttonQuiet}>
-            Apply
-          </button>
-        </form>
-
+            <button type="submit" className={btn('quiet', 'sm')}>
+              Apply
+            </button>
+            {params.date !== undefined && (
+              <Link href={PATH} className={btn('ghost', 'sm')}>
+                Clear
+              </Link>
+            )}
+          </form>
+        }
+      >
         {page.items.length === 0 ? (
-          <Empty>
-            No sessions{params.date ? ` on ${params.date}` : ''} yet. Generate them from the
-            schedules above.
-          </Empty>
+          <EmptyState icon="calendar" title="No sessions here yet">
+            {params.date
+              ? `Nothing scheduled on ${istDateLabel(params.date)}. Generate them from the schedules above.`
+              : 'Generate them from the schedules above, or add a one-off.'}
+          </EmptyState>
         ) : (
-          <table className="w-full border-collapse">
+          <table className={table}>
             <thead>
-              <tr className="border-b border-line">
+              <tr>
                 <th className={th}>Date</th>
                 <th className={th}>Doctor</th>
                 <th className={th}>Window (IST)</th>
@@ -212,25 +213,19 @@ export default async function SessionsPage({
             </thead>
             <tbody>
               {page.items.map((session) => (
-                <tr key={session.id} className="border-b border-line last:border-0">
-                  <td className={td + ' tabular-nums'}>{session.date}</td>
-                  <td className={td}>
+                <tr key={session.id} className={tr}>
+                  <td className={td + ' whitespace-nowrap tabular-nums'}>{session.date}</td>
+                  <td className={td + ' font-medium'}>
                     {doctorName.get(session.originalDoctorId) ?? 'Unknown doctor'}
                   </td>
-                  <td className={td + ' tabular-nums'}>
-                    {istTime(session.scheduledStart)}–
-                    {istTime(session.scheduledEnd)}
+                  <td className={td + ' whitespace-nowrap tabular-nums text-ink-muted'}>
+                    {istTime(session.scheduledStart)}–{istTime(session.scheduledEnd)}
                   </td>
-                  <td className={td + ' tabular-nums'}>₹{rupees(session.feePaise)}</td>
+                  <td className={td + ' tabular-nums text-ink-muted'}>
+                    ₹{rupees(session.feePaise)}
+                  </td>
                   <td className={td}>
-                    <span
-                      className={
-                        'rounded-full px-2.5 py-0.5 text-caption ' +
-                        (STATUS_STYLE[session.status] ?? 'bg-canvas text-ink-muted')
-                      }
-                    >
-                      {session.status.replaceAll('_', ' ')}
-                    </span>
+                    <SessionStatusBadge status={session.status} />
                   </td>
                 </tr>
               ))}
@@ -245,7 +240,7 @@ export default async function SessionsPage({
           offset={page.offset}
           filters={{ date: params.date }}
         />
-      </Card>
+      </TableCard>
     </>
   );
 }

@@ -77,11 +77,12 @@ const styles = StyleSheet.create({
   screen: {
     flexGrow: 1,
     justifyContent: 'center',
-    padding: theme.space[5],
+    padding: theme.space[6],
     gap: theme.space[4],
-    backgroundColor: theme.color.canvas,
+    // Matches login: white ground, so the field borders are the only edges on screen.
+    backgroundColor: theme.color.surface,
   },
-  intro: { gap: theme.space[1] },
+  intro: { gap: theme.space[1], marginBottom: theme.space[2] },
   title: { ...theme.font.h1, color: theme.color.text },
-  subtitle: { ...theme.font.body, color: theme.color.textMuted },
+  subtitle: { ...theme.font.bodyLg, color: theme.color.textMuted },
 });

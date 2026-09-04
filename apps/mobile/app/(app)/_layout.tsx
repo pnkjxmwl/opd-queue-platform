@@ -1,4 +1,5 @@
 import { Tabs, router } from 'expo-router';
+import { Platform, StyleSheet } from 'react-native';
 import { Icon } from '../../lib/icon';
 import { theme } from '../../theme';
 
@@ -20,11 +21,23 @@ export default function AppLayout() {
         headerShown: false,
         tabBarActiveTintColor: theme.color.primary,
         tabBarInactiveTintColor: theme.color.textDisabled,
+        /*
+          A hairline, not the platform's 1px grey slab, and enough height that the
+          label is not pressed against the home indicator on a modern phone. The
+          default bar sat 49pt tall with a 1px `#000`-ish divider, which is the one
+          piece of chrome on every screen and the fastest way to make a considered
+          app look like a default one.
+        */
         tabBarStyle: {
           backgroundColor: theme.color.surface,
           borderTopColor: theme.color.border,
+          borderTopWidth: StyleSheet.hairlineWidth,
+          height: Platform.OS === 'ios' ? 88 : 64,
+          paddingTop: 6,
+          paddingBottom: Platform.OS === 'ios' ? 28 : 8,
         },
-        tabBarLabelStyle: theme.font.caption,
+        tabBarItemStyle: { paddingVertical: 0 },
+        tabBarLabelStyle: { ...theme.font.caption, marginTop: 2 },
       }}
     >
       <Tabs.Screen

@@ -108,12 +108,21 @@ export function Scanner({ sessionId }: { sessionId: string }) {
         <input type="hidden" name="checkInCode" ref={codeRef} />
       </form>
 
-      <div className="relative mx-auto max-w-md overflow-hidden rounded-lg border border-line bg-ink">
+      {/*
+        `aspect-[4/3]` on the frame, not on the video.
+
+        A <video> with no stream is zero pixels tall, so the overlay - which is
+        `absolute inset-0` - had no box to fill and every message it carries
+        ("Starting the camera...", "Camera permission was declined") rendered into
+        nothing. The one state where the desk most needs an explanation was the one
+        state that showed none.
+      */}
+      <div className="relative mx-auto aspect-[4/3] w-full max-w-md overflow-hidden rounded-lg border border-line bg-ink">
         {/* Kept mounted even when unavailable: qr-scanner attaches to this element,
             and unmounting it on an error would make a later retry impossible. */}
-        <video ref={videoRef} className="block w-full" muted playsInline />
+        <video ref={videoRef} className="block h-full w-full object-cover" muted playsInline />
         {state.kind !== 'scanning' && (
-          <div className="absolute inset-0 flex items-center justify-center bg-canvas p-6 text-center text-body text-ink-muted">
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-sunken p-6 text-center text-body text-ink-muted">
             {state.kind === 'starting'
               ? 'Starting the camera…'
               : state.kind === 'submitting'

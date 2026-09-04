@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import type { ApiError } from '@opd/contracts';
+import { AuthShell } from '../../components/auth-shell';
+import { Banner, Field, btn, inputLg } from '../../components/ui';
 
 /**
  * Where an invited doctor or receptionist sets their password and gets a session.
@@ -16,6 +18,8 @@ export default function AcceptInvitePage() {
   const [confirm, setConfirm] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+
+  const mismatch = confirm !== '' && password !== confirm;
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -50,63 +54,70 @@ export default function AcceptInvitePage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-6">
-      <h1 className="text-h1 text-primary">Accept your invitation</h1>
-      <p className="mt-2 text-body text-ink-muted">
-        Choose a password to finish setting up your OPD Console account.
-      </p>
-
-      <form onSubmit={onSubmit} className="mt-8 flex flex-col gap-4" noValidate>
-        <label className="flex flex-col gap-1.5">
-          <span className="text-label">New password</span>
+    <AuthShell
+      title="Accept your invitation"
+      intro="Choose a password to finish setting up your account."
+      footer={
+        <>
+          If you already have an OPD Console password, it stays as it is — accepting only adds this
+          hospital to your account.
+        </>
+      }
+    >
+      <form onSubmit={onSubmit} className="flex flex-col gap-4" noValidate>
+        <Field id="password" label="New password" hint="At least 10 characters.">
           <input
+            id="password"
             type="password"
             required
             minLength={10}
             autoComplete="new-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="h-12 rounded-sm border border-line bg-surface px-3 text-body outline-none focus:ring-2 focus:ring-accent"
+            className={inputLg}
           />
-          <span className="text-caption text-ink-muted">At least 10 characters.</span>
-        </label>
+        </Field>
 
-        <label className="flex flex-col gap-1.5">
-          <span className="text-label">Confirm password</span>
+        <Field id="confirm" label="Confirm password">
           <input
+            id="confirm"
             type="password"
             required
             minLength={10}
             autoComplete="new-password"
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
-            className="h-12 rounded-sm border border-line bg-surface px-3 text-body outline-none focus:ring-2 focus:ring-accent"
+            aria-invalid={mismatch}
+            aria-describedby={mismatch ? 'confirm-mismatch' : undefined}
+            className={inputLg + (mismatch ? ' border-danger' : '')}
           />
-        </label>
+        </Field>
 
-        {error && (
-          <p
-            role="alert"
-            className="flex items-start gap-2 rounded-sm bg-danger-bg px-3 py-2 text-body text-danger"
-          >
-            <span aria-hidden="true">⚠</span>
-            <span>{error}</span>
+        {/*
+          Said the moment the two stop matching, not after the form is submitted.
+          The old page only told you on submit, which on a 12-character password is
+          one retype too late.
+        */}
+        {mismatch && (
+          <p id="confirm-mismatch" className="-mt-2 text-caption text-danger">
+            These two do not match yet.
           </p>
+        )}
+
+        {error !== null && (
+          <Banner tone="danger" role="alert">
+            {error}
+          </Banner>
         )}
 
         <button
           type="submit"
-          disabled={pending}
-          className="h-12 rounded-sm bg-primary text-label text-white disabled:bg-ink-disabled"
+          disabled={pending || mismatch}
+          className={btn('primary', 'lg') + ' mt-1 w-full'}
         >
           {pending ? 'Setting up…' : 'Set password and sign in'}
         </button>
       </form>
-
-      <p className="mt-6 text-caption text-ink-muted">
-        If you already have an OPD Console password, it stays as it is — accepting only adds this
-        hospital to your account.
-      </p>
-    </main>
+    </AuthShell>
   );
 }

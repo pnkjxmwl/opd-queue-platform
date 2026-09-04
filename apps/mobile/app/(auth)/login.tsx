@@ -29,9 +29,13 @@ export default function Login() {
     <ScrollView contentContainerStyle={styles.screen} keyboardShouldPersistTaps="handled">
       <Stack.Screen options={{ headerShown: false }} />
 
+      {/*
+        Brand, centred, then the greeting left-aligned beneath it - the shape every
+        reference auth screen uses (docs/ui-screens/01_login.png).
+      */}
       <View style={styles.brand}>
         <View style={styles.mark}>
-          <Icon name="activity" size={26} color="#FFFFFF" />
+          <Icon name="activity" size={30} color="#FFFFFF" />
         </View>
         <Text style={styles.wordmark}>OPD Queue</Text>
       </View>
@@ -77,23 +81,31 @@ const styles = StyleSheet.create({
   screen: {
     flexGrow: 1,
     justifyContent: 'center',
-    padding: theme.space[5],
+    padding: theme.space[6],
     gap: theme.space[4],
-    backgroundColor: theme.color.canvas,
+    // White, not canvas. The reference auth screens sit on white and the fields
+    // carry the only borders on the page; a grey ground makes a white input look
+    // like a card sitting on something, which is one surface too many.
+    backgroundColor: theme.color.surface,
   },
-  brand: { alignItems: 'center', gap: theme.space[3], marginBottom: theme.space[2] },
+  brand: { alignItems: 'center', gap: theme.space[3], marginBottom: theme.space[4] },
   mark: {
-    width: 56,
-    height: 56,
-    borderRadius: theme.radius.lg,
+    width: 64,
+    height: 64,
+    // A circle, per docs/ui-screens/01_login.png.
+    borderRadius: theme.radius.full,
     backgroundColor: theme.color.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    ...theme.elevation.md,
   },
-  wordmark: { ...theme.font.h3, color: theme.color.primary },
-  intro: { gap: theme.space[1] },
+  wordmark: { ...theme.font.h2, color: theme.color.primary },
+  intro: { gap: theme.space[1], marginBottom: theme.space[2] },
   title: { ...theme.font.h1, color: theme.color.text },
-  subtitle: { ...theme.font.body, color: theme.color.textMuted },
-  link: { ...theme.font.label, color: theme.color.primary, textAlign: 'center' },
+  subtitle: { ...theme.font.bodyLg, color: theme.color.textMuted },
+  link: {
+    ...theme.font.bodyLg,
+    color: theme.color.primary,
+    textAlign: 'center',
+    marginTop: theme.space[2],
+  },
 });

@@ -1,3 +1,7 @@
+import Link from 'next/link';
+import { Notice } from '../../components/notice';
+import { btn } from '../../components/ui';
+
 /**
  * A console URL that does not exist.
  *
@@ -9,18 +13,17 @@
  */
 export default function ConsoleNotFound() {
   return (
-    <div className="max-w-lg">
-      <h1 className="text-h1">Page not found</h1>
-      <p className="mt-2 text-body-lg text-ink-muted">
-        This page does not exist, or it is not part of your hospital. If you followed a bookmark, it
-        may be out of date.
-      </p>
-      <a
-        href="/"
-        className="mt-6 inline-flex h-11 items-center rounded-md bg-primary px-4 text-label text-white hover:bg-teal-800"
-      >
-        Back to overview
-      </a>
-    </div>
+    <Notice
+      icon="search"
+      title="Page not found"
+      actions={
+        <Link href="/" className={btn('primary')}>
+          Back to overview
+        </Link>
+      }
+    >
+      This page does not exist, or it is not part of your hospital. If you followed a bookmark, it
+      may be out of date.
+    </Notice>
   );
 }

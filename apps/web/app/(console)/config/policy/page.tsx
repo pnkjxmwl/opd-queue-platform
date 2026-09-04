@@ -1,7 +1,8 @@
 import type { QueuePolicy } from '@opd/contracts';
 import { apiGet } from '../../../../lib/api';
 import { requireAdminHospital } from '../../../../lib/tenant';
-import { Card, ErrorBanner, button, input, label } from '../ui';
+import { Card, ErrorBanner, btn, input, label } from '../../../../components/ui';
+import { Icon } from '../../../../components/icon';
 import { savePolicy } from './actions';
 
 /**
@@ -29,14 +30,14 @@ export default async function PolicyPage({
         <Card title="Ordering and eligibility">
           <div className="grid gap-5 sm:grid-cols-2">
             <div>
-              <label className={label} htmlFor="orderingStrategy">
+              <label className={label + ' mb-1 block'} htmlFor="orderingStrategy">
                 Call order
               </label>
               <select
                 id="orderingStrategy"
                 name="orderingStrategy"
                 defaultValue={policy.orderingStrategy}
-                className={input + ' mt-1'}
+                className={input}
               >
                 <option value="TOKEN_ORDER">Token order (earliest booking first)</option>
               </select>
@@ -88,14 +89,14 @@ export default async function PolicyPage({
               hint="Re-calls allowed before the entry is skipped."
             />
             <div>
-              <label className={label} htmlFor="requeueBehavior">
+              <label className={label + ' mb-1 block'} htmlFor="requeueBehavior">
                 Then
               </label>
               <select
                 id="requeueBehavior"
                 name="requeueBehavior"
                 defaultValue={policy.requeueBehavior}
-                className={input + ' mt-1'}
+                className={input}
               >
                 <option value="END_OF_QUEUE">Move to the end of the queue</option>
                 <option value="NO_REQUEUE">Mark as a no-show</option>
@@ -193,11 +194,21 @@ export default async function PolicyPage({
           </div>
         </Card>
 
-        <div className="flex items-center gap-4">
-          <button type="submit" className={button}>
+        {/*
+          A save bar that follows the form down.
+
+          This screen is five cards and about twenty controls, and the only Save was
+          at the very bottom of it - so an admin who changed the grace period at the
+          top had to scroll past four unrelated sections to commit it, or scroll back
+          up to check they had. Sticking it to the foot of the viewport is what makes
+          a long settings form feel finished rather than merely long.
+        */}
+        <div className="sticky bottom-0 -mx-4 mt-1 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-line bg-surface/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-surface/85 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+          <button type="submit" className={btn('primary')}>
+            <Icon name="check" className="h-4 w-4" />
             Save policy
           </button>
-          <span className="text-caption text-ink-muted tabular-nums">
+          <span className="text-caption tabular-nums text-ink-muted">
             Last updated {new Date(policy.updatedAt).toISOString().slice(0, 16).replace('T', ' ')}{' '}
             UTC
           </span>
@@ -218,18 +229,29 @@ function Toggle({
   title: string;
   hint: string;
 }) {
+  /*
+    A bordered row, not a bare checkbox on the page.
+
+    Three of these in a column with nothing around them read as a list of sentences
+    that happen to have boxes next to them; the hit area was the label text and
+    whatever the browser gave the 20px box. The row IS the target now, and it
+    responds to a hover, so it is visibly a control before it is pressed.
+  */
   return (
-    <label className="flex cursor-pointer items-start gap-3" htmlFor={name}>
+    <label
+      className="flex cursor-pointer items-start gap-3 rounded-md border border-line bg-surface px-3 py-2.5 transition-colors hover:border-line-strong hover:bg-hover has-[:checked]:border-teal-200 has-[:checked]:bg-teal-50/40"
+      htmlFor={name}
+    >
       <input
         id={name}
         name={name}
         type="checkbox"
         defaultChecked={checked}
-        className="mt-1 h-5 w-5 rounded border-line text-primary focus:ring-2 focus:ring-teal-300"
+        className="mt-0.5 h-4 w-4 rounded border-line-strong accent-primary"
       />
-      <span>
+      <span className="min-w-0">
         <span className="block text-label text-ink">{title}</span>
-        <span className="block text-caption text-ink-muted">{hint}</span>
+        <span className="mt-0.5 block text-caption text-ink-muted">{hint}</span>
       </span>
     </label>
   );
@@ -252,7 +274,7 @@ function Number({
 }) {
   return (
     <div>
-      <label className={label} htmlFor={name}>
+      <label className={label + ' mb-1 block'} htmlFor={name}>
         {title}
       </label>
       <input
@@ -262,7 +284,7 @@ function Number({
         min={min}
         max={max}
         defaultValue={value ?? ''}
-        className={input + ' mt-1 tabular-nums'}
+        className={input + ' tabular-nums'}
       />
       <p className="mt-1 text-caption text-ink-muted">{hint}</p>
     </div>

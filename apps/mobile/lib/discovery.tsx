@@ -1,4 +1,4 @@
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import type { DoctorPresence, SessionCard, SessionStatus } from '@opd/contracts';
 // Type-only: erased at compile time, so this does not create a runtime cycle with
 // lib/visits.tsx, which imports Pill from here.
@@ -8,7 +8,7 @@ import type { DoctorPresence, SessionCard, SessionStatus } from '@opd/contracts'
 // receives a resolved BookingState rather than computing one - which also keeps
 // it presentational, like every other prop it takes.
 import type { BookingState } from './visits';
-import { Avatar, Button, ErrorNote, pressable } from './ui';
+import { Avatar, Button, ErrorNote, Photo, RowSkeleton, pressable } from './ui';
 import { Icon, type IconName } from './icon';
 import { istRange, rupees } from './format';
 import { theme } from '../theme';
@@ -111,6 +111,7 @@ export function QueryState({
   emptyText,
   emptyIcon = 'inbox',
   onRetry,
+  skeletonRows = 3,
 }: {
   pending: boolean;
   error: Error | null;
@@ -118,11 +119,27 @@ export function QueryState({
   emptyText?: string;
   emptyIcon?: IconName;
   onRetry?: () => void;
+  /**
+   * How many placeholder rows to draw while loading. Set it to the number the screen
+   * usually shows, so the page does not visibly grow as data lands.
+   */
+  skeletonRows?: number;
 }) {
   if (pending) {
+    /*
+      A skeleton, not a spinner.
+
+      A centred ActivityIndicator was the single most reliable "hobby app" signal in
+      this codebase: it says "something is happening somewhere" and reserves no space,
+      so the whole screen jumps when the list arrives. Placeholders shaped like the
+      rows that are coming say what is arriving AND hold its geometry, so nothing
+      moves under the reader's thumb.
+    */
     return (
-      <View style={styles.state}>
-        <ActivityIndicator color={theme.color.primary} />
+      <View style={styles.skeletons}>
+        {Array.from({ length: skeletonRows }, (_, i) => (
+          <RowSkeleton key={i} />
+        ))}
       </View>
     );
   }
@@ -178,6 +195,7 @@ export function Row({
   meta,
   icon,
   avatar,
+  photoUrl,
   badge,
   onPress,
 }: {
@@ -187,13 +205,31 @@ export function Row({
   icon?: IconName;
   /** Name to derive initials from. Takes precedence over `icon`. */
   avatar?: string;
+  /**
+   * A photograph for this row. Passing it (even as null) opts the row into the taller
+   * card with an 88px thumbnail - the shape docs/ui-screens/04_hospitals.png uses for
+   * a hospital, which needs more room than a department line.
+   *
+   * `null` is a real value here, not "not set": it means the server had no photo, and
+   * `Photo` draws the initials fallback at the same size so the list stays even.
+   */
+  photoUrl?: string | null;
   badge?: { label: string; tone: Tone; icon: IconName };
   onPress: () => void;
 }) {
+  const withPhoto = photoUrl !== undefined;
   return (
     <Pressable onPress={onPress} accessibilityRole="button" {...pressable(theme.radius.lg)}>
-      <View style={styles.row}>
-        {avatar ? (
+      <View style={[styles.row, withPhoto && styles.rowWithPhoto]}>
+        {withPhoto ? (
+          <Photo
+            uri={photoUrl ?? null}
+            name={avatar ?? title}
+            style={styles.rowPhoto}
+            radius={12}
+            initialsSize={26}
+          />
+        ) : avatar ? (
           <Avatar name={avatar} />
         ) : icon ? (
           <View style={styles.rowIcon}>
@@ -202,7 +238,7 @@ export function Row({
         ) : null}
 
         <View style={styles.rowText}>
-          <Text style={styles.rowTitle} numberOfLines={1}>
+          <Text style={[styles.rowTitle, withPhoto && styles.rowTitleLarge]} numberOfLines={2}>
             {title}
           </Text>
           {subtitle ? (
@@ -442,6 +478,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 const styles = StyleSheet.create({
   state: { paddingVertical: theme.space[8], alignItems: 'center', gap: theme.space[3] },
+  skeletons: { gap: theme.space[3] },
   stateIcon: {
     width: 56,
     height: 56,
@@ -471,7 +508,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space[2],
     paddingVertical: 3,
   },
-  pillText: { ...theme.font.caption },
+  pillText: {
+    ...theme.font.caption,
+    fontFamily: theme.fontFamily.semibold,
+    fontWeight: '600',
+  },
 
   row: {
     flexDirection: 'row',
@@ -481,6 +522,11 @@ const styles = StyleSheet.create({
     minHeight: 64,
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
+    // docs/Design.md 4: a hairline AND the soft shadow, never one alone. The rows
+    // carried the shadow only, so on a cheap LCD in daylight - which is most phones
+    // outside a clinic - the list dissolved into the canvas behind it.
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.color.border,
     paddingHorizontal: theme.space[4],
     paddingVertical: theme.space[3],
     ...theme.elevation.sm,
@@ -493,8 +539,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  // The taller card: a photograph needs room, and a hospital is a bigger decision
+  // than a department, so it gets a bigger target (docs/ui-screens/04_hospitals.png).
+  rowWithPhoto: { minHeight: 112, alignItems: 'flex-start', padding: theme.space[3] },
+  rowPhoto: { width: 88, height: 88 },
   rowText: { flex: 1, gap: 2 },
   rowTitle: { ...theme.font.h3, color: theme.color.text },
+  rowTitleLarge: { ...theme.font.h2, color: theme.color.text },
   rowSubtitle: { ...theme.font.body, color: theme.color.textMuted },
   rowBadge: { flexDirection: 'row', marginTop: theme.space[1] },
   rowMeta: { ...theme.font.caption, color: theme.color.textMuted, fontVariant: ['tabular-nums'] },
@@ -502,9 +553,14 @@ const styles = StyleSheet.create({
   card: {
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.color.border,
     padding: theme.space[4],
     gap: theme.space[3],
-    ...theme.elevation.md,
+    // `card`, not `md`. The session card was the only surface in the app on the
+    // raised step, so a list of them read as a stack of floating slabs next to the
+    // hospital rows directly above them.
+    ...theme.elevation.card,
   },
   cardHead: { flexDirection: 'row', alignItems: 'center', gap: theme.space[3] },
   cardHeadText: { flex: 1, gap: 2 },
@@ -525,7 +581,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  fee: { ...theme.font.h2, color: theme.color.text, fontVariant: ['tabular-nums'] },
+  fee: { ...theme.font.h3, color: theme.color.text, fontVariant: ['tabular-nums'] },
 
   join: { alignItems: 'flex-end', gap: 2 },
   joinButtonLive: { backgroundColor: theme.color.primary, borderColor: theme.color.primary },

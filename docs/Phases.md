@@ -1512,6 +1512,63 @@ follow-ups · visit history · documents/attachments.
 when the socket drops, and the phone re-syncing after a connectivity loss. Both are
 implemented and neither has been exercised.
 
+### The UI redesign — state as of 2026-09-05
+
+Not a phase; a cross-cutting pass over both clients. The narrative, including four
+false starts, is in `docs/PROGRESS.md`.
+
+**Shipped**
+
+- ☑ **Photos, end to end.** `photoUrl` on `Hospital` and `Doctor` (nullable),
+  migration `20260904025421_hospital_doctor_photo`, through `HospitalCard`,
+  `PublicDoctor`, `SessionCard` and `MyQueueEntry`, served by the API, seeded with
+  verified URLs. One hospital and one doctor are left null **on purpose** so the
+  fallback is visible rather than theoretical.
+- ☑ **Inter actually loads**, in both clients, for the first time since Phase 1.
+  `fontWeight` is set alongside `fontFamily` on every token.
+- ☑ **Gradients removed.** Built, then taken out — see `docs/Design.md` 2.5.
+- ☑ **`Photo` and `Skeleton`** in `apps/mobile/lib/ui.tsx`. Skeletons replaced the
+  spinner in `QueryState`.
+- ☑ **Mobile**: reset to baseline, theme realigned, `Field` fixed (tap target, and a
+  focus style that cannot fight the keyboard), login, signup, Home, hospital detail.
+- ☑ **Console**: fixed rail with working active states on both navs, dense primitives,
+  the queue board split into a sticky action column and a scrolling roster column,
+  sign-in rebuilt to match.
+- ☑ **Seed**: 4 Mumbai hospitals, 25 doctors, four other patient accounts with paid
+  bookings, and `checkInCode` on every paid booking — the token screen had never had a
+  QR to show.
+
+**Still open**
+
+- ☑ **Five console config pages** and the queue list, board, check-in and walk-in
+  pages — done in the 2026-09-05 console redesign, off one design system in
+  `apps/web/components/`. See PROGRESS.md, "The console redesign".
+- ☐ **Six mobile screens** still on baseline styling: location, department, doctors
+  list, doctor detail, session detail, join, patients. My Visits, the token screen and
+  profile were rebuilt on 2026-09-05.
+  **None of the rebuilt screens has been confirmed on a device yet.**
+- ☐ **The console redesign has not been seen in a browser either.** It builds,
+  typechecks and lints clean, and the console walkthrough cannot run without two live
+  servers and a seeded database. Every defect in Phases 5 and 6 was found by a person
+  looking at a screen; nothing about this session changes that.
+- ☐ **A console upload path and object storage** for photos. `photoUrl` is seeded.
+- ☐ **`with-servers.mjs`**: verify a live server rather than an open port, and clean up
+  its fixture sessions. Stale servers and 69 accumulated fixtures produced three false
+  alarms in one day.
+
+**Explicitly not being built** — no data exists behind any of them, and a demo you have
+to walk back is worse than a plainer one: ratings, review counts, distance, years of
+experience, languages, a platform fee, a payment-method picker, an "I've Arrived"
+button (reception scans the QR), and a specialty grid on Home (no city-wide department
+endpoint).
+
+**A fee on a doctor row** stays deferred for a different reason: the fee lives on
+`OPDSession`, not `Doctor`, so it needs a derived `todayFeePaiseFrom` on `PublicDoctor`
+before a doctor card can honestly show one.
+
+No ratings and no review counts, in the mockups or here. They need a whole feature
+behind them and a demo you have to walk back is worse than a plainer one.
+
 Fill a row the day a phase's integration checkpoint passes. This is your record of where you actually are —
 useful when you come back after a break, and the first thing to hand a second developer if you ever add one.
 Keep the *narrative* (what you built, what you decided, what broke) in **PROGRESS.md**; this table is the index.

@@ -58,11 +58,20 @@ slate-900 #0F172A   ← Primary text
 
 ### 2.3 Semantic
 ```
-Success  text #16A34A   bg #DCFCE7   (positive, in-consultation, paid)
-Warning  text #D97706   bg #FEF3C7   (attention, called, delays)
-Danger   text #DC2626   bg #FEE2E2   (no-show, cancelled, emergency, errors)
-Info     text #2563EB   bg #DBEAFE   (neutral info, virtual-waiting)
+Success  text #16A34A   bg #DCFCE7   line #BBF7D0   (positive, in-consultation, paid)
+Warning  text #B45309   bg #FEF3C7   line #FDE68A   (attention, called, delays)
+Danger   text #DC2626   bg #FEE2E2   line #FECACA   (no-show, cancelled, emergency, errors)
+Info     text #2563EB   bg #DBEAFE   line #BFDBFE   (neutral info, virtual-waiting)
 ```
+
+**Warning moved from `#D97706` to `#B45309` (2026-09-05).** The old value is 3.4:1 on
+white: it fails AA for body text, and it was being *used* for body text — the
+running-behind sentence on the console's pace panel. The new one is 4.9:1. §8 has
+demanded AA since Phase 1 and one of this table's own values did not meet it.
+
+**Each semantic colour now has a third value, `line`.** A banner is a fill, a hairline
+and a word; without a matching border every banner in the console reached for an
+arbitrary `/20` opacity of its own, and three of them picked different ones.
 
 ### 2.4 Queue-status colors (app-specific — reuse everywhere)
 
@@ -78,19 +87,54 @@ Info     text #2563EB   bg #DBEAFE   (neutral info, virtual-waiting)
 | `CANCELLED` | Cancelled | Slate `#94A3B8` / bg `#F1F5F9` | "Cancelled" | slash |
 | `PRIORITY` / `EMERGENCY` (type) | Escalated | Danger `#DC2626` / bg `#FEE2E2` | "Priority" / "Emergency" | alert-triangle |
 
+### 2.5 No gradients
+
+Tried and removed. A teal gradient header and a gradient token card were built in the
+2026-09-04 refresh and taken out again the same day: the reference screens the product
+is being built to (`docs/ui-screens/`) use none, and against a light, card-based app a
+gradient reads as decoration rather than as structure.
+
+**Colour does one job here: it marks an action or a state.** Surfaces are white or the
+pale canvas. If a screen needs more presence, it needs better hierarchy, not a
+gradient.
+
 ---
 
 ## 3. Typography
 
 **Family:** `Inter`, with system fallback (`-apple-system, Roboto, "Segoe UI", sans-serif`).
 
-> **As built:** the web console uses Inter. **The mobile app deliberately ships the system font** —
-> San Francisco on iOS, Roboto on Android — which is the fallback this line already sanctions. Loading
-> Inter on mobile costs a new dependency (`@expo-google-fonts/inter`), ~400KB of font files and a
-> splash-screen gate to stop text flashing unstyled, and the native faces read as *less* templated,
-> not more. Do not "fix" this by adding Inter without a reason. The scale, weights and tabular
-> numerals below apply unchanged either way.
+> **As built (corrected 2026-09-05):** both clients now load Inter. This note previously said
+> the mobile app shipped the system font on purpose — that was a rationalisation of a bug.
+> `theme.ts` and `tailwind.config.ts` had both *named* Inter since Phase 1 and **neither client
+> ever loaded the face**, so the console rendered in Segoe UI and the app in Roboto for nine
+> phases while the token table looked correct. Now: `next/font/google` on web,
+> `@expo-google-fonts/inter` via `useFonts` on mobile, gated on the splash that already waits
+> for the keychain read.
+>
+> **Every font token sets `fontWeight` alongside `fontFamily`.** A named face like
+> `Inter_700Bold` already is the bold, so the weight looks redundant — but if the face fails to
+> load, Android falls back to the system font at REGULAR WEIGHT EVERYWHERE. No bold headings,
+> no semibold buttons, no weight on a token number. The failure mode of a redundant weight is a
+> slightly heavy glyph; the failure mode of a missing one is an app with no hierarchy at all.
 **Numerals:** use **tabular figures** for token numbers, counts, and times so they don't jitter as they update.
+
+> **The two mirrors share a palette and a spacing rhythm, not a type scale
+> (2026-09-05).** They are different machines used by different people. The table below
+> is the PHONE: 28px screen titles and 16px body are right for a patient holding a
+> device at arm's length who may be sixty. The console is a dense desktop tool a
+> receptionist stares at for a whole shift on a 1440px monitor, and that scale wastes a
+> third of its vertical space — so `apps/web/tailwind.config.ts` runs one step tighter
+> throughout (display 30, h1 22, h2 17, h3 15, body 13.5, label 13) with negative
+> tracking on everything above 18px. Inter is drawn loose at display sizes, and
+> headings set at zero tracking are the most reliable tell that a UI was assembled from
+> defaults rather than typeset.
+>
+> This is a divergence, not a drift: the colours, the spacing scale, the radii and the
+> status vocabulary stay identical, and a change to any of those still changes both.
+
+**`eyebrow` (web) is the `Overline` row below**, named for what it does rather than for
+where it sits, and it is the console's section marker and column head.
 
 | Token | Size / Line | Weight | Use |
 |---|---|---|---|
@@ -114,19 +158,51 @@ Rules: max ~2 weights per screen; primary text `slate-900`, secondary `slate-500
 
 **Radius:**
 ```
-sm 6    inputs, small chips
-md 10   buttons, badges
-lg 16   cards
-xl 24   sheets, hero token card
-full    pills, avatars, status dots
+xs   4    the focus-ring corner
+sm   6    small chips
+md   8    buttons, badges, inputs (web)
+control 12  buttons and inputs (mobile only - they are 52pt tall)
+lg   14   cards
+xl   20   sheets
+full      pills, avatars, status dots
 ```
+
+A `card` (18) and `hero` (28) step were added during the 2026-09-04 refresh and removed
+again with the gradients they existed for.
+
+**The scale tightened on 2026-09-05** (md 10 → 8, lg 16 → 14, xl 24 → 20). A 16pt corner
+on a full-bleed card is most of the way to a lozenge on a 390pt phone, and on a console
+holding nine cards it is what made a considered tool read as a consumer app. Tighter
+corners are most of what separates "product" from "template" at a glance.
+
+**`control` exists because it already did.** Every mobile button and input hardcoded
+`borderRadius: 12` — a value in no token table — while `pressable()` masked its Android
+ripple to `md`. So the ripple was clipped to a 10pt corner inside a 12pt button, on
+every press in the app. One token, used by both.
 
 **Elevation (soft, low-opacity shadows — never harsh):**
 ```
-sm  0 1 2  rgba(15,23,42,0.06)     subtle lift (list rows)
-md  0 4 12 rgba(15,23,42,0.08)     cards
-lg  0 12 28 rgba(15,23,42,0.12)    sheets, modals, token hero
+sm    0 1 2   rgba(15,23,42,0.06)    subtle lift (list rows)
+card  0 2 8   rgba(15,23,42,0.05)    the standard card - PLUS a 1px border
+md    0 4 12  rgba(15,23,42,0.08)    raised cards
+lg    0 12 28 rgba(15,23,42,0.12)    sheets, modals
 ```
+
+**On the console, borders do the work and shadows only say "this floats"
+(2026-09-05).** The web scale is `xs` (0 1 2 / 0.04) for cards, with `md` and `lg`
+reserved for things that genuinely overlay — the mobile nav drawer, a menu. A 12px blur
+under every card on a screen holding nine of them is not a hierarchy, it is haze.
+
+**The console also needs four surfaces, not two.** It had used `canvas` for the page,
+the rail, every table hover, every neutral pill and every skeleton — so a hovered row,
+an inactive status and a loading placeholder were the same colour as the page behind
+them. `canvas` #F7FAFC (page) · `surface` #FFFFFF (card) · `sunken` #F1F5F9 (rails,
+table heads, inert pills) · `hover` #F8FAFC (interaction tint).
+
+**`card` is a shadow *and* a hairline border, never one alone.** A shadow this soft
+disappears against `canvas` on a cheap LCD in daylight; a border alone reads as a
+wireframe. Together they hold an edge in both conditions, which is the whole job of a
+card on a phone that gets used outdoors.
 
 ---
 
@@ -141,6 +217,19 @@ lg  0 12 28 rgba(15,23,42,0.12)    sheets, modals, token hero
 
 ### 5.2 Cards
 White surface, radius lg, shadow md, padding 16–20, 1px `slate-200` border optional for flat sections.
+
+### 5.2b The token chip — the product's atom
+
+A fixed-width slab with its own hairline: the same width whatever the digits, findable
+at a glance down a column of names, and identical on the board, the check-in desk, the
+walk-in list and the patient's own list.
+
+**It had no component until 2026-09-05,** and it is the one string a receptionist reads
+aloud, matches against a printed slip and types into a field. It was `font-semibold
+tabular-nums` on the board, plain text in the walk-in list and a bare `<span>` at the
+desk. Three sizes: `sm` in a chip row, `md` in a roster, `lg` for the patient in the
+room. The patient app's token screen is the exception and keeps its own display-sized
+treatment (§5.6) — there the token is the whole screen, not an item in a list.
 
 ### 5.3 Status badge / pill
 Rounded-full, `bg` + `text` from §2.4, 12px overline text, small leading dot or icon. Always includes a label.
@@ -260,6 +349,15 @@ the wrong person is called in.
   is no new dependency and no `react-native-svg`. Every screen imports `lib/icon.tsx`, never the
   package, so the set is swappable in one file.
 - Consistent metaphors (see §2.4). Color inherits status/text color.
+- **As built (console, 2026-09-05):** `apps/web/components/icon.tsx` — about thirty
+  Feather paths inline, drawn to the same 24px box, 2px stroke and round caps, so a
+  status looks the same to the patient and to the receptionist looking at them.
+  Deliberately not a dependency: `lucide-react` is 1.4MB of named exports to obtain
+  thirty glyphs that will never change. Everything imports `Icon`, never a path.
+- **The status table in §2.4 has specified an icon per status since Phase 1 and no
+  console screen ever rendered one.** Colour was carrying the meaning alone, which §8
+  forbids, and "Called" and "Completed" were the same shape at a glance. They render
+  now. If a row of that table names an icon, the code owes you the icon.
 
 ---
 
@@ -277,7 +375,14 @@ the wrong person is called in.
 - **Never color-only:** status always has label + icon.
 - **Tabular numerals** for all live-updating numbers.
 - Full dynamic-type / font-scaling support; test at large sizes.
-- Clear focus states (teal focus ring) for web keyboard use.
+- Clear focus states (teal focus ring) for web keyboard use. **One definition, on
+  `:focus-visible` only** (`app/globals.css`). Every console screen used to bring its
+  own — `ring-teal-100` here, `ring-teal-200` there, `ring-accent` on the invite page —
+  and all of them fired on mouse clicks too, so pressing a button left a halo behind on
+  it. Keyboard users got an inconsistent ring and mouse users got one they never asked
+  for. Nothing else in the app declares a focus style.
+- **Reduced motion is honoured** (`prefers-reduced-motion`), including the pulse on the
+  board's live indicator — the one animation in the console that runs forever.
 
 ---
 
@@ -316,13 +421,21 @@ one model on both is a large part of why an app reads as not-quite-native; `lib/
 `pressable()` helper that every tappable goes through.
 
 ```
-color.primary      #0E7C7B      radius.sm 6   space.1 4    font.display 40/700
-color.accent       #14B8A6      radius.md 10  space.2 8    font.h1 28/700
-color.bg           #F7FAFC      radius.lg 16  space.3 12   font.body 14/400
-color.surface      #FFFFFF      radius.xl 24  space.4 16   font.family Inter
-color.text         #0F172A                    space.6 24
+color.primary      #0E7C7B      radius.sm  6    space.1 4    font.display 40/700
+color.accent       #14B8A6      radius.md  10   space.2 8    font.h1 28/700
+color.bg           #F7FAFC      radius.lg  16   space.3 12   font.body 14/400
+color.surface      #FFFFFF      radius.xl  24   space.4 16   font.family Inter
+color.text         #0F172A                      space.6 24
 color.textMuted    #64748B
 color.border       #E2E8F0
-status.* (per §2.4)
+status.*           (per §2.4)
 ```
+
+**Inter has to actually be loaded, and for a long time it was not.** Both mirrors
+named Inter in their font stack from Phase 1, and neither client ever fetched it — the
+console rendered in Segoe UI and the app in Roboto, which is a large part of why the
+product read as unfinished while the token table looked correct. It is now loaded in
+both: `next/font/google` in `apps/web/app/layout.tsx`, and `@expo-google-fonts/inter`
+via `useFonts` in `apps/mobile/app/_layout.tsx`, gated on the splash that already
+waits for the keychain read. A token nobody loads is a comment, not a token.
 Dark mode is out of scope for MVP but the token structure leaves room to add a dark palette later.

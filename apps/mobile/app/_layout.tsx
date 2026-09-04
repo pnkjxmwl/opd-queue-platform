@@ -1,3 +1,10 @@
+import {
+  useFonts,
+  Inter_400Regular,
+  Inter_500Medium,
+  Inter_600SemiBold,
+  Inter_700Bold,
+} from '@expo-google-fonts/inter';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -17,6 +24,30 @@ import { theme } from '../theme';
 function Gate() {
   const { ready, signedIn } = useAuth();
 
+  /**
+   * Inter, the typeface docs/Design.md has specified since Phase 1 and which nothing
+   * ever loaded - theme.ts named it and the app rendered in Roboto regardless.
+   *
+   * Bundled with the app rather than fetched, so it is there on a cold start in a
+   * hospital basement with no signal.
+   *
+   * Gated on the SPLASH THAT ALREADY EXISTS below rather than a second one. That
+   * splash is already waiting on the keychain read, and both waits are the same
+   * wait as far as the person holding the phone is concerned; a second spinner - or
+   * worse, rendering in Roboto and then reflowing into Inter a beat later - would be
+   * two visible events where there should be none.
+   */
+  const [fontsLoaded, fontError] = useFonts({
+    Inter_400Regular,
+    Inter_500Medium,
+    Inter_600SemiBold,
+    Inter_700Bold,
+  });
+  // `|| fontError` so a font that fails to decode degrades to the system face instead
+  // of leaving the app on its splash forever. A missing typeface is a cosmetic
+  // problem; a patient who cannot reach their token is not.
+  const fontsSettled = fontsLoaded || fontError !== null;
+
   // P8-MOB-01. Inside the gate because it needs a session, and once for the whole
   // app: permission, token registration, and opening the right screen on a tap.
   usePushRegistration();
@@ -30,9 +61,9 @@ function Gate() {
     if (signedIn && inAuthGroup) router.replace('/');
   }, [ready, signedIn, segments, router]);
 
-  if (!ready) {
+  if (!ready || !fontsSettled) {
     // Reading the keychain is async; showing the login screen first would flash it
-    // at users who are already signed in.
+    // at users who are already signed in. The font load joins the same wait.
     return (
       <View style={styles.splash}>
         <ActivityIndicator color={theme.color.primary} />

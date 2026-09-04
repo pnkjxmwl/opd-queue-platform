@@ -1,5 +1,6 @@
 import Link from 'next/link';
-import { buttonQuiet } from '../config/ui';
+import { Notice } from '../../../components/notice';
+import { btn } from '../../../components/ui';
 
 /**
  * What a session id that is not yours - or no longer exists - actually looks like.
@@ -15,15 +16,17 @@ import { buttonQuiet } from '../config/ui';
  */
 export default function QueueNotFound() {
   return (
-    <div className="max-w-lg">
-      <h1 className="text-h1">This session isn’t available</h1>
-      <p className="mt-2 text-body-lg text-ink-muted">
-        It may belong to another hospital, or it may no longer exist. If you followed a bookmark or a
-        link from someone else, go back and pick today’s session from the list.
-      </p>
-      <Link className={buttonQuiet + ' mt-6 inline-flex items-center'} href="/queue">
-        Back to sessions
-      </Link>
-    </div>
+    <Notice
+      icon="search"
+      title="This session isn’t available"
+      actions={
+        <Link href="/queue" className={btn('primary')}>
+          Back to sessions
+        </Link>
+      }
+    >
+      It may belong to another hospital, or it may no longer exist. If you followed a bookmark or a
+      link from someone else, go back and pick today’s session from the list.
+    </Notice>
   );
 }
