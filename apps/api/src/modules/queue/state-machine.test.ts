@@ -16,6 +16,7 @@ import {
 } from './state-machine';
 import {
   DoctorHasLeftError,
+  DoctorNotPresentError,
   InvalidQueueTransitionError,
   QueuePausedError,
 } from '../../common/errors';
@@ -312,16 +313,29 @@ describe('session state machine (P4-BE-01)', () => {
     expect(() => assertSessionAccepts('COMPLETE_CONSULTATION', left)).not.toThrow();
   });
 
-  it('does not let a LATE doctor block the queue', () => {
-    // docs/PRD.md 11 - a late doctor leaves the session and queue unaffected, and
-    // reception calls the next patient in as the doctor walks back to the room.
-    //
-    // NOT_PRESENT is also the DEFAULT for every session, so blocking on it would
-    // make marking the doctor present a mandatory ceremony before the first patient
-    // of every clinic - and the first call-next is what activates a session at all.
+  it('refuses to call a patient in before anyone has said the doctor is here', () => {
+    // **This assertion is the reverse of what it used to be.** NOT_PRESENT used to
+    // block nothing, on the argument that it is the default for every session and
+    // therefore the absence of information rather than a statement. That argument
+    // also let a receptionist call patients in and complete consultations for a
+    // doctor nobody ever said had arrived - writing a Consultation row, and teaching
+    // the ETA engine a duration, for a doctor who might not be in the building.
     const late = { status: 'ACTIVE', pausedAt: null, doctorPresence: 'NOT_PRESENT' } as const;
-    expect(() => assertSessionAccepts('CALL_NEXT', late)).not.toThrow();
-    expect(() => assertSessionAccepts('START_CONSULTATION', late)).not.toThrow();
+    expect(() => assertSessionAccepts('CALL_NEXT', late)).toThrow(DoctorNotPresentError);
+    expect(() => assertSessionAccepts('START_CONSULTATION', late)).toThrow(DoctorNotPresentError);
+
+    // The ceremony has to be performable, and the desk has to keep working while it
+    // has not been performed - otherwise a late doctor stops people arriving too.
+    expect(() => assertSessionAccepts('PRESENCE', late)).not.toThrow();
+    expect(() => assertSessionAccepts('CHECK_IN', late)).not.toThrow();
+    expect(() => assertSessionAccepts('WALK_IN', late)).not.toThrow();
+    expect(() => assertSessionAccepts('COMPLETE_CONSULTATION', late)).not.toThrow();
+  });
+
+  it('calls again the moment the doctor is marked present', () => {
+    const here = { status: 'ACTIVE', pausedAt: null, doctorPresence: 'PRESENT' } as const;
+    expect(() => assertSessionAccepts('CALL_NEXT', here)).not.toThrow();
+    expect(() => assertSessionAccepts('START_CONSULTATION', here)).not.toThrow();
   });
 
   it('refuses to call a patient in while the doctor is ON A BREAK', () => {
@@ -357,8 +371,9 @@ describe('session state machine (P4-BE-01)', () => {
   });
 
   it('tells a receptionist WHICH kind of absence they are looking at', () => {
-    // The remedy differs: a break is waited out, a departure ends the session. One
-    // shared error would leave the desk guessing.
+    // The remedy differs in all three cases: a break is waited out, a departure ends
+    // the session, and an unmarked doctor is marked present. One shared error would
+    // leave the desk guessing at which.
     const base = { status: 'ACTIVE', pausedAt: null } as const;
     expect(() =>
       assertSessionAccepts('CALL_NEXT', { ...base, doctorPresence: 'ON_BREAK' }),
@@ -366,6 +381,9 @@ describe('session state machine (P4-BE-01)', () => {
     expect(() =>
       assertSessionAccepts('CALL_NEXT', { ...base, doctorPresence: 'LEFT' }),
     ).toThrow(/left/i);
+    expect(() =>
+      assertSessionAccepts('CALL_NEXT', { ...base, doctorPresence: 'NOT_PRESENT' }),
+    ).toThrow(/not been marked present/i);
   });
 
   it('makes the session ACTIVE when the doctor calls the first patient', () => {

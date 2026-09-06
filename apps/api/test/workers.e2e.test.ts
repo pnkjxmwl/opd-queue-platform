@@ -123,6 +123,9 @@ describe('background workers (P8-BE-03, P8-BE-04, P8-BE-05)', () => {
           scheduledEnd: new Date(start.getTime() + 5 * 60 * 60 * 1000),
           feePaise: 50_000,
           status: 'ACTIVE',
+          // The grace-expiry block calls patients, and call-next is refused while the
+          // doctor is NOT_PRESENT - which is the column default.
+          doctorPresence: 'PRESENT',
         },
       })
     ).id;

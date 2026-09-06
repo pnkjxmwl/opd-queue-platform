@@ -48,6 +48,18 @@ export const ErrorCode = z.enum([
    * the queue keep handing out patients.
    */
   'DOCTOR_ON_BREAK',
+  /**
+   * A command that needs the doctor in the room, before anyone has said they are
+   * here. NOT_PRESENT is the default on every session, so this is the code a clinic
+   * meets first, every day.
+   *
+   * Its own code rather than a reuse of the two above, for the same reason they are
+   * separate from each other: the fix differs. A break is waited out and a departure
+   * ends the session, but this one is answered by somebody - the doctor or reception
+   * on their behalf - marking the doctor present. The console turns it into a
+   * "Mark present" button rather than a sentence.
+   */
+  'DOCTOR_NOT_PRESENT',
   // join + payment (Phase 5)
   /**
    * The session will not accept a join right now (docs/PRD.md 8.12): closed

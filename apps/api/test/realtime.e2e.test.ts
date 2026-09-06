@@ -120,6 +120,9 @@ describe('realtime gateway (P7-BE-01, P7-BE-02)', () => {
           scheduledEnd: new Date(start.getTime() + 4 * 60 * 60 * 1000),
           feePaise: 50_000,
           status: 'OPEN_FOR_REGISTRATION',
+          // call-next is refused while the doctor is NOT_PRESENT, which is the column
+          // default. This suite calls patients to make the socket speak.
+          doctorPresence: 'PRESENT',
         },
       })
     ).id;
@@ -299,11 +302,16 @@ describe('realtime gateway (P7-BE-01, P7-BE-02)', () => {
       await subscribe(socket, sessionId);
 
       const before = await prisma.oPDSession.findUniqueOrThrow({ where: { id: sessionId } });
-      await http()
+      const refused = await http()
         .post(`/sessions/${sessionId}/call-next`)
         .set(auth(staff.accessToken))
         .send({})
         .expect(409);
+
+      // Name the code. A bare 409 would pass just as happily if the refusal came from
+      // somewhere else entirely - and it nearly did: when NOT_PRESENT started blocking
+      // call-next, this test kept passing for a completely different reason.
+      expect(refused.body.error.code).toBe('NO_ELIGIBLE_PATIENT');
 
       await expectSilence(socket, REALTIME_EVENT.sessionUpdated);
       const after = await prisma.oPDSession.findUniqueOrThrow({ where: { id: sessionId } });

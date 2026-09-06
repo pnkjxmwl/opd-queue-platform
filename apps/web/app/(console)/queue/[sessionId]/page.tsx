@@ -125,6 +125,20 @@ export default async function BoardPage({
     tone: 'neutral' as const,
   };
 
+  /**
+   * The server refuses call-next and start-consultation unless the doctor is PRESENT
+   * (docs/PRD.md 10). This is not a second copy of that rule - it reads the answer
+   * the server already sent on the session and disables a control that would only
+   * come back with an error, exactly as `paused` does above. The API decides; this
+   * saves the receptionist a click and a red banner.
+   */
+  const doctorAway = session.doctorPresence !== 'PRESENT';
+  const AWAY_REASON: Record<string, string> = {
+    NOT_PRESENT: 'The doctor has not been marked present yet.',
+    ON_BREAK: 'The doctor is on a break.',
+    LEFT: 'The doctor has left for the day.',
+  };
+
   const hidden = (name: string, value: string) => <input type="hidden" name={name} value={value} />;
   const sessionField = hidden('sessionId', sessionId);
 
@@ -246,11 +260,36 @@ export default async function BoardPage({
                 <form action={startConsultation} className="mt-4">
                   {sessionField}
                   {hidden('entryId', called.id)}
-                  <button type="submit" className={btn('primary', 'lg') + ' w-full'}>
+                  <button
+                    type="submit"
+                    className={btn('primary', 'lg') + ' w-full'}
+                    disabled={doctorAway}
+                  >
                     <Icon name="play" className="h-4 w-4" />
                     Start consultation
                   </button>
                 </form>
+                {/*
+                  Same guard as call-next: the server refuses START_CONSULTATION unless
+                  the doctor is present. Completing is deliberately NOT guarded - a
+                  patient already in the room must always be closable.
+                */}
+                {doctorAway && (
+                  <div className="mt-2.5">
+                    <p className="flex items-start gap-1.5 text-caption text-warning">
+                      <Icon name="user" className="mt-0.5 h-3.5 w-3.5" />
+                      {AWAY_REASON[session.doctorPresence] ?? 'The doctor is not available.'}
+                    </p>
+                    <form action={setPresence} className="mt-2">
+                      {sessionField}
+                      <input type="hidden" name="presence" value="PRESENT" />
+                      <button type="submit" className={btn('quiet')}>
+                        <Icon name="user" className="h-4 w-4" />
+                        Mark doctor present
+                      </button>
+                    </form>
+                  </div>
+                )}
                 <div className="mt-3 flex flex-wrap items-end gap-2 border-t border-line-soft pt-3">
                   <form action={skipPatient} className="flex flex-1 items-end gap-2">
                     {sessionField}
@@ -291,7 +330,7 @@ export default async function BoardPage({
                   <button
                     type="submit"
                     className={btn('primary', 'lg') + ' w-full'}
-                    disabled={eligible.length === 0 || paused}
+                    disabled={eligible.length === 0 || paused || doctorAway}
                   >
                     <Icon name="bell" className="h-4 w-4" />
                     Call next
@@ -302,6 +341,28 @@ export default async function BoardPage({
                     <Icon name="pause" className="mt-0.5 h-3.5 w-3.5" />
                     The queue is paused — resume it below before calling anyone.
                   </p>
+                )}
+                {doctorAway && (
+                  <div className="mt-2.5">
+                    <p className="flex items-start gap-1.5 text-caption text-warning">
+                      <Icon name="user" className="mt-0.5 h-3.5 w-3.5" />
+                      {AWAY_REASON[session.doctorPresence] ?? 'The doctor is not available.'} Nobody
+                      can be called in until someone marks them present.
+                    </p>
+                    {/*
+                      The remedy, next to the thing it unblocks. The presence dropdown
+                      further down can still set any of the four states; this is the
+                      one a desk actually needs, in one press, where they are looking.
+                    */}
+                    <form action={setPresence} className="mt-2">
+                      {sessionField}
+                      <input type="hidden" name="presence" value="PRESENT" />
+                      <button type="submit" className={btn('quiet')}>
+                        <Icon name="user" className="h-4 w-4" />
+                        Mark doctor present
+                      </button>
+                    </form>
+                  </div>
                 )}
               </>
             )}

@@ -357,7 +357,7 @@ Why this shape:
 ### 7.1 Call-order logic
 - Eligible to be called = entries in `CHECKED_IN`/`READY` state. (`READY` is reserved and unreachable in v1 — see the note on `QueueEntryStatus` in `packages/contracts`.)
 - Order among eligible = `priority` desc, then `priorityAt`, then `requeuedAt` (nulls first), then `tokenNumber`. Fairness is booking order; EMERGENCY sorts to the front, and anyone requeued sorts behind everyone who was not.
-- Nothing else may call a patient: `call-next` also refuses while another entry is CALLED or IN_CONSULTATION, while the queue is paused, and while doctor presence is LEFT.
+- Nothing else may call a patient: `call-next` also refuses while another entry is CALLED or IN_CONSULTATION, while the queue is paused, and while doctor presence is anything other than `PRESENT` — three distinct errors, because the remedy differs (`DOCTOR_NOT_PRESENT` is marked present, `DOCTOR_ON_BREAK` is waited out, `DOCTOR_HAS_LEFT` ends the session). `start-consultation` is gated identically; `check-in`, `walk-in` and `complete-consultation` never are.
 - The doctor never idles for not-yet-arrived patients (`VIRTUAL_WAITING` are not eligible).
 - Walk-ins: created already `CHECKED_IN`, appended at the current max token.
 
