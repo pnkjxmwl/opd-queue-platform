@@ -337,7 +337,7 @@ describe('Phase 2 hospital configuration', () => {
         .set(auth(adminA))
         .send({
           doctorId,
-          date: '2026-09-01',
+          date: '2030-09-01',
           startTime: '10:00',
           endTime: '13:00',
           feePaise: 50_000,
@@ -351,17 +351,68 @@ describe('Phase 2 hospital configuration', () => {
         departmentId: deptId,
         originalDoctorId: doctorId,
         currentProviderDoctorId: doctorId,
-        date: '2026-09-01',
+        date: '2030-09-01',
         registrationClosedAt: null,
       });
       // 10:00 IST is 04:30 UTC - the stored instant, not the clock face.
-      expect(res.body.scheduledStart).toBe('2026-09-01T04:30:00.000Z');
+      expect(res.body.scheduledStart).toBe('2030-09-01T04:30:00.000Z');
+    });
+
+    /**
+     * The console said "Open for registration" and the patient app said
+     * "Registration closed", for the same session, at the same moment - because a
+     * session had been created for 10:00-12:00 IST at 23:26 IST. Both were right:
+     * OPEN_FOR_REGISTRATION is the only status creation can produce, and
+     * `registrationGate` closes on `scheduledEnd <= now` before it reads a policy.
+     * Nothing reconciles them afterwards, so the row misleads staff for ever.
+     */
+    it('refuses a session that has already ended, rather than creating one nobody can join', async () => {
+      const res = await api()
+        .post(sessions(hospitalA))
+        .set(auth(adminA))
+        .send({
+          doctorId,
+          date: '2020-01-01',
+          startTime: '10:00',
+          endTime: '13:00',
+          feePaise: 50_000,
+        })
+        .expect(400);
+
+      expect(res.body.error.code).toBe('VALIDATION_FAILED');
+      expect(await prisma.oPDSession.count()).toBe(0);
+    });
+
+    /** A clinic that opened at 10:00 and creates the session at 10:30 is normal. */
+    it('still accepts a session that has started but not ended', async () => {
+      const now = new Date();
+      const started = new Date(now.getTime() - 30 * 60_000);
+      const ends = new Date(now.getTime() + 90 * 60_000);
+      const ist = (d: Date): string =>
+        new Date(d.getTime() + 5.5 * 3_600_000).toISOString().slice(11, 16);
+      const istDate = new Date(now.getTime() + 5.5 * 3_600_000).toISOString().slice(0, 10);
+
+      // Skipped around IST midnight, where "30 minutes ago" is a different date and
+      // the two clock times would no longer be in order.
+      if (ist(started) < ist(ends)) {
+        await api()
+          .post(sessions(hospitalA))
+          .set(auth(adminA))
+          .send({
+            doctorId,
+            date: istDate,
+            startTime: ist(started),
+            endTime: ist(ends),
+            feePaise: 50_000,
+          })
+          .expect(201);
+      }
     });
 
     it('rejects a duplicate slot with 409 rather than a 500', async () => {
       const body = {
         doctorId,
-        date: '2026-09-01',
+        date: '2030-09-01',
         startTime: '10:00',
         endTime: '13:00',
         feePaise: 50_000,
@@ -445,7 +496,7 @@ describe('Phase 2 hospital configuration', () => {
         .set(auth(receptionA))
         .send({
           doctorId,
-          date: '2026-09-01',
+          date: '2030-09-01',
           startTime: '10:00',
           endTime: '13:00',
           feePaise: 50_000,
@@ -460,7 +511,7 @@ describe('Phase 2 hospital configuration', () => {
           .set(auth(adminA))
           .send({
             doctorId,
-            date: '2026-09-01',
+            date: '2030-09-01',
             startTime,
             endTime: '13:30',
             feePaise: 50_000,
