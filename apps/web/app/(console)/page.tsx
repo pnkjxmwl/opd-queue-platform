@@ -1,6 +1,7 @@
 import Link from 'next/link';
-import type { Doctor, MeResponse, OPDSession, Paginated } from '@opd/contracts';
+import type { Doctor, OPDSession, Paginated } from '@opd/contracts';
 import { apiGet } from '../../lib/api';
+import { getMe } from '../../lib/tenant';
 import { Icon } from '../../components/icon';
 import {
   Badge,
@@ -38,7 +39,9 @@ const NEXT_STEP: Record<string, string> = {
 };
 
 export default async function Overview() {
-  const me = await apiGet<MeResponse>('/me');
+  // Shares the layout's call, rather than repeating it. Still NOT
+  // `requireStaffHospital()` - see the note below, that would loop.
+  const me = await getMe();
   const active = me.memberships.find((m) => m.status === 'ACTIVE');
 
   /*

@@ -1,5 +1,4 @@
-import type { MeResponse } from '@opd/contracts';
-import { apiGet } from '../../lib/api';
+import { getMe } from '../../lib/tenant';
 import { ConsoleChrome, type NavLink } from './nav';
 
 /**
@@ -11,7 +10,10 @@ import { ConsoleChrome, type NavLink } from './nav';
  * (docs/Rules.md 10).
  */
 export default async function ConsoleLayout({ children }: { children: React.ReactNode }) {
-  const me = await apiGet<MeResponse>('/me');
+  // The same request the page below is about to make. `getMe` is request-scoped, so
+  // the shell and its child share one call instead of asking the API twice for the
+  // identical answer on every navigation.
+  const me = await getMe();
   const active = me.memberships.find((m) => m.status === 'ACTIVE');
 
   // Queue is open to all three roles: a small hospital's admin genuinely does run

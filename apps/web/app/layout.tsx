@@ -40,7 +40,22 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={inter.variable}>
-      <body>{children}</body>
+      {/*
+        `suppressHydrationWarning` is here for the browser, not for us.
+
+        Extensions inject attributes into <body> before React hydrates - ColorZilla
+        adds `cz-shortcut-listen="true"`, password managers and dark-mode add-ons do
+        the same - and React reports the resulting mismatch as an application error.
+        It is not one: nothing in this tree writes to <body>, and there is no server
+        or client branch above it.
+
+        **It suppresses exactly one level: this element's own attributes and text.**
+        Children still hydrate under the normal rules, so a genuine mismatch anywhere
+        inside the console is still reported. That is what makes this safe here and
+        wrong almost anywhere else - it is the narrowest possible answer to something
+        we do not control, not a way to quiet a real bug.
+      */}
+      <body suppressHydrationWarning>{children}</body>
     </html>
   );
 }

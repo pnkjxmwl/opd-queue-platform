@@ -85,11 +85,6 @@ async function toError(res: Response): Promise<Error> {
     // Surface the server's own message. It is written to be shown to a human and
     // deliberately carries no internals.
     //
-    // `details` is appended ONLY for a validation failure, where it names the field
-    // that was wrong and is the whole point. Every other error puts machine context
-    // there - a queue rejection carries `{command, from}` - and pasting that after a
-    // sentence written for a receptionist turned "someone acted first" into
-    // "(command: COMPLETE_CONSULTATION; from: COMPLETED)".
     // A validation failure is the one error whose server message is useless to the
     // person reading it: "Request validation failed" tells a receptionist nothing
     // they can act on, and appending `(startTime: must be HH:mm)` reads like a stack
@@ -112,12 +107,11 @@ async function toError(res: Response): Promise<Error> {
         return new ApiCallError(body.error.code, fields.join('; '), requestId);
       }
     }
-    const details = '';
     const requestId =
       (body.error as { requestId?: string }).requestId ??
       res.headers.get('x-request-id') ??
       undefined;
-    return new ApiCallError(body.error.code, `${body.error.message}${details}`, requestId);
+    return new ApiCallError(body.error.code, body.error.message, requestId);
   } catch {
     // Even a body we could not parse still has the header, and an unreadable 500 is
     // exactly when a request id is worth most.

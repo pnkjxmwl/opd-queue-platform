@@ -80,8 +80,31 @@ function Gate() {
   return <Stack screenOptions={{ headerShown: false, contentStyle: styles.canvas }} />;
 }
 
+/**
+ * Query defaults, which this app had none of.
+ *
+ * A bare `new QueryClient()` leaves `staleTime` at 0, so every screen mount, every
+ * back-navigation and every return to the foreground refires the request - and on a
+ * phone that is not just load, it is a skeleton flashing over data the user was
+ * already looking at.
+ *
+ * Thirty seconds is chosen against what these queries actually are: hospitals,
+ * departments, doctors and a patient's own profiles, none of which change while
+ * somebody browses. **It does not make the live screens stale.** Anything that has
+ * to keep moving passes its own `refetchInterval` (`FALLBACK_POLL_MS`,
+ * `LIVE_POLL_MS`, `CONFIRM_POLL_MS`), and the realtime socket invalidates queries
+ * directly - neither path is gated by `staleTime`.
+ *
+ * One retry, not three: a patient on a hospital's wi-fi would otherwise wait through
+ * three silent backoffs before being told anything is wrong, and `useApi` already
+ * turns a transport failure into "you appear to be offline".
+ */
+const queryDefaults = {
+  queries: { staleTime: 30_000, retry: 1 },
+} as const;
+
 export default function RootLayout() {
-  const [queryClient] = useState(() => new QueryClient());
+  const [queryClient] = useState(() => new QueryClient({ defaultOptions: queryDefaults }));
 
   return (
     <SafeAreaProvider>

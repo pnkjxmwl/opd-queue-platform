@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "build": "next build",
-    "dev": "next dev -p 3001",
+    "dev": "next dev -p 3001 --turbopack",
     "start": "next start -p 3001",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
