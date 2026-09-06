@@ -1512,6 +1512,72 @@ follow-ups · visit history · documents/attachments.
 when the socket drops, and the phone re-syncing after a connectivity loss. Both are
 implemented and neither has been exercised.
 
+### Pre-production audit — 2026-09-05
+
+A review of everything built so far, against the PRD and the running code rather than
+the checkboxes, before Phase 10 starts. Narrative in `PROGRESS.md`. **Verdict:
+conditional pass.** The queue engine, the payment path and tenant isolation are
+correct; what was missing was all at the edges.
+
+**It found four defects no document mentioned, and they change two rows above.**
+
+- ☑ **Phase 8's kill switch did not work for two of its six workers.** `ReservationSweeper`
+  and `EtaTick` predate `common/sweeper.ts` and never adopted it, so they never read
+  `DISABLED_WORKERS` — while `env.ts` listed both by name. Both now extend `Sweeper`, and
+  the name list is asserted in `workers.e2e.test.ts` rather than written in a comment.
+- ☑ **Phase 8's notifier starved at one busy clinic.** `take: 200` over an oldest-first
+  six-hour window with dedupe on insert meant it re-read the same 200 events forever.
+  Above ~33 notifiable events/hour — one 100-patient session makes 200–300 — "you are
+  being called" arrived hours late, silently.
+- ☑ **The same constraint suppressed every recall.** `unique(entryId, type)` allowed one
+  CALLED per booking, so a requeued patient was never told about the second call. Replaced
+  by `dedupeKey`, which keys on the occasion; LEAVE_NOW still fires once per booking.
+- ☑ **A refund whose gateway call failed was never retried.** `reconcileRefunds` now
+  sweeps them, asking Razorpay first so a refund is never raised twice.
+- ☑ Also: readiness no longer 503s a healthy API on a Redis blip; the reservation sweep is
+  bounded; `x-powered-by` off; the `@opd/contracts` fixture that was aborting the whole
+  pipeline is fixed (**16/16 green, 0 cached**).
+
+**Still open, and now the real Phase 10 list:**
+
+- ☐ **Error tracking and `helmet`** — both need a dependency, which CLAUDE.md §2 wants
+  approved rather than assumed. `common/scrub.ts` is written and tested; installing the
+  Sentry SDK and wiring `beforeSend` is the remaining step.
+- ☑ **Onboarding a hospital — done, 2026-09-05.** There was no way to create one: the only
+  `hospital.create` in the API was the seed, the only write of `status: VERIFIED` was the
+  seed, and there is no platform-level role anywhere. `apps/api/src/onboard.ts` closes it:
+  `pnpm --filter @opd/api onboard -- --name X --city Y --admin a@b.test` creates the
+  hospital VERIFIED, ensures its queue policy, and invites the first ADMIN **through the
+  real `StaffService`** rather than reimplementing the token scheme. Proved end to end —
+  accept-invite issues a session, the new admin creates a department, a replayed token is
+  refused, and the hospital appears in patient discovery. No super-admin console, and
+  none needed for a white-glove pilot (PRD 14).
+- ☐ **`EtaTick` broadcasts at most 50 sessions per minute** and `LeaveNowNotifier` 30. Fine
+  at pilot; patients in session 51+ silently stop seeing their window drift.
+- ☐ **Admin reports** (`P9-BE-02`) remain deferred, as Phase 9 recorded.
+- ☐ **Rate limiting is in-memory**, so it becomes per-instance decoration the day a second
+  API process runs — the same day the Socket.IO Redis adapter starts earning its keep.
+
+### Latency — measured 2026-09-05, and it is not where anyone thought
+
+Prompted by "the API is so slow". **It is not.** Every endpoint is 2–30 ms and the whole
+queue board's data is **151 ms**. The 1–3.6 s pages were `next dev`. Narrative and the
+two measurements I got wrong are in `PROGRESS.md`.
+
+| | `next dev` | `next start` |
+|---|---|---|
+| `/login` (fetches nothing) cold | 110 800 ms | 35 ms |
+| queue board | 951–3637 ms | **123 ms** |
+
+**Two consequences for Phase 10, both good.** `P10-WEB-01` deploys the console to Vercel,
+which runs the production build — so the console gets roughly an 8× improvement from the
+deploy itself, with no work. And no backend performance work is warranted before launch:
+nothing in `apps/api/src` changed in this pass, because nothing there was slow.
+
+☑ Fixed along the way: `/me` was being fetched 2–4× per render (now once, request-scoped
+via `cache()`); the mobile app had no `staleTime` so every screen mount refetched;
+`next dev --turbopack` cuts cold compiles from 110.8 s to 13.4 s.
+
 ### The UI redesign — state as of 2026-09-05
 
 Not a phase; a cross-cutting pass over both clients. The narrative, including four

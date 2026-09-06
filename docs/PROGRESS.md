@@ -6577,3 +6577,335 @@ retitling a pill, because the test is wrong and the copy is right.
 
 **None of this has been seen in a browser.** It compiles, typechecks and lints clean from
 a cold cache, which is exactly the guarantee that was worth nothing last session.
+
+---
+
+## 2026-09-05 · The pre-production audit, and the four things it found that were not written down
+
+A full review of Phases 0–9 against the PRD, the architecture and the running code,
+ahead of Phase 10. The verdict was **conditional pass, 72/100**: the expensive half of
+this product — the queue engine, the payment path, tenant isolation — is correct and
+defensible, and the cheap half is missing. Zero TODOs, zero `@ts-ignore`, zero swallowed
+exceptions across ~29k lines.
+
+Four defects were found that no document mentioned. All four are fixed here, and each
+new test was **falsified before being trusted**.
+
+**1. The pipeline was red and the number hid it.** `pnpm test` reported "4 successful,
+13 total" — which reads like a collapse and was in fact one missing key in one fixture.
+`@opd/contracts` sits at the root of the Turbo graph, so its failure aborted the run
+before nine other tasks executed. Running the rest separately: lint, typecheck, every
+build target and all 25 API test files passed. Added `doctorPhotoUrl: null` to the
+`SessionCard` fixture — the schema was right all along, and the seeded nulls depend on
+it being nullable. `main` never had the field, so this branch is what would have turned
+CI red on merge.
+
+**2. The mobile app signed patients out roughly every fifteen minutes.** `authedFetch`
+refreshed on a 401 with no single-flight guard. Home alone issues three concurrent
+queries and the token screen polls, so when the access token expired they all 401'd
+together and each posted the *same* refresh token. The server did exactly the right
+thing — `rotate()` claims the token under a family lock and reads a second presentation
+as replay, killing the family — and `auth.e2e.test.ts:115` has asserted that since Phase
+9: *"the loser tripped reuse detection, so the winner's token is dead too."* The client
+was the replaying attacker. A patient watching their place in a queue was thrown back to
+the sign-in screen.
+
+Fixed client-side only, with a shared in-flight promise, plus a `tokensRef` so a request
+that has been on the wire for a second stops deciding what to do about a 401 from a
+stale closure — if the token already rotated underneath it, it retries with the current
+one instead of asking for another rotation. **The server was not touched.** Weakening
+reuse detection to accommodate a client bug would have traded a real security property
+for a convenience.
+
+**3. Push notifications starved at one busy clinic.** `EventNotifier` read the timeline
+`orderBy createdAt asc, take: 200` over a six-hour window, and deduplicated on *insert*
+via `unique(entryId, type)` — so there was no cursor and nothing excluding events already
+notified. Every pass fetched the same oldest 200, re-confirmed all of them as duplicates,
+and never reached anything newer. Above roughly 33 notifiable events an hour — and one
+100-patient session produces two or three hundred — "you are being called" arrived hours
+late. Nothing errored, nothing logged, and no test ran above the batch size.
+
+**4. And the same constraint silently suppressed every recall.** `unique(entryId, type)`
+allowed one CALLED per booking for all time. The no-show flow is called → grace →
+recalled → grace → skipped → requeued → **called again**, so the patient who had already
+missed a call was the only one never told about the next one — while the SKIPPED push
+they had just received said, in so many words, "you will be called again".
+
+Both are the same root cause and got one fix. `unique(entryId, type)` is replaced by
+`dedupeKey`, which names the *occasion* rather than the booking: the `QueueEvent` id for
+anything an event caused, `<entryId>:<type>` for a prediction like LEAVE_NOW, which still
+fires once per booking and whose storm guard is unchanged. A separate `sourceEventId`
+foreign key — deliberately not the dedupe key, though it holds the same value — gives the
+notifier a relation, so `notifications: { none: {} }` is applied by Postgres *before* the
+row limit. Migration `20260905120000_notification_dedupe_by_occasion` backfills every
+existing row to `<entryId>:<type>`, which is exactly what the old constraint meant, and
+was proved equivalent to the datamodel with `migrate diff --exit-code`.
+
+**Two of the six workers ignored their own kill switch.** `ReservationSweeper` wrote the
+sweep pattern in Phase 5 and `EtaTick` copied it in Phase 7; Phase 8 extracted
+`common/sweeper.ts` from them and neither ever adopted it. They kept their own interval,
+overlap flag and test bail-out — and never gained the one thing that only lives in the
+base class, the `DISABLED_WORKERS` check. `env.ts` listed both by name. Setting
+`DISABLED_WORKERS=reservation` logged nothing, changed nothing, and looked exactly like
+success. That is the control you reach for at 3am. Both now extend `Sweeper` (a net
+deletion), and the env comment is now executable: `workers.e2e.test.ts` asserts the eight
+names against the running application, because a comment naming identifiers drifts and
+this one had.
+
+**Refunds had no retry, and the comment claimed they did.** `sendRefundToGateway`
+swallows a gateway failure on purpose — the cancellation has committed and is correct —
+and left the row PENDING with no gateway id, saying Phase 8's reconcile worker would pick
+it up. It never did: that worker only ever read `Payment` rows. So a refund could sit owed
+forever with the payment row already saying REFUNDED. `reconcileRefunds` now sweeps them
+through the same sweeper, and **asks Razorpay before re-sending**: raising a refund is not
+idempotent, and the case being repaired is precisely the one where the gateway may already
+have accepted it and only our write failed. A refund carrying our `refundId` in its notes
+is adopted rather than raised again. Paying a patient twice is worse than paying them late.
+
+**Smaller, same pass.** `/health/ready` now gates its status code on Postgres and merely
+*reports* Redis: Redis backs the Socket.IO adapter and this probe, nothing else, so a
+Redis blip used to 503 an API that could still answer every request and get it drained —
+the product would have degraded from live to stale and instead went to zero. The
+reservation sweep's `findMany` is bounded (it read every lapsed hold on the platform each
+minute to use twenty sessions of it). `x-powered-by` is disabled. A duplicated paragraph
+and a dead `const details = ''` are gone from `apps/web/lib/api.ts`.
+
+**Verified:** `turbo run lint typecheck test build --force` — **16/16, 0 cached**.
+Falsification, run deliberately rather than assumed: reverting the notifier filter and
+`sourceEventId` failed the two new tests with *expected 1 to be 2* and *expected 1 to be
+250*, while every existing storm-guard test kept passing; renaming `EtaTick`'s worker
+made the kill-switch test fail on the name list.
+
+### Not fixed, and why
+
+**Sentry and `helmet` need a dependency** and CLAUDE.md §2 wants that approved, not
+assumed. The scrubber for `beforeSend` already exists and is tested; installing the SDK is
+the remaining step. **Deployment artifacts, backups and monitoring are Phase 10** and are
+genuinely 0% — no Dockerfile, no hosting config, no restore drill. **A hospital still
+cannot be verified** except by editing the database, which makes pilot onboarding a manual
+SQL edit against live tenant data; that wants its own endpoint. **Admin reports** remain
+deferred, as Phase 9 recorded.
+
+### Still true, and still the lesson
+
+**None of this has been seen in a browser or on a device.** Sixteen green tasks is the
+same guarantee that was worth nothing two sessions ago.
+
+---
+
+## 2026-09-05 · "The API is so slow" — it was not the API
+
+A latency investigation prompted by console pages taking 1–3.6 s and queue commands
+3.3–4.3 s. **Measured before changing anything**, which is the whole point of this entry:
+the assumption was wrong, and three of the five things worth fixing were not what anyone
+would have guessed.
+
+### What the API actually costs
+
+| endpoint | median |
+|---|---|
+| `/health` (no DB) | 1–2 ms |
+| `/me`, `/patients`, `/cities` | 3–5 ms |
+| `/hospitals?city=`, `/departments` | 9–11 ms |
+| session cards — the hottest read path | **26 ms** |
+| `/sessions/:id/eta` | **28 ms** |
+| **the queue board's ENTIRE data set**, in the two waves the page issues | **151 ms** |
+
+Login is 109 ms and that is correct: argon2 is deliberately expensive.
+
+### Where the seconds were
+
+`apps/web` was running `next dev -p 3001` — webpack, on Windows, compiling per route on
+first visit. The decisive measurement is a page that fetches nothing at all:
+
+| | `next dev` | `next start` |
+|---|---|---|
+| `/login` cold | **110 800 ms** | **35 ms** |
+| `/login` warm | 76 ms | 12–14 ms |
+| queue board | 951–3637 ms | 172–414 ms |
+| check-in, cold | 13 190 ms | 66 ms |
+
+`/api/socket-token`, a route handler that reads one cookie and returns it, took 64–206 ms
+in dev. That is not data access. **~85–95 % of the wall clock was the dev server**, and no
+amount of backend work would have touched it.
+
+### Two measurements I got wrong first, and corrected
+
+- **`/sessions/:id/eta` is not slow.** The first pass reported 103 ms and I wrote it up as
+  the one genuine API outlier. That was three samples with no warm-up, catching a cold
+  hit. With 20 warm samples it is **28 ms**, in line with everything else. `EXPLAIN
+  ANALYZE` on its heaviest query — the all-time `Consultation` groupBy — is **0.28 ms**.
+  Nothing to fix, and the fix I had sketched (bounding "all-time" to 90 days) would have
+  changed a documented semantic to solve a problem that did not exist. The unbounded
+  growth is still a real *future* concern; it is not a present cost.
+- **`LOG_LEVEL=debug` → `info` bought nothing measurable.** The hypothesis was that
+  pino-pretty on every request was costing real time. Before: `/eta` 28 ms, `/me` 13 ms.
+  After: 28 ms and 11 ms. Kept the change because `info` is the right default, but it is
+  not a performance fix and should not be recorded as one.
+
+### What actually changed
+
+- **`/me` was fetched two to four times per render.** `(console)/layout.tsx` fetched it to
+  build the nav, then the page fetched it again through `requireStaffHospital()`;
+  `/config/*` made it three (root layout + config layout + page) and a server action a
+  fourth. Next deduplicates identical fetches within a render, but `apiGet` sends
+  `cache: 'no-store'` — correctly, this is per-user data — and that opts out of the
+  memoisation too. Now one `cache()`-wrapped `getMe()` in `lib/tenant.ts` that the layout,
+  the pages and both `_run.ts` helpers share. `cache()` is request-scoped, so the
+  duplicates collapse and nothing survives into the next request — which matters, because
+  the value carries a hospital membership. **Verified by counting: one board load now
+  produces exactly 1 `/me` at the API, was 2.** Board median 172–414 ms → **123 ms**.
+- **The mobile app had no query defaults.** `new QueryClient()` leaves `staleTime` at 0, so
+  every mount, back-navigation and foreground refired every request — a skeleton flashing
+  over data the user was already looking at. Now 30 s and one retry. Safe: the live screens
+  set their own `refetchInterval` and realtime invalidation is not gated by `staleTime`.
+- **`next dev --turbopack`.** Cold compile of `/login`: 110.8 s → **13.4 s**. Warm dev
+  pages stay around 1 s either way, so this fixes the worst moments of the loop rather than
+  the loop itself. Production build path untouched.
+
+### The lesson worth keeping
+
+**Profile the thing that is slow, not the thing you suspect.** Every instinct here pointed
+at the backend — the queue engine, the ETA arithmetic, missing indexes, N+1s. The backend
+was fine, and had been all along. The two hypotheses I formed before measuring (`/eta` and
+the log level) were both wrong, and one of them would have led to a semantic change for no
+gain. The single number that settled it was a page with no data on it taking 110 seconds.
+
+**Verified:** `turbo run lint typecheck test build --force` — **16/16, 0 cached**,
+including the 68-check console walkthrough, which exercises `lib/tenant.ts` on every page.
+
+### The changes, file by file
+
+Six files, 77 insertions. Nothing in `apps/api/src` — which is the finding, restated as a
+diff.
+
+| File | Change | Why |
+|---|---|---|
+| `apps/web/lib/tenant.ts` | New `getMe()` wrapped in React `cache()`. `requireStaffHospital` and `requireAdminHospital` became `cache()`-wrapped consts that call it instead of fetching `/me` themselves. | The whole `/me` fix. `cache()` is request-scoped, so duplicates within one render collapse and nothing survives into the next request — load-bearing, because the value carries a hospital membership. |
+| `apps/web/app/(console)/layout.tsx` | Calls `getMe()` instead of its own `apiGet<MeResponse>('/me')`. | The layout and the page below it now share one call rather than each asking for the identical answer. |
+| `apps/web/app/(console)/page.tsx` | Same swap; dropped the now-unused `MeResponse` import. | Still deliberately **not** `requireStaffHospital()` — that redirects to `/`, and calling it from the overview is an infinite loop. The existing comment saying so is still true and still needed. |
+| `apps/web/package.json` | `"dev": "next dev -p 3001 --turbopack"` | Cold compile 110.8 s → 13.4 s. `next build` is untouched and still webpack. |
+| `apps/mobile/app/_layout.tsx` | `new QueryClient({ defaultOptions: { queries: { staleTime: 30_000, retry: 1 } } })` | It had no defaults at all, so `staleTime` was 0. |
+| `apps/api/.env.example` | `LOG_LEVEL=debug` → `info` (and the gitignored `apps/api/.env` locally). | Correct default. **Not** a performance fix — it measured as noise. |
+
+### What was deliberately NOT changed
+
+- **`NODE_ENV` stays `development` locally.** `seed.ts:657` refuses to run when it is
+  production, and both the e2e suite and the console walkthrough depend on seeded data.
+  Production mode belongs to Phase 10's deployed environment, not to this file.
+- **`EtaService.pacesFor` keeps its all-time window.** The 90-day bound I had sketched
+  would have changed what "all-time average" means to fix a 28 ms endpoint whose heaviest
+  query runs in 0.28 ms. Unbounded growth remains a future concern; it is not a present
+  cost, and a semantic change needs a better reason than a mis-measurement.
+- **The console's server-components-only architecture.** Server actions still do
+  POST → command → `revalidatePath` → 303 → full GET, which is two renders per click. The
+  audit's open **L1** finding (errors round-tripping through `?error=` in both `_run.ts`
+  files) is untouched. Both were explicitly ruled out of scope for this pass.
+- **No Redis caching, no index changes, no query rewrites.** Nothing in the data layer was
+  slow enough to justify any of them.
+
+### How to reproduce the numbers
+
+The measurement harness was a node `fetch` loop, not a tool: log in, hit each path 8–25
+times, discard the first few as warm-up, report the median. Two things it taught, both of
+which bit me here:
+
+1. **Warm-up matters more than sample count.** Three unwarmed samples of `/sessions/:id/eta`
+   said 103 ms; twenty warmed ones said 28 ms. The first number nearly bought a schema
+   semantic change.
+2. **Measure a page that fetches nothing.** `/login` is the control. It is what separates
+   "the data is slow" from "the framework is slow", and it answered the whole question in
+   one request.
+
+---
+
+## 2026-09-05 · Onboarding a hospital, which nothing could do
+
+The pre-production audit found that **there was no way to create a hospital.** Not a
+missing endpoint - a missing capability. Confirmed by reading, not by assuming:
+
+- the only `hospital.create` in the entire API is `seed.ts:677`;
+- the only place `status: 'VERIFIED'` is ever written is `seed.ts:685`;
+- `Role` is `['ADMIN', 'RECEPTION', 'DOCTOR']` and **there is no platform-level role
+  anywhere in the codebase** - zero hits for super-admin in any form;
+- every hospital-scoped controller is `hospitals/:hospitalId/...` and assumes the row
+  exists; `StaffService.invite` is `@Roles('ADMIN')`, so it needs an existing admin in
+  the hospital it is inviting into.
+
+Which is a chicken-and-egg with exactly three rows in it: the `Hospital`, its
+`QueuePolicy`, and one `HospitalStaff` with role ADMIN. Everything downstream - every
+department, doctor, schedule, session, and every other staff member - the hospital does
+itself through the console, and all of that has worked since Phase 2.
+
+So the gap was never a feature area. It was a bootstrap.
+
+### It was planned, and then not decided
+
+docs/PRD.md 14 always said the first hospitals are onboarded manually ("white-glove")
+and 6.5 leaves a super-admin console out of the MVP. Both still look right for 1-3 pilot
+hospitals. What was never decided is whether *manually* means a command or a person
+typing INSERT against a live tenant database at eleven at night. It now means
+`apps/api/src/onboard.ts`.
+
+### What it does, and what it deliberately does not
+
+```
+pnpm --filter @opd/api onboard -- \
+  --name "Sunrise Multispeciality" --city Pune --area Baner --admin admin@sunrise.test
+```
+
+Creates the hospital VERIFIED, ensures the queue policy through
+`QueuePolicyService.ensure` so the defaults stay in contracts, and then **calls the real
+`StaffService.invite`** rather than reimplementing it. That last part is the whole design
+decision: the invite scheme is 32 random bytes, SHA-256 at rest, plaintext returned
+exactly once, account created with a null `passwordHash`. Copying forty lines of that
+into a script nobody tests is precisely how the two sweepers drifted and silently lost
+their kill switch. So the script boots a real Nest application context and asks the
+product to do it.
+
+The cost is that it starts Redis and the sweepers for the second the script runs. They
+are `unref`'d and torn down on close, and it does nothing a running API would not.
+
+- **It hands out no password.** An invitation is not a credential: single-use, seven-day
+  expiry, and the administrator chooses their own through `/accept-invite`. Nothing in
+  the script ever learns it.
+- **It does NOT refuse to run in production**, and that is the one place it deliberately
+  departs from `seed.ts`. The seed must never touch real data; this script exists to
+  create it. Its guard is about not duplicating a tenant (refuses an existing
+  name + city), not about which environment it is in.
+- **VERIFIED, not PENDING.** Running the command *is* the verification step - a human
+  decided to onboard this hospital. Creating it PENDING would produce a tenant no
+  patient can see and nothing in the product can promote, which is the hole this closes
+  rather than reproduces.
+
+### Proved end to end, not just built
+
+Ran against a real new hospital, then walked the whole chain:
+
+| step | result |
+|---|---|
+| the three rows | hospital VERIFIED · 1 policy · account with **no password** · membership ADMIN/INVITED |
+| `POST /auth/accept-invite` with the printed token | 200, session issued |
+| `GET /me` | `ADMIN@Sunrise Multispeciality (ACTIVE)` |
+| `POST /hospitals/:id/departments` | 201 — the new admin can actually administer |
+| replaying the same token | **401, "This invitation is not valid"** — single-use holds |
+| patient discovery | Pune now lists 2 hospitals; Sunrise shows `sessions today: 0` |
+
+That last row is correct rather than disappointing: a hospital is listable the moment it
+is onboarded, and gains sessions when its admin configures one.
+
+**One thing I got wrong while testing it**, worth recording because it nearly became a
+bug report: the first patient-visibility check said Pune was missing. The product was
+right and the assertion was wrong - the `City` DTO field is `name`, not `city`, so
+`c.city` was undefined for every row. Read the contract before believing a red result.
+
+**Verified:** `turbo run lint typecheck test build --force` — **16/16, 0 cached**. The
+script adds no lint warnings (CLI output goes through `process.stdout.write`, since
+eslint reserves `console` for warn and error here).
+
+### Still not built, and still fine
+
+No super-admin console, no `POST /hospitals`, no UI. Adding one would mean inventing a
+platform-level role that nothing else in the system models, for 1-3 hospitals that are
+onboarded by hand on purpose. When a fourth hospital wants to self-serve, this script is
+the thing an endpoint would call.
