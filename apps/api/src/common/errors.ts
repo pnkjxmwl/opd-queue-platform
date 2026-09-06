@@ -171,6 +171,24 @@ export class DoctorHasLeftError extends AppError {
   }
 }
 
+/**
+ * Nobody has said the doctor is here yet, and the command needs them in the room.
+ *
+ * The one a clinic meets first: NOT_PRESENT is the default on every session, so this
+ * fires on the first call-next of the day until somebody marks the doctor present.
+ * Deliberate - see docs/PRD.md 10. The remedy is one action rather than a wait or an
+ * ending, which is what earns it a code of its own next to the two above.
+ */
+export class DoctorNotPresentError extends AppError {
+  constructor() {
+    super(
+      'DOCTOR_NOT_PRESENT',
+      409,
+      'The doctor has not been marked present yet - mark them present before calling the next patient',
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Join + payment (Phase 5)
 // ---------------------------------------------------------------------------

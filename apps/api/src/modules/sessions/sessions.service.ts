@@ -123,6 +123,36 @@ export class SessionsService {
       throw new ValidationFailedError('Doctor is not active', { doctorId: 'inactive' });
     }
 
+    const scheduledEnd = istToUtc(input.date, input.endTime);
+
+    /**
+     * A session that is already over can never take a booking, so creating one is
+     * always a mistake - and, until this guard, a silent one.
+     *
+     * `registrationGate` closes on `scheduledEnd <= now` before it reads a single
+     * policy, so the patient app correctly shows "Registration closed". The console
+     * shows OPEN_FOR_REGISTRATION, because that is the only status creation can
+     * produce (docs/Rules.md 1.2). **Nothing ever reconciles the two**: the cutoff
+     * sweeper deliberately skips sessions whose end has passed, and END_SESSION is a
+     * manual command nobody runs on a session they never worked. So the row sits
+     * there for ever, telling staff it is open and patients it is closed.
+     *
+     * A session that has merely STARTED is fine and must stay fine - a clinic that
+     * opened at 10:00 and remembers to create the session at 10:30 is normal, and
+     * ACTIVE is in `ACCEPTS_BOOKINGS` for exactly that reason. Only the end matters.
+     *
+     * Here rather than in `CreateOPDSessionRequest`, because the rule needs a clock
+     * and a Zod schema shared with the clients must not have one - the client's idea
+     * of "now" is not the thing that decides. `generate` is deliberately left alone:
+     * it materialises a schedule for a whole date, and a day's record legitimately
+     * includes the blocks that have already finished.
+     */
+    if (scheduledEnd <= new Date()) {
+      throw new ValidationFailedError('That session has already ended, so no patient could join it', {
+        endTime: `${input.date} ${input.endTime} IST is in the past`,
+      });
+    }
+
     // The engine must always find a policy; this is the only place a session can be
     // born, so it is the right place to guarantee one exists.
     await this.policy.ensure(hospitalId);
@@ -136,7 +166,7 @@ export class SessionsService {
           currentProviderDoctorId: doctor.id,
           date: dateColumnFromString(input.date),
           scheduledStart: istToUtc(input.date, input.startTime),
-          scheduledEnd: istToUtc(input.date, input.endTime),
+          scheduledEnd,
           tokenPrefix: input.tokenPrefix,
           feePaise: input.feePaise,
         },

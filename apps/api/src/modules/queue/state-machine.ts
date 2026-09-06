@@ -1,6 +1,8 @@
 import type { DoctorPresence, QueueEntryStatus, SessionStatus } from '@opd/contracts';
 import {
+  AppError,
   DoctorHasLeftError,
+  DoctorNotPresentError,
   DoctorOnBreakError,
   InvalidQueueTransitionError,
   QueuePausedError,
@@ -427,19 +429,38 @@ const BLOCKED_WHILE_PAUSED: readonly QueueCommand[] = ['CALL_NEXT'];
 const NEEDS_THE_DOCTOR_PRESENT: readonly QueueCommand[] = ['CALL_NEXT', 'START_CONSULTATION'];
 
 /**
- * The presences that mean "not in the room right now".
+ * The only presence that permits calling a patient in.
  *
- * **NOT_PRESENT is deliberately absent**, and that is the important half of this
- * rule. It is the DEFAULT for every session, so blocking on it would make marking
- * the doctor present a mandatory ceremony before the first patient of every clinic -
- * and the first `call-next` is what activates a session in the first place. It is
- * also the absence of information rather than a statement: nobody has said anything
- * yet. docs/PRD.md 11 is explicit that a late doctor leaves the queue unaffected,
- * and reception routinely calls the next patient in as the doctor walks back.
+ * Written as the one that allows rather than the three that block, because three
+ * quarters of the enum now block and a list of exclusions reads as an accident.
  *
- * ON_BREAK and LEFT are different: somebody positively declared the doctor away.
+ * **NOT_PRESENT blocks, and that is a reversal.** Until this change it did not: it
+ * is the DEFAULT for every session, so the argument was that blocking it makes
+ * marking the doctor present a mandatory ceremony before the first patient of every
+ * clinic, and that NOT_PRESENT is the absence of information rather than a statement
+ * that the doctor is away. Both of those are still true. The ceremony was accepted
+ * anyway, deliberately, because the alternative is what it permits: a receptionist
+ * calling patients in and completing consultations for a doctor nobody ever said had
+ * arrived - which writes a Consultation row, and teaches the ETA engine a duration,
+ * for a doctor who may not be in the building. One extra click at the start of a
+ * clinic is a smaller cost than a clinical record nobody stands behind.
+ *
+ * Either role may perform it: the doctor marks themselves present, or reception does
+ * it on their behalf. See docs/PRD.md 10.
  */
-const PRESENCE_MEANS_AWAY: readonly DoctorPresence[] = ['ON_BREAK', 'LEFT'];
+const PRESENCE_ALLOWS_CALLING: readonly DoctorPresence[] = ['PRESENT'];
+
+/**
+ * Which refusal a presence earns. Three distinct errors rather than one, because
+ * the remedy differs and a receptionist has to be told which they are looking at: a
+ * break is waited out, a departure ends the session, and an unmarked doctor is
+ * marked present.
+ */
+function presenceRefusal(presence: DoctorPresence): AppError {
+  if (presence === 'ON_BREAK') return new DoctorOnBreakError();
+  if (presence === 'LEFT') return new DoctorHasLeftError();
+  return new DoctorNotPresentError();
+}
 
 /**
  * Commands that must NEVER be blocked by presence, recorded here so the reasoning
@@ -470,12 +491,10 @@ export function assertSessionAccepts(
     throw new QueuePausedError();
   }
   if (
-    PRESENCE_MEANS_AWAY.includes(session.doctorPresence) &&
-    NEEDS_THE_DOCTOR_PRESENT.includes(command)
+    NEEDS_THE_DOCTOR_PRESENT.includes(command) &&
+    !PRESENCE_ALLOWS_CALLING.includes(session.doctorPresence)
   ) {
-    // Two errors, not one: a break is waited out and a departure ends the session,
-    // so a receptionist needs to be told which of the two they are looking at.
-    throw session.doctorPresence === 'ON_BREAK' ? new DoctorOnBreakError() : new DoctorHasLeftError();
+    throw presenceRefusal(session.doctorPresence);
   }
 }
 

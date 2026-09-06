@@ -18,6 +18,7 @@ import { pause, resume } from '../src/modules/queue/commands/pause';
 import { presence } from '../src/modules/queue/commands/presence';
 import {
   DoctorHasLeftError,
+  DoctorNotPresentError,
   DoctorOnBreakError,
   NoEligiblePatientError,
   QueuePausedError,
@@ -100,6 +101,11 @@ describe('queue scenarios (P4-TEST-01)', () => {
           scheduledEnd: new Date(start.getTime() + 3 * 60 * 60 * 1000),
           feePaise: 50_000,
           status: 'OPEN_FOR_REGISTRATION',
+          // Explicit, because the column DEFAULTS to NOT_PRESENT and call-next is
+          // refused until somebody marks the doctor present. A fixture that leans on
+          // the default is a fixture that cannot call a patient - and one that says
+          // PRESENT without meaning it hides the guard from every test below.
+          doctorPresence: 'PRESENT',
         },
       })
     ).id;
@@ -403,16 +409,48 @@ describe('queue scenarios (P4-TEST-01)', () => {
     await presence(queue, sessionId, actor, { presence: 'ON_BREAK' });
     await expect(callNext(queue, sessionId, actor)).rejects.toBeInstanceOf(DoctorOnBreakError);
 
-    // Being LATE still must not block anything (docs/PRD.md 11): NOT_PRESENT is the
-    // default for every session, and nobody has actually said the doctor is away.
+    // NOT_PRESENT blocks too, and this assertion is the REVERSE of what it used to
+    // be. It previously called successfully here, on the argument that NOT_PRESENT is
+    // the default and therefore says nothing. What that permitted, on a real console:
+    // a receptionist calling patients in and completing consultations for a doctor
+    // nobody had ever said was in the building.
     await presence(queue, sessionId, actor, { presence: 'NOT_PRESENT' });
-    const late = await callNext(queue, sessionId, actor);
-    expect(late.entry?.tokenNumber).toBe(2);
+    await expect(callNext(queue, sessionId, actor)).rejects.toBeInstanceOf(DoctorNotPresentError);
 
-    // And once they are back, the queue runs again.
+    // And once somebody says the doctor is here, the queue runs again. Either role
+    // may say it - the actor here is the same one reception uses.
     await presence(queue, sessionId, actor, { presence: 'PRESENT' });
+    const called = await callNext(queue, sessionId, actor);
+    expect(called.entry?.tokenNumber).toBe(2);
     await expect(
-      startConsultation(queue, sessionId, actor, { entryId: late.entry!.id }),
+      startConsultation(queue, sessionId, actor, { entryId: called.entry!.id }),
+    ).resolves.toBeDefined();
+  });
+
+  it('refuses the very first call of the day until the doctor is marked present', async () => {
+    // The path a real clinic takes every morning, and the one that was broken: a
+    // freshly created session defaults to NOT_PRESENT, so this is the FIRST thing
+    // reception meets - not an edge case reached by fiddling with a dropdown.
+    await book('First of the day', 1);
+    await checkIn(queue, sessionId, actor, { tokenNumber: 1 });
+
+    await presence(queue, sessionId, actor, { presence: 'NOT_PRESENT' });
+    await expect(callNext(queue, sessionId, actor)).rejects.toBeInstanceOf(DoctorNotPresentError);
+
+    // The desk is not blocked while the doctor is missing - people keep arriving.
+    await book('Second', 2);
+    await expect(checkIn(queue, sessionId, actor, { tokenNumber: 2 })).resolves.toBeDefined();
+
+    await presence(queue, sessionId, actor, { presence: 'PRESENT' });
+    const first = await callNext(queue, sessionId, actor);
+    expect(first.entry?.tokenNumber).toBe(1);
+
+    // COMPLETE_CONSULTATION is never presence-blocked: a patient already in the room
+    // must always be closable, or marking the doctor away strands them for good.
+    await startConsultation(queue, sessionId, actor, { entryId: first.entry!.id });
+    await presence(queue, sessionId, actor, { presence: 'LEFT' });
+    await expect(
+      completeConsultation(queue, sessionId, actor, { entryId: first.entry!.id }),
     ).resolves.toBeDefined();
   });
 

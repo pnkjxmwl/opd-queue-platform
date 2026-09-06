@@ -87,6 +87,9 @@ describe('notifications (P8-BE-01, P8-BE-02)', () => {
           scheduledEnd: new Date(start.getTime() + 4 * 60 * 60 * 1000),
           feePaise: 50_000,
           status: 'OPEN_FOR_REGISTRATION',
+          // call-next is refused while the doctor is NOT_PRESENT, which is the column
+          // default. This suite calls patients, so it says so.
+          doctorPresence: 'PRESENT',
         },
       })
     ).id;

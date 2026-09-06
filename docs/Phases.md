@@ -1558,6 +1558,38 @@ correct; what was missing was all at the edges.
 - ☐ **Rate limiting is in-memory**, so it becomes per-instance decoration the day a second
   API process runs — the same day the Socket.IO Redis adapter starts earning its keep.
 
+### Found by hand on 2026-09-06/07 — two defects a person saw and no test did
+
+Both came out of the first real session on the console after the redesign, and neither
+was on any list. Narrative in `PROGRESS.md`.
+
+- ☑ **A session could be created after it had already ended.** `CreateOPDSessionRequest`
+  validated only `endTime > startTime`, so a 10:00–12:00 clinic created at 23:26 was
+  accepted in silence — then showed as "Open for registration" in the console and
+  "Registration closed" in the app, for ever, because nothing reconciles a stored status
+  with the live gate. `sessions.service.create` now refuses one whose end has passed.
+  Checks the END, not the start: a clinic that opens at 10:00 and creates the session at
+  10:30 is normal.
+- ☑ **Anyone could call and complete patients for a doctor nobody had marked present.**
+  `NOT_PRESENT` deliberately blocked nothing; it now blocks `call-next` and
+  `start-consultation`, with a third error `DOCTOR_NOT_PRESENT` and a one-press **Mark
+  doctor present** button on the board. A reversal of PRD §10, which was rewritten with
+  it. `complete-consultation` stays unblocked so nobody is stranded IN_CONSULTATION.
+- ☐ **A session past its scheduled end keeps `OPEN_FOR_REGISTRATION` for ever.** The
+  cutoff sweeper skips it by design and `END_SESSION` is manual. Letting the sweeper
+  close those too — reusing `closeRegistration` — adds no policy, since the gate already
+  refuses those joins; it changes background behaviour for every hospital, so it wants a
+  deliberate decision.
+- ☐ **The queue controller applies one `@Roles('ADMIN','RECEPTION','DOCTOR')` to all
+  thirteen commands**, so reception can complete a consultation, which PRD §6.2 gives to
+  the doctor. The controller's own comment defers the split to "a Phase 6/9 concern" —
+  **both phases shipped without it.**
+- ☐ **`eta.e2e.test.ts` "flags a session running behind" fails for the first ~15 minutes
+  of every IST day.** It places its "today" consultations 5, 10 and 15 minutes ago, which
+  straddle the calendar boundary just after midnight, so today's pace has too few samples
+  to be a trend. The engine is right; the fixture assumes daytime. Needs an injectable
+  clock, not a skip.
+
 ### Latency — measured 2026-09-05, and it is not where anyone thought
 
 Prompted by "the API is so slow". **It is not.** Every endpoint is 2–30 ms and the whole

@@ -6909,3 +6909,196 @@ No super-admin console, no `POST /hospitals`, no UI. Adding one would mean inven
 platform-level role that nothing else in the system models, for 1-3 hospitals that are
 onboarded by hand on purpose. When a fourth hospital wants to self-serve, this script is
 the thing an endpoint would call.
+
+## 2026-09-07 · The doctor must be marked present before anyone can be called
+
+Found by the user on a real console, not by a test: on a freshly created session,
+reception pressed **Call next**, **Start consultation** and **Complete consultation**
+for a doctor nobody had ever said was in the building. A `Consultation` row was
+written - and its duration handed to the ETA engine - attributing work to a doctor
+whose presence was still `NOT_PRESENT`.
+
+**Everything about that was working as designed, which is why it survived four
+phases.** `state-machine.ts` gated `CALL_NEXT` and `START_CONSULTATION` on
+`PRESENCE_MEANS_AWAY = ['ON_BREAK', 'LEFT']`, and `NOT_PRESENT` was excluded on
+purpose. The reasoning was written down twice - in the state machine and in PRD 10 -
+and it was not bad reasoning:
+
+> *NOT_PRESENT is the DEFAULT for every session, so blocking on it would make marking
+> the doctor present a mandatory ceremony before the first patient of every clinic -
+> and the first `call-next` is what activates a session in the first place. It is also
+> the absence of information rather than a statement: nobody has said anything yet.*
+
+Both halves are still true. The ceremony is now required anyway.
+
+### Why the argument lost
+
+Because the thing it was protecting - one press at the start of a clinic - is cheaper
+than the thing it permitted. "Nobody has said anything yet" and "the doctor is here"
+are not the same claim, and the queue engine was treating them as one. A clinical
+record that says a consultation happened, with a duration precise enough to teach an
+estimator, should not be creatable for a doctor whose arrival nobody ever asserted.
+
+The decision was the product owner's, and it reverses a documented rule, so PRD 10 and
+11 were rewritten rather than left contradicting the code. `Architecture.md` 7.1 was
+also stale from the Phase 8 widening - it still named `LEFT` alone - and now names all
+three refusals.
+
+### What changed
+
+- `PRESENCE_MEANS_AWAY` became **`PRESENCE_ALLOWS_CALLING = ['PRESENT']`**. Three of
+  the four presences now block, and a list of exclusions reads as an accident where
+  naming the single permitted state reads as a rule.
+- A third error, `DOCTOR_NOT_PRESENT` (409). It earns its own code under the rule in
+  `contracts/common/error.ts`: the remedy differs. A break is waited out, a departure
+  ends the session, and this one is answered by marking the doctor present.
+- **Scope deliberately held to two commands.** `COMPLETE_CONSULTATION` is still never
+  presence-blocked. If it were, marking a doctor away mid-visit would strand the
+  patient `IN_CONSULTATION` with no way out - and with calling blocked, nobody reaches
+  a consultation without presence being marked anyway. `CHECK_IN` and `WALK_IN` stay
+  open too: people keep arriving at a desk whatever a dropdown says.
+- **A hard rule, not a policy flag.** No `requirePresenceToCall` column. If a pilot
+  hospital objects to the press, that is a small follow-up, and inventing the setting
+  before anyone has asked for it is two code paths to test instead of one.
+
+### The console, which is where the complaint actually came from
+
+A backend rule alone would have turned this into a red banner after a click. The board
+already showed presence as a badge and already had a presence `<select>`, but the
+select sits in a different card from Call next, so the remedy was nowhere near the
+refusal.
+
+Call next and Start consultation are now **disabled** while the doctor is not present,
+with the reason in words and a one-press **Mark doctor present** button beside them.
+That posts to the `setPresence` server action that already existed - a hidden field,
+no new action and no new endpoint. It is not a second copy of the rule (CLAUDE.md 9):
+it reads `doctorPresence` off the session the server already sent, exactly as the
+`paused` guard next to it does, and the API still refuses independently.
+
+### What it cost in tests, which is the interesting part
+
+Two tests asserted the *opposite* doctrine and had to be inverted - one of them named
+`does not let a LATE doctor block the queue`. Both were correct when written; both are
+now the clearest record of the reversal.
+
+Five e2e fixtures created their session on the `NOT_PRESENT` column default and then
+called patients: `queue-scenarios`, `notifications`, `workers`, `realtime` and
+`queue-lock`. All five now say `doctorPresence: 'PRESENT'` explicitly, copying
+`journey.e2e.test.ts`, which had always done so.
+
+`queue-lock` is worth its own line. Its paused-queue test expected `QueuePausedError`
+from a `CALL_NEXT` on a `NOT_PRESENT` session, and passed **only because the pause
+guard runs before the presence guard**. That is a true fact about the guard order, not
+something the test meant to assert, and it was one reordering away from becoming a
+mystery.
+
+`realtime.e2e.test.ts` had a bare `.expect(409)` for a call-next with nobody checked
+in. It kept passing after this change - for an entirely different reason. It now names
+`NO_ELIGIBLE_PATIENT`, because a status code alone is not an assertion about *why*.
+
+Each new test was falsified before being trusted: adding `NOT_PRESENT` back to the
+allow-list makes the unit test fail with *expected function to throw an error, but it
+didn't* and the e2e test fail outright. Restored, both pass.
+
+The console walkthrough seeds `NOT_PRESENT` and pressed Call next four times before
+touching presence. The fixture was **left alone** and Act II now opens on the new rule
+instead - Call next is not pressable, the board says why, one press fixes it - so the
+breakage became coverage of the thing being shipped.
+
+### Not done, and raised rather than bundled
+
+Reception can still run `Complete consultation`, which PRD 6.2 assigns to the doctor
+console. The queue controller carries a single `@Roles('ADMIN', 'RECEPTION', 'DOCTOR')`
+over all thirteen commands, with a comment deferring the split to "a Phase 6/9
+concern". **Phases 6 and 9 both shipped without it.** That is a real gap and a
+different decision from this one, so it stays a separate item rather than riding along
+in a change about presence.
+
+## 2026-09-07 · "The console says open, the app says closed" — recorded out of order
+
+Written after the presence entry above; the work happened just before it, late on
+2026-09-06. Recorded here rather than slotted in above, because this file is
+append-only (Rules.md 16).
+
+The user created a session and the two clients disagreed about it: the console badge
+read **Open for registration**, the patient app read **Registration closed**. Neither
+was wrong.
+
+### The row settles it
+
+```
+scheduledStart        2026-09-06 04:30 UTC   =  10:00 IST
+scheduledEnd          2026-09-06 06:30 UTC   =  12:00 IST
+status                OPEN_FOR_REGISTRATION
+registrationClosedAt  (null)
+createdAt             2026-09-06 17:56 UTC   =  23:26 IST
+```
+
+A 10:00–12:00 clinic, created at 23:26 at night. Its window had closed eleven and a
+half hours before it existed.
+
+The app calls `registrationGate`, which closes on `scheduledEnd <= now` before it
+reads a single policy - so `registrationOpen: false` was correct. The console renders
+the stored `status`, which is `OPEN_FOR_REGISTRATION` because that is the only status
+creation can produce (Rules.md 1.2). Also correct.
+
+**Nothing reconciles the two, and that is the actual defect.** The cutoff sweeper
+explicitly skips sessions whose end has passed - `scheduledEnd: { gt: now }`, commented
+*"ending it is END_SESSION's job"* - and `END_SESSION` is a manual command nobody runs
+on a session they never worked. So the row sits there for ever, telling staff it is
+open and patients it is closed. Three of the gate's five closure reasons
+(`SESSION_ENDED`, `PAST_CUTOFF`, `TOKEN_CAP_REACHED`) never touch `status`, so the
+console structurally cannot show them.
+
+### What was fixed, and what was only raised
+
+Fixed the cause rather than the symptom: **nothing stopped the session being created
+in the first place.** `CreateOPDSessionRequest` validates only `endTime > startTime`,
+so a dead session was creatable in silence. `sessions.service.create` now refuses one
+whose end has already passed.
+
+Three deliberate details:
+
+- **It checks the END, not the start.** A clinic that opened at 10:00 and remembers to
+  create the session at 10:30 is normal, and `ACTIVE` is in `ACCEPTS_BOOKINGS` for
+  exactly that reason. Only a session that can never take a booking is refused.
+- **In the service, not the Zod schema.** The rule needs a clock, and a contract shared
+  with the clients must not have one - the client's idea of "now" is not what decides.
+- **`generate` is untouched.** It materialises a schedule for a whole date, and a day's
+  record legitimately includes the blocks that already finished.
+
+Falsified before trusted: without the guard the API returns **201** for a session dated
+2020-01-01. With it, 400 and zero rows written. `config.e2e.test.ts` 29/29.
+
+Five fixtures in that file were hardcoded to `2026-09-01` - already in the past, and
+drifting further every day. Moved to `2030-09-01` so they cannot rot into the rule.
+
+**Not fixed, deliberately:** a session past its scheduled end still keeps
+`OPEN_FOR_REGISTRATION` for ever. The clean repair is to let the cutoff sweeper close
+those too, reusing `closeRegistration` - the gate already refuses those joins
+unconditionally, so persisting it adds no policy, only honesty. It changes background
+behaviour for every hospital and writes a SYSTEM audit row per session, so it is a
+decision to take deliberately rather than at midnight in the middle of someone's
+manual test.
+
+### Two other things this session established, worth keeping
+
+**`next dev` is the slowness, and it is not compilation.** Warm, already-compiled
+routes still take 2–6 s each: `/login` 1.9–3.7 s, the queue board 2.7–4.8 s,
+`/config/sessions` 4.0–6.3 s. The API underneath, measured in the same minute, is
+2–33 ms - `/health` 2 ms, `/me` 12 ms, departments 28 ms, sessions 33 ms. The control
+is `/login`, which fetches nothing and still costs ~2 s. Lazy per-route compilation
+explains the `Compiling /x` lines; it does not explain the steady state. Use
+`build` + `start` to judge anything, `dev` only to write code.
+
+**A cloudflared quick tunnel had expired again** - the fourth time (traps 27, 28, 33).
+`cloudflared` was not even running, and the registered hostname returned NXDOMAIN over
+DoH. A new tunnel was raised and `PUBLIC_BASE_URL` updated. `env()` memoises at first
+call, so the API must be restarted for that to take effect - the inbound webhook works
+without it, the redirect-mode checkout return URL does not. **The ngrok static domain
+this file has recommended three times is still not set up.**
+
+**And a mistake of mine, recorded because it cost the user time:** I killed port 3000
+to "clean up" a server I had started, while their console was running against it. Their
+login succeeded and the next page load got `ECONNREFUSED` five seconds later. Nothing
+was wrong with the code. Do not kill a port without checking whose server is on it.

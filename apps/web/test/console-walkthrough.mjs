@@ -185,6 +185,26 @@ check(
   section(page, 'How today is running').slice(0, 200),
 );
 
+// The fixture seeds NOT_PRESENT, which is the default a real clinic starts every
+// morning on - so this is the FIRST thing a receptionist meets, not an edge case.
+check(
+  'Call next is refused until somebody says the doctor is here',
+  !canPress(page, 'Call next'),
+  visible(page).slice(0, 300),
+);
+check(
+  'and the board says so in words, with the remedy beside it',
+  /not been marked present/i.test(visible(page)) && canPress(page, 'Mark doctor present'),
+  visible(page).slice(0, 300),
+);
+
+page = await press(page, { button: 'Mark doctor present' });
+check(
+  'Mark doctor present unblocks the queue in one press',
+  (await columnOf('OPDSession', sessionId, 'doctorPresence')) === 'PRESENT' &&
+    canPress(page, 'Call next'),
+);
+
 page = await press(page, { button: 'Call next' });
 check(
   `Call next calls ${anita.tokenLabel} - the server's order, and the client never sorted`,
@@ -245,13 +265,16 @@ page = await press(page, { button: 'Resume queue' });
 check('Resume brings Call next back', canPress(await board(sessionId), 'Call next'));
 
 await press(await board(sessionId), { button: 'Update', fill: { presence: 'LEFT' } });
-page = await press(await board(sessionId), { button: 'Call next' });
+page = await board(sessionId);
 check(
   'nobody can be called once the doctor has LEFT',
-  /left|not present|presence|cannot/i.test(visible(page)),
+  !canPress(page, 'Call next') && /left for the day/i.test(visible(page)),
   visible(page).slice(0, 300),
 );
-await press(await board(sessionId), { button: 'Update', fill: { presence: 'PRESENT' } });
+// The dropdown still sets any of the four; the one-press button is the remedy the
+// desk reaches for, and it has to work from LEFT as well as from NOT_PRESENT.
+page = await press(page, { button: 'Mark doctor present' });
+check('and one press brings them back', canPress(await board(sessionId), 'Call next'));
 
 // ===========================================================================
 heading('Act IV - audited escalation (P6-WEB-04)');

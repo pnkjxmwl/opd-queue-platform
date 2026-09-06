@@ -65,6 +65,11 @@ describe('queue command skeleton (P4-BE-02)', () => {
           scheduledEnd: new Date(start.getTime() + 3 * 60 * 60 * 1000),
           feePaise: 50_000,
           status: 'OPEN_FOR_REGISTRATION',
+          // Explicit rather than relying on the NOT_PRESENT default. The paused-queue
+          // test below expects QueuePausedError from a CALL_NEXT, and it got it only
+          // because the pause guard happens to run BEFORE the presence guard. That is
+          // a true fact about the order, not something this test meant to assert.
+          doctorPresence: 'PRESENT',
         },
       })
     ).id;
