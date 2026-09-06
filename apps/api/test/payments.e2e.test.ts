@@ -266,7 +266,7 @@ describe('join -> pay -> token (Phase 5)', () => {
       data: { reservationExpiresAt: new Date(Date.now() - 60_000) },
     });
 
-    expect(await sweeper.sweep()).toBe(1);
+    expect(await sweeper.expire()).toBe(1);
 
     expect((await prisma.queueEntry.findUniqueOrThrow({ where: { id: unpaid.entry.id } })).status).toBe('CANCELLED');
     // docs/Rules.md 9: "releasing a slot must not affect a paid entry".
@@ -280,7 +280,7 @@ describe('join -> pay -> token (Phase 5)', () => {
       where: { id: joined.entry.id },
       data: { reservationExpiresAt: new Date(Date.now() - 60_000) },
     });
-    await sweeper.sweep();
+    await sweeper.expire();
     expect((await prisma.queueEntry.findUniqueOrThrow({ where: { id: joined.entry.id } })).status).toBe('CANCELLED');
 
     const ack = await postWebhook(capturedBody(joined.razorpayOrderId, 'pay_late')).expect(201);

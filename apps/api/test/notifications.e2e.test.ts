@@ -308,6 +308,69 @@ describe('notifications (P8-BE-01, P8-BE-02)', () => {
       expect(await prisma.notification.count({ where: { entryId: walkIn.id } })).toBe(0);
     });
 
+    it('tells a requeued patient about the SECOND call, not just the first', async () => {
+      // The exact sequence the grace sweeper drives, and the one the old
+      // `unique(entryId, type)` swallowed: the patient who has already missed a call
+      // is the one who most needs telling about the next one, and they were the only
+      // one who never got told. The SKIPPED push they had just been sent said, in so
+      // many words, "you will be called again".
+      const call = () =>
+        http().post(`/sessions/${sessionId}/call-next`).set(auth(staff.accessToken)).send({}).expect(201);
+
+      await http()
+        .post(`/sessions/${sessionId}/check-in`)
+        .set(auth(staff.accessToken))
+        .send({ tokenNumber: 1 })
+        .expect(201);
+
+      await call();
+      await http()
+        .post(`/sessions/${sessionId}/skip`)
+        .set(auth(staff.accessToken))
+        .send({ entryId, reason: 'no answer at the door' })
+        .expect(201);
+      await http()
+        .post(`/sessions/${sessionId}/requeue`)
+        .set(auth(staff.accessToken))
+        .send({ entryId })
+        .expect(201);
+      await call();
+
+      await notifier().notifyFromEvents();
+
+      expect(await prisma.notification.count({ where: { entryId, type: 'CALLED' } })).toBe(2);
+    });
+
+    it('drains a backlog instead of re-reading the oldest of it forever', async () => {
+      // `take` applies after the WHERE, and the sweep is ordered oldest-first. With
+      // no "already notified" filter it fetched the same oldest BATCH every pass,
+      // re-confirmed every one as a duplicate and never reached anything newer -
+      // so past roughly 33 notifiable events an hour, which is one busy clinic,
+      // "you are being called" arrived hours late or not at all. Nothing errored and
+      // nothing logged, and no test ran above the batch size to notice.
+      const BACKLOG = 250;
+      const base = Date.now() - 60 * 60 * 1000;
+
+      await prisma.queueEvent.createMany({
+        data: Array.from({ length: BACKLOG }, (_, i) => ({
+          hospitalId,
+          sessionId,
+          entryId,
+          type: 'ENTRY_CALLED' as const,
+          actorType: 'STAFF' as const,
+          actorId: staff.accountId,
+          createdAt: new Date(base + i * 1000),
+        })),
+      });
+
+      // Two passes: the first cannot clear more than one batch, and the second must
+      // pick up where it left off rather than starting again at the oldest row.
+      await notifier().notifyFromEvents();
+      await notifier().notifyFromEvents();
+
+      expect(await prisma.notification.count({ where: { entryId, type: 'CALLED' } })).toBe(BACKLOG);
+    });
+
     it('stays silent about things a patient cannot act on', async () => {
       // A pause, a presence change and a priority edit are all deliberately quiet.
       await http()

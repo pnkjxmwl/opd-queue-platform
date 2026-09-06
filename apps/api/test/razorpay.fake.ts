@@ -20,7 +20,19 @@ export class FakeRazorpay implements RazorpayApi {
   readonly keyId = 'rzp_test_fake';
   readonly configured = true;
   orders: { id: string; amount: number; receipt: string }[] = [];
-  refunds: { id: string; paymentId: string; amount: number }[] = [];
+  refunds: {
+    id: string;
+    paymentId: string;
+    amount: number;
+    notes?: Record<string, string> | null;
+  }[] = [];
+
+  /**
+   * Set by a test to make the next `refund()` fail, the way a gateway timeout does.
+   * The refund row is then left PENDING with no id - the exact state
+   * `reconcileRefunds` exists to repair.
+   */
+  refundFails = false;
 
   async createOrder(input: { amountPaise: number; receipt: string }) {
     const order = {
@@ -32,14 +44,33 @@ export class FakeRazorpay implements RazorpayApi {
     return { id: order.id, amount: order.amount, currency: 'INR' };
   }
 
-  async refund(input: { paymentId: string; amountPaise: number }) {
+  async refund(input: {
+    paymentId: string;
+    amountPaise: number;
+    notes?: Record<string, string>;
+  }) {
+    if (this.refundFails) {
+      throw new Error('Razorpay /refund failed with 504');
+    }
     const refund = {
       id: `rfnd_${this.refunds.length + 1}`,
       paymentId: input.paymentId,
       amount: input.amountPaise,
+      notes: input.notes ?? null,
     };
     this.refunds.push(refund);
-    return { id: refund.id, amount: refund.amount, status: 'processed' };
+    return { id: refund.id, amount: refund.amount, status: 'processed', notes: refund.notes };
+  }
+
+  async paymentsForOrder() {
+    return [];
+  }
+
+  /** What the gateway already holds, which is what stops a refund being sent twice. */
+  async refundsForPayment(paymentId: string) {
+    return this.refunds
+      .filter((r) => r.paymentId === paymentId)
+      .map((r) => ({ id: r.id, amount: r.amount, status: 'processed', notes: r.notes }));
   }
 
   verifyWebhookSignature(rawBody: Buffer, signature: string | undefined): boolean {

@@ -1,6 +1,6 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { env } from '../../config/env';
+import { Sweeper } from '../../common/sweeper';
 import { QueueService, type QueueActor } from './queue.service';
 import { applyCancellation } from './commands/cancel-entry';
 
@@ -17,13 +17,19 @@ import { applyCancellation } from './commands/cancel-entry';
  * That distinction is why BullMQ is not here. docs/Architecture.md 11 plans a
  * delayed job per reservation, but Phase 8 is where worker infrastructure is
  * designed - kill switches, stable job ids, the "workers call commands, never write
- * rows" rule - and reservation-expiry is listed there again. A `setInterval` that
- * calls a domain command is the smallest thing that does the job, and Phase 8 can
- * replace it without changing a single rule.
+ * rows" rule - and reservation-expiry is listed there again. A sweep that calls a
+ * domain command is the smallest thing that does the job.
  *
  * It mutates state ONLY through the queue command, so the state machine, the audit
  * log and the events all apply exactly as they would to a human action - the
  * shortcut docs/Phases.md Phase 8 calls the most damaging one available.
+ *
+ * **It extends `Sweeper` as of the pre-production audit.** This file wrote the
+ * pattern in Phase 5 and then never adopted the base class Phase 8 extracted from
+ * it, so it kept its own copy of the interval, the overlap flag and the test
+ * bail-out - and never gained the `DISABLED_WORKERS` check that only lives there.
+ * `env.ts` listed `reservation` among the workers you could switch off, and
+ * switching it off did nothing.
  */
 
 /**
@@ -37,48 +43,26 @@ const SWEEP_INTERVAL_MS = 60_000;
 const MAX_SESSIONS_PER_SWEEP = 20;
 
 @Injectable()
-export class ReservationSweeper implements OnModuleInit, OnModuleDestroy {
-  private readonly log = new Logger(ReservationSweeper.name);
-  private timer: NodeJS.Timeout | undefined;
-  private running = false;
+export class ReservationSweeper extends Sweeper {
+  protected readonly name = 'reservation';
+  protected readonly intervalMs = SWEEP_INTERVAL_MS;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly queue: QueueService,
-  ) {}
-
-  onModuleInit(): void {
-    // Never on its own in tests: an interval firing mid-fixture is a flake generator,
-    // and every expiry path is tested by calling sweep() directly instead.
-    if (env().NODE_ENV === 'test') {
-      return;
-    }
-    this.timer = setInterval(() => void this.safeSweep(), SWEEP_INTERVAL_MS);
-    // Do not keep the process alive just to run a timer.
-    this.timer.unref?.();
+  ) {
+    super();
   }
 
-  onModuleDestroy(): void {
-    if (this.timer !== undefined) {
-      clearInterval(this.timer);
-    }
-  }
-
-  private async safeSweep(): Promise<void> {
-    // Overlapping sweeps would queue up behind each other on the same session locks.
-    if (this.running) {
-      return;
-    }
-    this.running = true;
-    try {
-      await this.sweep();
-    } catch (error) {
-      // A background timer must never take the process down, and the next tick is a
-      // free retry (docs/Rules.md 7 - fail loudly in the log, safely in the process).
-      this.log.error({ err: error }, 'reservation sweep failed');
-    } finally {
-      this.running = false;
-    }
+  /**
+   * The base class owns the interval, the kill switch, the test bail-out and the
+   * overlap guard - overlapping sweeps would queue up behind each other on the same
+   * session locks. `expire()` stays public and takes a clock so tests can run one
+   * pass at an instant of their choosing, which is the shape every other sweeper in
+   * this codebase already uses.
+   */
+  protected async sweep(): Promise<void> {
+    await this.expire();
   }
 
   /**
@@ -88,11 +72,19 @@ export class ReservationSweeper implements OnModuleInit, OnModuleDestroy {
    * expires all of its lapsed holds together, rather than taking the same lock once
    * per row.
    */
-  async sweep(now: Date = new Date()): Promise<number> {
+  async expire(now: Date = new Date()): Promise<number> {
     const expired = await this.prisma.queueEntry.findMany({
       where: { status: 'RESERVED', reservationExpiresAt: { lte: now } },
       select: { id: true, sessionId: true, hospitalId: true },
       orderBy: { reservationExpiresAt: 'asc' },
+      /**
+       * Bounded, because the work below is. Without this the sweep read every
+       * lapsed hold on the platform each minute and then threw all but
+       * MAX_SESSIONS_PER_SWEEP sessions of it away - fine on a quiet day, and a
+       * full scan every sixty seconds after any backlog. Generous enough that the
+       * session cap, not this, is what actually limits a pass.
+       */
+      take: MAX_SESSIONS_PER_SWEEP * 50,
     });
     if (expired.length === 0) {
       return 0;

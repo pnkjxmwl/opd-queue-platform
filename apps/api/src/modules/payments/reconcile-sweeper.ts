@@ -33,9 +33,19 @@ export class ReconcileSweeper extends Sweeper {
   }
 
   protected async sweep(): Promise<void> {
-    const { checked, confirmed } = await this.payments.reconcilePending(
-      new Date(Date.now() - STALE_AFTER_MS),
-    );
+    const stale = new Date(Date.now() - STALE_AFTER_MS);
+
+    const { checked, confirmed } = await this.payments.reconcilePending(stale);
     if (confirmed > 0) this.log.warn(`reconciled ${confirmed} of ${checked} pending payments`);
+
+    // Money owed OUT, which had no safety net at all until the pre-production audit:
+    // a refund whose gateway call failed was left PENDING forever, with the payment
+    // row already saying REFUNDED. The books said the patient had been paid.
+    const refunds = await this.payments.reconcileRefunds(stale);
+    if (refunds.sent + refunds.adopted > 0) {
+      this.log.warn(
+        `re-sent ${refunds.sent} and adopted ${refunds.adopted} of ${refunds.checked} stranded refunds`,
+      );
+    }
   }
 }

@@ -22,8 +22,19 @@ export class HealthController {
   }
 
   /**
-   * Readiness: dependencies are reachable.
-   * Returns 503 when anything is down so an orchestrator stops routing traffic here.
+   * Readiness: can this process serve a request?
+   *
+   * **Postgres decides the status code; Redis is reported but does not.** Redis is
+   * used for exactly two things here - the Socket.IO adapter that fans events across
+   * instances, and this probe. Every REST path, the queue engine, payments and
+   * discovery are pure Postgres, and rate limiting is in memory. So a Redis blip
+   * used to 503 an API that could still answer every request correctly, and an
+   * orchestrator would drain or kill it: the product would have degraded from live
+   * to stale, and instead it went to zero.
+   *
+   * `status` still reads `degraded` when Redis is down, so a dashboard and an
+   * on-call engineer can both see it. That is what the field is for. Taking traffic
+   * away is a stronger action and wants a stronger reason.
    */
   @Get('ready')
   async ready(@Res() res: Response): Promise<void> {
@@ -40,6 +51,6 @@ export class HealthController {
       },
     };
 
-    res.status(body.status === 'ok' ? 200 : 503).json(body);
+    res.status(database ? 200 : 503).json(body);
   }
 }

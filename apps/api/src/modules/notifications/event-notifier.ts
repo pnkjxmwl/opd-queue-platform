@@ -82,10 +82,28 @@ export class EventNotifier extends Sweeper {
         // Only entries with an app account behind them: a walk-in registered at the
         // desk has no phone to notify and never asked to be.
         entry: { accountId: { not: null } },
+        /**
+         * **Events nobody has been told about yet - and this filter has to be here,
+         * in the query, not in the loop below.**
+         *
+         * Relying on the insert to fail was not enough. `take` applies AFTER the
+         * WHERE and this is ordered oldest-first, so a sweep would fetch the same
+         * 200 oldest events every half-minute, re-confirm every one of them as a
+         * duplicate, and never reach anything newer until the old ones aged out of
+         * the six-hour window. Above roughly 33 notifiable events an hour - a single
+         * busy clinic, where one session produces two or three hundred - "you are
+         * being called" started arriving hours late, silently, with nothing logged
+         * and no test above the batch size to catch it.
+         *
+         * With the join here, Postgres skips what is already done before counting to
+         * 200, so a backlog is drained rather than re-read.
+         */
+        notifications: { none: {} },
       },
       orderBy: { createdAt: 'asc' },
       take: BATCH,
       select: {
+        id: true,
         type: true,
         entryId: true,
         entry: {
@@ -106,8 +124,11 @@ export class EventNotifier extends Sweeper {
       const entry = event.entry;
       if (type === undefined || entry === null || entry.accountId === null) continue;
 
-      // `record` swallows the duplicate-key violation, so an event seen on twenty
-      // consecutive sweeps produces exactly one notification.
+      // Keyed on the EVENT, so an event seen twice produces one notification while
+      // two genuine calls for the same booking produce two. `record` swallows the
+      // duplicate-key violation, which is what makes the query filter above an
+      // optimisation rather than the only thing standing between a patient and a
+      // repeated push.
       const isNew = await this.notifications.record({
         accountId: entry.accountId,
         entryId: entry.id,
@@ -115,6 +136,7 @@ export class EventNotifier extends Sweeper {
         type,
         tokenLabel: entry.tokenLabel,
         hospitalName: entry.session.hospital.name,
+        sourceEventId: event.id,
       });
       if (isNew) recorded += 1;
     }

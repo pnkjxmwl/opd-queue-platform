@@ -35,6 +35,12 @@ export interface RazorpayRefund {
   id: string;
   amount: number;
   status: string;
+  /**
+   * What we attached when raising it. Carries our own `refundId`, which is how the
+   * reconcile worker recognises a refund it already sent but failed to write down -
+   * and therefore how it avoids paying a patient twice.
+   */
+  notes?: Record<string, string> | null;
 }
 
 /** One payment against an order, as the reconcile worker needs to see it. */
@@ -53,6 +59,8 @@ export interface RazorpayApi {
   verifyWebhookSignature(rawBody: Buffer, signature: string | undefined): boolean;
   /** Phase 8: what actually happened to an order whose webhook never arrived. */
   paymentsForOrder(orderId: string): Promise<RazorpayPayment[]>;
+  /** Refunds already raised against a payment, so one is never raised twice. */
+  refundsForPayment(paymentId: string): Promise<RazorpayRefund[]>;
 }
 
 @Injectable()
@@ -158,6 +166,21 @@ export class RazorpayClient implements RazorpayApi {
    */
   async paymentsForOrder(orderId: string): Promise<RazorpayPayment[]> {
     const body = await this.get<{ items?: RazorpayPayment[] }>(`/orders/${orderId}/payments`);
+    return body.items ?? [];
+  }
+
+  /**
+   * Every refund Razorpay holds against this payment.
+   *
+   * Asked BEFORE re-sending a refund that our own records show as unsent. Raising a
+   * refund is not idempotent - two POSTs are two refunds - and the failure this
+   * guards against is the narrow one where the gateway accepted the request and the
+   * write recording its id did not land. Matching on our `refundId` in `notes`
+   * distinguishes "we already paid this" from "we never did", and getting that wrong
+   * gives a patient their money twice.
+   */
+  async refundsForPayment(paymentId: string): Promise<RazorpayRefund[]> {
+    const body = await this.get<{ items?: RazorpayRefund[] }>(`/payments/${paymentId}/refunds`);
     return body.items ?? [];
   }
 
