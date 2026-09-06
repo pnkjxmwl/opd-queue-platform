@@ -101,6 +101,15 @@ export const HospitalCard = z.object({
   name: z.string(),
   city: z.string(),
   area: z.string().nullable(),
+  /**
+   * A photograph, or null.
+   *
+   * **Null is an ordinary state, never an error.** A clinic that has not uploaded one
+   * is the common case at pilot, so every client falls back to the initials avatar
+   * rather than rendering a broken image. Seeded today; an upload path in the admin
+   * console comes later and this field does not change when it does.
+   */
+  photoUrl: z.string().nullable(),
   /** OPD sessions listable today - so a hospital with nothing on can say so. */
   todaySessionCount: z.number().int().nonnegative(),
 });
@@ -154,6 +163,15 @@ export const PublicDoctor = z.object({
   id: z.string().uuid(),
   name: z.string(),
   specialization: z.string().nullable(),
+  /**
+   * A photograph, or null.
+   *
+   * **Null is an ordinary state, never an error.** A clinic that has not uploaded one
+   * is the common case at pilot, so every client falls back to the initials avatar
+   * rather than rendering a broken image. Seeded today; an upload path in the admin
+   * console comes later and this field does not change when it does.
+   */
+  photoUrl: z.string().nullable(),
   /** Roughly how long this doctor spends per patient - honest context before Phase 7. */
   defaultConsultMins: z.number().int().positive(),
   departmentId: z.string().uuid(),
@@ -198,6 +216,8 @@ export const SessionCard = z.object({
   doctorId: z.string().uuid(),
   doctorName: z.string(),
   doctorSpecialization: z.string().nullable(),
+  /** The CURRENT provider's photo, so a substitution shows who is actually in. */
+  doctorPhotoUrl: z.string().nullable(),
   /** True when this session has been handed to a covering doctor. */
   isSubstitute: z.boolean(),
 

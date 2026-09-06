@@ -4,8 +4,15 @@ import { auth, createTestApp, request, resetDb, signup } from './helpers';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { GraceSweeper } from '../src/modules/queue/grace-sweeper';
 import { CutoffSweeper } from '../src/modules/queue/cutoff-sweeper';
+import { ReservationSweeper } from '../src/modules/queue/reservation-sweeper';
 import { PaymentsService } from '../src/modules/payments/payments.service';
+import { ReconcileSweeper } from '../src/modules/payments/reconcile-sweeper';
 import { RazorpayClient } from '../src/modules/payments/razorpay.client';
+import { DispatchSweeper } from '../src/modules/notifications/dispatch-sweeper';
+import { EventNotifier } from '../src/modules/notifications/event-notifier';
+import { LeaveNowNotifier } from '../src/modules/notifications/leave-now';
+import { EtaTick } from '../src/modules/eta/eta-tick';
+import { Sweeper } from '../src/common/sweeper';
 import { dateColumnFromString, istToday } from '../src/common/ist';
 import { QueuePolicyService } from '../src/modules/config/queue-policy.service';
 
@@ -34,6 +41,11 @@ const fakeRazorpay = {
   // Set per test: what Razorpay says happened to an order nobody told us about.
   paymentsForOrder: async (): Promise<
     { id: string; order_id?: string | null; status: string; amount: number; currency: string }[]
+  > => [],
+  // Set per test: refunds the gateway already holds against a payment. An empty
+  // list means "never sent", which is what makes the reconciler re-send.
+  refundsForPayment: async (): Promise<
+    { id: string; amount: number; status: string; notes?: Record<string, string> | null }[]
   > => [],
 };
 
@@ -84,6 +96,7 @@ describe('background workers (P8-BE-03, P8-BE-04, P8-BE-05)', () => {
   beforeEach(async () => {
     await resetDb(prisma);
     fakeRazorpay.paymentsForOrder = async () => [];
+    fakeRazorpay.refundsForPayment = async () => [];
 
     hospitalId = (
       await prisma.hospital.create({
@@ -444,6 +457,137 @@ describe('background workers (P8-BE-03, P8-BE-04, P8-BE-05)', () => {
         checked: 1,
         confirmed: 0,
       });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('refund reconcile', () => {
+    /**
+     * A refund we raised and never managed to send: PENDING, no gateway id.
+     *
+     * `sendRefundToGateway` swallows a gateway failure on purpose - the cancellation
+     * has committed and is correct - so this is the state a timeout leaves behind.
+     * Nothing swept it until the pre-production audit, so the payment row said
+     * REFUNDED while the patient had been given nothing.
+     */
+    async function strandedRefund(): Promise<{ refundId: string; paymentId: string }> {
+      const entry = await book('Owed A Refund', 1, 'CONFIRMED');
+      const payment = await prisma.payment.create({
+        data: {
+          hospitalId,
+          queueEntryId: entry.id,
+          accountId: patientAccountId,
+          razorpayOrderId: `order_${entry.id}`,
+          razorpayPaymentId: `pay_${entry.id}`,
+          amountPaise: 50_000,
+          currency: 'INR',
+          status: 'REFUNDED',
+          refundedPaise: 50_000,
+        },
+      });
+      const refund = await prisma.refund.create({
+        data: {
+          hospitalId,
+          paymentId: payment.id,
+          amountPaise: 50_000,
+          status: 'PENDING',
+          reason: 'patient cancelled',
+          createdAt: new Date(Date.now() - 30 * 60_000),
+        },
+      });
+      return { refundId: refund.id, paymentId: payment.id };
+    }
+
+    it('re-sends a refund the gateway never received', async () => {
+      const { refundId } = await strandedRefund();
+      fakeRazorpay.refundsForPayment = async () => [];
+
+      expect(await app.get(PaymentsService).reconcileRefunds(new Date())).toMatchObject({
+        checked: 1,
+        sent: 1,
+        adopted: 0,
+      });
+      expect(
+        (await prisma.refund.findUniqueOrThrow({ where: { id: refundId } })).razorpayRefundId,
+      ).not.toBeNull();
+    });
+
+    it('adopts a refund the gateway already accepted rather than paying twice', async () => {
+      const { refundId } = await strandedRefund();
+      // The narrow case this exists for: the POST succeeded and the write recording
+      // its id did not. Re-sending here would give the patient their money twice,
+      // which is worse than giving it to them late.
+      fakeRazorpay.refundsForPayment = async () => [
+        { id: 'rfnd_already_sent', amount: 50_000, status: 'processed', notes: { refundId } },
+      ];
+
+      expect(await app.get(PaymentsService).reconcileRefunds(new Date())).toMatchObject({
+        checked: 1,
+        sent: 0,
+        adopted: 1,
+      });
+      expect(
+        (await prisma.refund.findUniqueOrThrow({ where: { id: refundId } })).razorpayRefundId,
+      ).toBe('rfnd_already_sent');
+    });
+
+    it('leaves a refund that already has a gateway id alone', async () => {
+      const { refundId } = await strandedRefund();
+      await prisma.refund.update({
+        where: { id: refundId },
+        data: { razorpayRefundId: 'rfnd_done' },
+      });
+
+      expect(await app.get(PaymentsService).reconcileRefunds(new Date())).toMatchObject({
+        checked: 0,
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('the DISABLED_WORKERS kill switch', () => {
+    /**
+     * Every background worker, and the name each answers to.
+     *
+     * This exists because the list in `config/env.ts` was wrong in both directions:
+     * it advertised `reservation` and `eta-tick` as switches, and those two classes
+     * predated `Sweeper` and hand-rolled their own timers without ever reading the
+     * variable - so switching them off did nothing and looked exactly like success.
+     * Meanwhile `dispatch` and `leave-now` worked and went unmentioned.
+     *
+     * A comment naming identifiers drifts. This is the same comment, executable.
+     */
+    it('is honoured by every worker, under the names the env doc advertises', () => {
+      const workers = [
+        CutoffSweeper,
+        DispatchSweeper,
+        EtaTick,
+        EventNotifier,
+        GraceSweeper,
+        LeaveNowNotifier,
+        ReconcileSweeper,
+        ReservationSweeper,
+      ];
+
+      const names = workers.map((worker) => {
+        const instance = app.get(worker);
+        // Only `Sweeper` reads DISABLED_WORKERS, so being one IS honouring it.
+        expect(instance, `${worker.name} must extend Sweeper`).toBeInstanceOf(Sweeper);
+        return (instance as unknown as { name: string }).name;
+      });
+
+      expect(names.sort()).toEqual([
+        'cutoff',
+        'dispatch',
+        'eta-tick',
+        'grace',
+        'leave-now',
+        'notify',
+        'reconcile',
+        'reservation',
+      ]);
     });
   });
 });

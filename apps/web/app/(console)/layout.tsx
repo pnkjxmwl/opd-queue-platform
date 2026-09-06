@@ -1,7 +1,5 @@
-import Link from 'next/link';
-import type { MeResponse } from '@opd/contracts';
-import { apiGet } from '../../lib/api';
-import { LogoutButton } from './logout-button';
+import { getMe } from '../../lib/tenant';
+import { ConsoleChrome, type NavLink } from './nav';
 
 /**
  * Role-aware console shell. Nav is built from the caller's memberships, so a
@@ -12,65 +10,54 @@ import { LogoutButton } from './logout-button';
  * (docs/Rules.md 10).
  */
 export default async function ConsoleLayout({ children }: { children: React.ReactNode }) {
-  const me = await apiGet<MeResponse>('/me');
+  // The same request the page below is about to make. `getMe` is request-scoped, so
+  // the shell and its child share one call instead of asking the API twice for the
+  // identical answer on every navigation.
+  const me = await getMe();
   const active = me.memberships.find((m) => m.status === 'ACTIVE');
 
-  // `ready: false` = the route does not exist yet. It still appears, so the shape of
-  // the console is visible from the start, but it is NOT a link - docs/Phases.md:
-  // make a placeholder obviously inert, or you will file bugs against your own
-  // placeholder.
-  //
-  // Queue went live in Phase 6, and ADMIN was added to its roles: a small hospital's
-  // admin genuinely does run reception, and the API has allowed all three roles on
-  // the queue commands since Phase 4 - so hiding it from admins showed them less
-  // than they were entitled to do.
-  const links = [
-    { href: '/', label: 'Overview', roles: ['ADMIN', 'RECEPTION', 'DOCTOR'], ready: true },
-    { href: '/queue', label: 'Queue', roles: ['ADMIN', 'RECEPTION', 'DOCTOR'], ready: true },
-    { href: '/config', label: 'Configuration', roles: ['ADMIN'], ready: true },
-  ].filter((l) => active && l.roles.includes(active.role));
+  // Queue is open to all three roles: a small hospital's admin genuinely does run
+  // reception, and the API has allowed ADMIN, RECEPTION and DOCTOR on every queue
+  // command since Phase 4 - so hiding it from admins showed them less than they
+  // were entitled to do.
+  const links = (
+    [
+      { href: '/', label: 'Overview', icon: 'overview', roles: ['ADMIN', 'RECEPTION', 'DOCTOR'] },
+      { href: '/queue', label: 'Queue', icon: 'queue', roles: ['ADMIN', 'RECEPTION', 'DOCTOR'] },
+      { href: '/config', label: 'Configuration', icon: 'config', roles: ['ADMIN'] },
+    ] as const
+  )
+    .filter((l) => active !== undefined && l.roles.includes(active.role as never))
+    .map(({ href, label, icon }): NavLink => ({ href, label, icon }));
 
   return (
-    <div className="flex min-h-screen">
-      <aside className="flex w-60 flex-col border-r border-line bg-surface p-5">
-        <span className="text-h3 text-primary">OPD Console</span>
-        <span className="mt-1 text-caption text-ink-muted">
-          {active ? `${active.hospitalName} · ${active.role}` : 'No active hospital'}
-        </span>
+    /*
+      A rail and a scrolling pane on a desktop; a bar and a scrolling page below it.
 
-        <nav className="mt-6 flex flex-col gap-1">
-          {links.map((l) =>
-            l.ready ? (
-              <Link
-                key={l.href}
-                href={l.href}
-                className="rounded-md px-3 py-2 text-label text-ink hover:bg-teal-50"
-              >
-                {l.label}
-              </Link>
-            ) : (
-              <span
-                key={l.href}
-                aria-disabled="true"
-                title="Arrives in a later phase"
-                className="flex items-center justify-between rounded-md px-3 py-2 text-label text-ink-disabled"
-              >
-                {l.label}
-                <span className="rounded-full bg-canvas px-2 py-0.5 text-caption text-ink-muted">
-                  Soon
-                </span>
-              </span>
-            ),
-          )}
-        </nav>
+      The console is opened once and stared at for a shift, so on a monitor the
+      hospital you are signed into and the way back to the queue must not leave the
+      screen when a list gets long - hence `h-screen` + one scrolling child.
 
-        <div className="mt-auto flex flex-col gap-2 pt-6">
-          <span className="truncate text-caption text-ink-muted">{me.email}</span>
-          <LogoutButton />
+      Below `lg` that inverts: locking the viewport on a phone breaks the address bar
+      collapse and makes the board feel stuck, so the page scrolls normally and the
+      chrome is `sticky` instead. Same information, the behaviour each device
+      expects.
+    */
+    <div className="min-h-screen bg-canvas lg:flex lg:h-screen lg:overflow-hidden">
+      <ConsoleChrome
+        links={links}
+        viewer={{
+          email: me.email,
+          hospitalName: active?.hospitalName ?? null,
+          role: active?.role ?? null,
+        }}
+      />
+
+      <main className="min-w-0 flex-1 lg:overflow-y-auto">
+        <div className="mx-auto w-full max-w-[1440px] px-4 py-5 sm:px-6 lg:px-8 lg:py-7">
+          {children}
         </div>
-      </aside>
-
-      <main className="flex-1 p-6">{children}</main>
+      </main>
     </div>
   );
 }

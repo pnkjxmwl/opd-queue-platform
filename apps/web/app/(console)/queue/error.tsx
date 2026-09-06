@@ -1,5 +1,8 @@
 'use client';
 
+import { Notice } from '../../../components/notice';
+import { btn } from '../../../components/ui';
+
 /**
  * The queue console's error boundary. Covers every nested route under /queue.
  *
@@ -20,27 +23,22 @@
  */
 export default function QueueError({ reset }: { error: Error; reset: () => void }) {
   return (
-    <div className="max-w-lg">
-      <h1 className="text-h1">This session isn’t available</h1>
-      <p className="mt-2 text-body-lg text-ink-muted">
-        It may belong to another hospital, or it may have been removed. If you followed a link or a
-        bookmark, go back to the list and pick today’s session.
-      </p>
-      <div className="mt-6 flex gap-2">
-        <a
-          href="/queue"
-          className="inline-flex h-11 items-center rounded-md bg-primary px-4 text-label text-white hover:bg-teal-800"
-        >
-          Back to sessions
-        </a>
-        <button
-          type="button"
-          onClick={reset}
-          className="h-11 rounded-md border border-line bg-surface px-4 text-label text-ink hover:bg-teal-50"
-        >
-          Try again
-        </button>
-      </div>
-    </div>
+    <Notice
+      icon="alert-circle"
+      title="This session isn’t available"
+      actions={
+        <>
+          <a href="/queue" className={btn('primary')}>
+            Back to sessions
+          </a>
+          <button type="button" onClick={reset} className={btn('quiet')}>
+            Try again
+          </button>
+        </>
+      }
+    >
+      It may belong to another hospital, or it may have been removed. If you followed a link or a
+      bookmark, go back to the list and pick today’s session.
+    </Notice>
   );
 }

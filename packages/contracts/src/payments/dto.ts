@@ -68,6 +68,8 @@ export const MyQueueEntry = z.object({
   departmentName: z.string(),
   /** The doctor actually providing care, which after a substitution is not who was booked. */
   doctorName: z.string(),
+  /** That same doctor's photo, or null. See the note on HospitalCard.photoUrl. */
+  doctorPhotoUrl: z.string().nullable(),
 
   scheduledStart: z.string().datetime(),
   scheduledEnd: z.string().datetime(),

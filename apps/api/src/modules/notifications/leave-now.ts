@@ -16,7 +16,10 @@ import { NotificationsService } from './notifications.service';
  *
  * It fires when the ETA says their turn is within the hospital's own
  * `arriveBeforeMins`, and it fires **once per booking, ever** - enforced by
- * `unique(entryId, type)` in the database, not by a check here. That matters more
+ * `unique(dedupeKey)` in the database, not by a check here. This is the message that
+ * passes no `sourceEventId` to `record()`, precisely so its key stays the booking
+ * rather than an occasion: nothing *happened* to cause it, and a second prediction
+ * about the same patient is the same promise, not a new one. That matters more
  * than it looks: this runs every half-minute, the ETA moves on every tick, and
  * docs/Phases.md is blunt about the failure mode - *"notification storms destroy
  * trust faster than no notifications"*. A patient who is told to leave twelve times

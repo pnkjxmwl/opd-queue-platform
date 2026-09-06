@@ -97,6 +97,11 @@ model Hospital {
   city      String
   area      String?
   address   String?
+  /// A photograph of the building, for discovery. Null is an ordinary state, not an
+  /// error: a clinic that never uploads one must still render correctly, so every
+  /// client falls back to the initials avatar rather than showing a broken image.
+  /// Seeded for now; an upload path in the admin console comes later.
+  photoUrl  String?
   status    HospitalStatus @default(PENDING)
   createdAt DateTime       @default(now())
   updatedAt DateTime       @updatedAt
@@ -177,6 +182,8 @@ model Doctor {
   accountId          String?  @unique
   name               String
   specialization     String?
+  /// Portrait, for discovery. Nullable for the same reason as Hospital.photoUrl.
+  photoUrl           String?
   /// Cold-start seed for the ETA engine (docs/Architecture.md 8).
   defaultConsultMins Int      @default(10)
   /// Deactivated, never deleted - see Department.isActive. A doctor who leaves the
@@ -478,6 +485,12 @@ model QueueEvent {
   hospital Hospital    @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
   session  OPDSession  @relation(fields: [sessionId], references: [id], onDelete: Restrict)
   entry    QueueEntry? @relation(fields: [entryId], references: [id], onDelete: Restrict)
+
+  /// The notification this event produced, if it was worth telling the patient
+  /// about. Exists so the notifier can ask Postgres for events that have NOT been
+  /// notified yet and have that filter applied before the row limit - see the note
+  /// on Notification.sourceEventId.
+  notifications Notification[]
 
   @@index([sessionId, createdAt])
   @@index([hospitalId, createdAt])
@@ -840,15 +853,39 @@ model Notification {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  account Account     @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  entry   QueueEntry? @relation(fields: [entryId], references: [id], onDelete: Cascade)
-
   /// **The storm guard, as a database constraint rather than an application check**
-  /// (docs/Rules.md 5). "You are getting close" must fire once per patient per
-  /// booking, and the ETA tick runs every minute - an app-level check loses that race
-  /// the first time two ticks overlap. A duplicate insert violates this and is
-  /// treated as "already told them".
-  @@unique([entryId, type])
+  /// (docs/Rules.md 5). A duplicate insert violates this and is treated as "already
+  /// told them" - an app-level check loses that race the first time two passes
+  /// overlap, and a notification storm destroys trust faster than silence.
+  ///
+  /// It used to be `unique(entryId, type)`, which was wrong for every message that
+  /// can honestly happen twice. The no-show flow is called -> grace -> recalled ->
+  /// grace -> skipped -> requeued -> **called again**, and that second call is a
+  /// second CALLED for the same booking. The constraint silently swallowed it, so
+  /// the one patient who had already missed a call - the one who most needs telling
+  /// - was the only one who never got a second push. The SKIPPED message they had
+  /// just received promised "you will be called again".
+  ///
+  /// So the key now names the OCCASION rather than the booking:
+  ///   - caused by a queue event -> the QueueEvent id, so each call is its own
+  ///   - predicted, not caused (LEAVE_NOW) -> `<entryId>:<type>`, still once ever
+  dedupeKey String @unique
+
+  /// The QueueEvent this was derived from, or null for a predicted message.
+  ///
+  /// Deliberately NOT the dedupe key above, even though it holds the same value for
+  /// event-derived rows: this one is a real foreign key, and having the relation is
+  /// what lets the notifier ask for `events where notifications is empty` and get
+  /// that filter applied by Postgres BEFORE the row limit. Without it the notifier
+  /// took the oldest 200 events in its window every pass, found them all already
+  /// notified, and never reached anything newer.
+  sourceEventId String?
+
+  account     Account     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  entry       QueueEntry? @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  sourceEvent QueueEvent? @relation(fields: [sourceEventId], references: [id], onDelete: Cascade)
+
   @@index([status, createdAt])
   @@index([accountId])
+  @@index([sourceEventId])
 }

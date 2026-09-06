@@ -97,8 +97,13 @@ export const EnvSchema = z.object({
    * is skipping patients or sending pushes in a loop has to be stoppable in the time
    * it takes to restart a process, not the time it takes to ship a fix.
    *
-   * Names are the `name` on each Sweeper: grace, cutoff, reconcile, notify,
-   * reservation, eta-tick.
+   * Names are the `name` on each Sweeper, and the list is asserted against the
+   * running application in `workers.e2e.test.ts` - a comment naming identifiers
+   * drifts, and this one had: it advertised two switches that did nothing, because
+   * `reservation` and `eta-tick` predated the base class and never checked this
+   * variable at all, while `dispatch` and `leave-now` worked and went unmentioned.
+   *
+   *   cutoff · dispatch · eta-tick · grace · leave-now · notify · reconcile · reservation
    */
   DISABLED_WORKERS: z
     .string()

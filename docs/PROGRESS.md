@@ -6203,3 +6203,709 @@ The four new walkthrough checks failed on their first run and the panel looked b
 It was not. `pnpm --filter @opd/web test` runs the package script directly and bypasses
 turbo, so `next start` was serving the previous build. Run it through turbo, or build
 first, when testing a UI change.
+
+---
+
+## 2026-09-04 · Visual refresh — mobile + web console (UI only)
+
+Phases 0–9 shipped a product that works and is tested. It did not look like one. The
+surface was the palette a framework hands you, and every screen was a single list of
+identical white cards on grey with nothing anchoring the top, so the whole thing
+floated.
+
+Three rounds of mockups settled the direction, arrived at by looking at how Practo,
+Apollo 24|7 and 1mg build a home screen rather than by taste:
+
+- a **coloured header block that reaches the top edge**, with the search bar
+  straddling its seam;
+- **sections that differ from one another** instead of one repeated card;
+- the **live queue where those apps put a star rating**.
+
+### The finding that explains most of it
+
+**Inter was never loaded. In either client.** `tailwind.config.ts` and `theme.ts` have
+both named Inter in their font stack since Phase 1, and nothing ever fetched the face —
+the console rendered in Segoe UI and the app in Roboto for nine phases. The token table
+looked correct the entire time. A token nobody loads is a comment, not a token.
+
+Fixed with `next/font/google` on web (self-hosted, no runtime request) and
+`@expo-google-fonts/inter` on mobile, gated on the splash that already waits for the
+keychain read so there is no second spinner and no reflow.
+
+**React Native has no `fontWeight` once a real family is named.** Each Inter weight is a
+separate loaded face, so `fontFamily: 'Inter_400Regular'` plus `fontWeight: '700'` gives
+Android a smeared synthetic bold and iOS nothing. Every `theme.font.*` entry now names
+its face, and the three ad-hoc `fontWeight` overrides in the app name one from a new
+`theme.fontFamily` map. There is no `fontWeight` left in `apps/mobile`.
+
+### What was deliberately NOT done
+
+The mockup carried doctor and hospital photos, a fee on doctor rows, a live-queue strip
+on doctor rows, and a specialty grid on Home. **None of them shipped.** Each needs
+schema, contract or endpoint work, and this change was scoped to paint. They are
+recorded in Phases.md so they are decisions rather than omissions.
+
+The mockup also put a live-token card at the top of Home. Dropped on the user's call,
+and it was the right one: it would have been the single place a screen gained content it
+does not have today, and My Visits already owns that job. Dropping it is what made the
+diff guarantee below exact rather than approximate.
+
+### Decisions
+
+- **Two gradients, and only two** (`docs/Design.md` 2.5). A third use and they stop
+  meaning anything. `header` on the Home block and the console sidebar; `token` on the
+  token card and a My Visits entry whose session is live.
+- **`expo-linear-gradient` was NOT added.** `react-native-svg` is already a dependency
+  by way of `react-native-qrcode-svg`, and a second package to draw a gradient is the
+  duplication CLAUDE.md 2 rules out. `lib/ui.tsx` exports a `Gradient` built on it.
+- **The gradient paints BEHIND its children, not around them.** A wrapper would have to
+  size itself from its children, and the Home header's children include a safe-area
+  inset not known until layout — so the wrapper renders a band of the wrong height on
+  exactly the phones that have a notch.
+- **`cardStyle` is a shadow AND a hairline, never one alone.** A shadow that soft
+  vanishes against `canvas` on a cheap LCD in daylight; a border alone reads as a
+  wireframe. Eight screens had eight slightly different local `card:` definitions; they
+  now spread one export.
+- **`onPrimary.*` is a separate colour set** because the neutral ramp does not work on
+  teal — `textMuted` is slate, and slate on teal fails contrast at every stop.
+
+### Verification
+
+`lint + typecheck + build + test` green across all 12 tasks. **361 API tests unchanged.
+67 console walkthrough checks: 67 passed, 0 failed** — those assert text, navigation and
+server rejections, so a restyle that moved one of them would not have been a restyle.
+
+The guarantee: `git status -- ':!apps/mobile' ':!apps/web' ':!docs'` prints only
+`pnpm-lock.yaml`, which is the approved font dependency and nothing else. No endpoint,
+no schema, no contract, no queue logic.
+
+### Trap: a ternary between two components silently accepts the wrong props
+
+`const Head = inClinic ? Gradient : View` then `<Head colors={...}>` **typechecked
+clean** and would have passed `colors` to a plain `View` at runtime. TypeScript resolved
+the union leniently rather than requiring the props be valid for both. Replaced with one
+component and two colour lists — which is better design anyway, because two different
+card *layouts* in one list read as a bug where two different *fills* read as rank.
+
+### Trap: `elevation` in a focus style makes an Android TextInput untappable
+
+Reported straight off the device after the refresh landed: on Sign in and Create
+account, the fields could not be tapped and the screen "glitched". Both screens are
+nothing but a stack of `Field`, so every input on them was dead.
+
+The cause was one line in `lib/ui.tsx`. The new focus style spread
+`theme.elevation.card`, which carries **`elevation: 2` for Android**:
+
+```ts
+inputShellFocused: { borderColor: accent, ...theme.elevation.card, ... }   // wrong
+```
+
+Toggling `elevation` makes Android rebuild the view's shadow layer, and rebuilding the
+layer under a focused `TextInput` **drops its focus**. That fires `onBlur` → `focused`
+goes false → the elevation is removed → the layer is rebuilt again. The keyboard opens
+and shuts, the border flickers, and the field behaves as though it cannot be tapped at
+all.
+
+The old style changed `borderWidth` 1 → 2, which is a cheap layout change and never
+re-created the layer. The regression was introduced by making the ring "nicer".
+
+Fixed by making the glow iOS-only - shadows there do not re-create layers - pinning
+`elevation: 0`, and giving Android a `teal-50` background tint instead, which changes
+neither geometry nor layer.
+
+**The rule, and it is general: never put `elevation` in a style that a component's own
+state toggles.** Static elevation on a card is fine; elevation that appears on focus,
+press or hover will fight the interaction that triggered it. `theme.elevation.*` is
+safe to spread into a resting style and never into a transient one.
+
+Worth noting what did NOT catch this: lint, typecheck, build, 361 API tests and 67
+console checks were all green, because none of them run a React Native view on Android.
+Every UI change still needs a human holding the phone.
+
+### Trap: "JS-only, no rebuild needed" is false for any Expo module with native code
+
+The photo work added `expo-image` on the stated grounds that it was JS-only and would
+therefore need no new dev-client APK. **It is not.** It ships `android/`, `ios/` and an
+`expo-module.config.json`, which makes it a native module: Metro bundles it happily, the
+JS resolves, and then requiring it throws on a device whose APK was built before it was
+installed.
+
+That is a nasty failure shape, because **every static check passes**. Lint, typecheck,
+`turbo run build` and even a full `expo export` all succeeded - the export produced a
+4.26 MB bundle with `expo-image` inside it. Bundling proves the JS half exists; nothing
+in that pipeline knows what native code the installed APK actually contains.
+
+The test that would have caught it is one line, and it is now the rule before adding any
+Expo or React Native package:
+
+```bash
+ls node_modules/<pkg>/{android,ios,expo-module.config.json}   # any hit = native
+```
+
+Replaced with React Native's own `Image`, which is in every build. The loss is smaller
+than it looks: Android backs `Image` with Fresco's disk cache, so the re-download-on-
+scroll problem is handled anyway, and the fade is six lines of `Animated`. `Photo` now
+renders the initials UNDERNEATH and fades the photograph in over them, which makes the
+loading state, the null state and the error state one state - and it is a state that
+looks deliberate rather than like a hole in the screen.
+
+**The wider lesson repeats one already in this log:** a dev client is a compiled artifact
+with a fixed set of native modules. Anything that changes that set costs a build, and the
+free tier makes that a real budget. Check before promising otherwise.
+
+---
+
+## 2026-09-04/05 · The UI redesign — what it cost and what it taught
+
+A long, expensive session. The work landed, but it took four false starts to get there
+and the reasons are worth more than the diff.
+
+### How it went wrong
+
+**The first redesign was built from mockups I invented, and never seen on a screen.**
+Lint, typecheck, build, 361 API tests and 67 console checks were all green when it was
+handed over. The user's verdict on the running app: *"everything is bad — the colour,
+the font, it's going out of the screen."*
+
+Then three rounds of blind fixes, one of which made it strictly worse:
+
+1. **`elevation` in a focus style** (see the trap above) broke both auth screens on
+   Android. Toggling elevation makes Android rebuild the view's layer, which drops
+   focus on a `TextInput` — keyboard opening and closing, every field looking like it
+   had a caret. Shipped as a *fix* for a problem it caused.
+2. **Dropping `fontWeight`** because a named face like `Inter_700Bold` already is the
+   bold. Correct reasoning, wrong decision: it ignored the failure path. If the face
+   does not load, Android falls back at regular weight everywhere and the app has no
+   typographic hierarchy at all.
+3. **`expo-image` "is JS-only, no rebuild needed"** — it is a native module. Metro
+   bundled it happily, `expo export` produced a 4.26 MB bundle containing it, and it
+   threw on the device because the dev client APK predates it.
+
+**What actually fixed it was 16 screenshots.** The user put reference screens in
+`docs/ui-screens/`, and the direction stopped being a guess. Reading them, the single
+biggest error was obvious: **the reference has no gradients anywhere**, and the whole
+invented direction was built on two of them.
+
+### The decisions
+
+| Decision | Why |
+|---|---|
+| **Reset mobile to baseline, rebuild against the reference** | Half-migrated screens would have kept the gradients, uppercase overlines and dark surfaces alive in corners. |
+| **No gradients** (`docs/Design.md` 2.5) | Against a light, card-based app a gradient is decoration, not structure. Removed from both mirrors. |
+| **Section headings are bold sentence case**, not tracked uppercase overlines | Every reference screen does it, and tracked 11px grey caps read as fine print to the older patients this app is largely for. |
+| **Photos as a real vertical slice** — `photoUrl` on `Hospital` and `Doctor`, nullable | Schema → contracts → API → seed → client, in that order. Nullable is the point: most clinics at pilot will upload nothing. |
+| **The fallback lives inside `Photo`**, not at each call site | Initials sit *underneath* and the photo fades in over them, so loading, null and failed are one state — and it looks deliberate rather than like a hole. |
+| **React Native's `Image`, not `expo-image`** | Native module, and a dev-client rebuild costs one of a limited free-tier budget. Android backs `Image` with Fresco's disk cache anyway. |
+| **Skeletons replace the spinner** in `QueryState` | A centred `ActivityIndicator` is the most reliable "hobby app" signal there is, and it reserves no space, so the page jumps when data lands. |
+| **Console: two columns, dense, Linear-like** | It was seven full-width cards in one column, so *call the next patient* scrolled off as the queue grew, with *Finished* between you and it. |
+| **Console controls 36px, not 44px** | The touch-target minimum is about fingers on a phone. This is a mouse on a desk, and phone-sized controls are why config pages fitted four rows on a monitor. |
+
+### Bugs found that were not styling
+
+- **Neither console nav had an active state.** Three sidebar links and five config tabs
+  rendered identically; the only way to know which page you were on was to read the
+  table. Fixed with a small client component using `usePathname`.
+- **The `Field` touch target was ~19px inside a 52px box.** In a row with
+  `alignItems: 'center'` the input is only as tall as its text, so a box that looks
+  tappable everywhere only worked in the middle. `alignSelf: 'stretch'`.
+- **The seed had never written a `checkInCode`.** Every seeded booking — all of them
+  paid — showed *"your QR code appears once payment is confirmed."* On the token
+  screen, the hero of the entire app.
+
+### The seed cannot converge on its own definition — three times
+
+`defaultFeePaise`, then `Hospital.photoUrl`, then `QueueEntry.checkInCode` were each
+set only in an upsert's `create` branch, so a changed value never reached a row that
+already existed. Every one of them was found the same way: change the seed, re-run it,
+query the database, and find the old value still there.
+
+**A seed is not idempotent because it uses `upsert`. It is idempotent when every field
+it owns appears in the `update` branch too.**
+
+### Test infrastructure ate most of a day
+
+Failures that looked like real regressions and were not:
+
+- **69 accumulated fixture sessions.** Every walkthrough run leaves its session behind;
+  crashed runs leave more. Once Apollo carried dozens of same-day sessions, the console
+  pages driven off that data started failing — at a *different act each run*, which is
+  what finally gave it away.
+- **Stale servers squatting on 3000 and 3001.** A killed run leaves `node dist/main` or
+  `next start` listening. `with-servers.mjs` sees the port answering, assumes health,
+  and drives the walkthrough against a dead server or an old build. This produced three
+  separate false alarms, including one I initially attributed to my own restructure.
+
+**The diagnostic that settled it both times: stash the changes and re-run.** The
+baseline failed too, at a different point — same code, different failure, therefore
+state, not logic.
+
+**Left open:** `with-servers.mjs` should verify it is talking to a live server rather
+than an open port, and should clean up its fixtures. Both would have saved most of a
+day.
+
+### One test was changed, and why that is defensible
+
+The Act IV emergency check read `section(page, 'Next')` — a 900-character slice after
+the word "Next". It passed for an accidental reason: the board was one long column, so
+that window ran into the waiting list further down the page. Splitting the board into
+two columns moved the list out of the window.
+
+Re-anchored to `section(page, 'Waiting here')`, the roster the console presents *as* the
+call order. That is what the check meant to read all along, it is insensitive to layout,
+and it is a stronger assertion than the one it replaced — not a weaker one written to
+make a failure go away.
+
+### The lesson, stated plainly
+
+**No UI change is done until it has been seen running.** The full green suite proved the
+code compiled and the behaviour held; it could not see that the product looked broken.
+Every hour lost in this session went to that gap, and the fix was not a better test — it
+was a screenshot and a person looking at a phone.
+
+---
+
+## 2026-09-05 · The console redesign (branch `feat/ui-redesign`)
+
+**What this was.** A whole-product UI pass, asked for as "make it feel like something
+you could put in front of a paying customer". The patient app had already had a
+refresh; the console had not, and it showed.
+
+### The audit, before anything was changed
+
+The console read as an admin panel because it *was* one, in six specific ways:
+
+1. **It had no responsive behaviour at all.** The shell was `flex h-screen
+   overflow-hidden` with a fixed 232px rail. On the tablet `docs/Design.md` 9 says
+   reception uses, a third of the screen was navigation; on a phone the board was
+   unusable. This was the single largest defect and it was invisible on the machine it
+   was written on.
+2. **Four control heights across six screens** — `h-9`, `h-10`, `h-11`, `h-12` — three
+   focus rings (`ring-teal-100`, `ring-teal-200`, `ring-accent`), two disabled
+   treatments, and two radii for the same kind of control. The sign-in page and the
+   invite page looked like two different products.
+3. **Every focus ring fired on mouse clicks**, because they were all `:focus` rather
+   than `:focus-visible`. Keyboard users got an inconsistent ring; mouse users got one
+   they never asked for and it stayed behind on the pressed button.
+4. **Empty, loading and error were a grey `<p>`** wherever they appeared. Those are the
+   states the console is in most of the time it is not being useful, and they were the
+   least designed thing in the product.
+5. **The status table in `docs/Design.md` 2.4 specifies an icon for every status.
+   No screen had ever rendered one.** Colour was doing the work alone, which
+   §8 forbids — and "Called" and "Completed" were the same shape at a glance.
+6. **The overview was a receipt for having signed in.** Two paragraphs about what you
+   could theoretically do, above a list of your memberships, on the screen that is
+   opened first every shift.
+
+Also found and fixed on the way: the `<section>` on the overview had a border and no
+padding, so its heading sat on the edge; and the scanner's overlay was `absolute
+inset-0` inside a `<video>` with no stream — which is zero pixels tall — so *every*
+"camera unavailable" explanation rendered into nothing. The one state that most needs
+a sentence was the one state that showed none.
+
+### What was built
+
+**One design system, `apps/web/components/`.** `ui.tsx` (controls, surfaces, tables,
+states, badges, the token chip, pagination), `icon.tsx` (~30 inline Feather paths, no
+dependency — `lucide-react` is 1.4MB to get thirty glyphs), `auth-shell.tsx`,
+`notice.tsx`. `app/(console)/config/ui.tsx` — which despite its name was what the queue
+board and the check-in desk were built from too — is gone, and every screen imports the
+same definitions.
+
+**The token got a component.** It is the product's atom: the one string a receptionist
+reads aloud, matches against a printed slip and types into a field. It was
+`font-semibold tabular-nums` on the board, plain text in the walk-in list, and a bare
+`<span>` at the desk. `TokenChip` is a fixed-width slab with its own edge, identical
+wherever a token appears.
+
+**The rosters became rows, not tables.** The board's action column held up to three
+stacked forms, so the table could not shrink below ~1200px without scrolling sideways.
+
+**Server rejections moved above both columns.** "Someone already called this patient" is
+normal on a shared board and must never be missed; it used to render inside the left
+column, below the fold on a laptop, under the button that had just failed.
+
+### Two decisions worth recording
+
+**The type scale now diverges between web and mobile, deliberately.** The two mirrors
+still share a palette and a spacing rhythm, but 28px screen titles and 16px body are
+right on a phone held at arm's length by a patient who may be sixty, and waste a third
+of the vertical space on a 1440px monitor a receptionist stares at for a shift. The
+console scale is one step tighter throughout. Recorded in `docs/Design.md` 3.
+
+**`warning` moved from `#D97706` to `#B45309`.** The old value is 3.4:1 on white and
+fails AA for body text, and it was being used for body text — the running-behind line on
+the pace panel. The new one is 4.9:1. The token table said "meet WCAG AA" and one of its
+own values did not.
+
+### The mobile side
+
+Smaller, because the app had already had its pass. `Card`, `KeyValue` and `Segmented`
+now exist in `lib/ui.tsx` — the card in particular had been declared nine times across
+the app and had drifted to three paddings and two radii.
+
+**`pressable()` masked its Android ripple to a 10pt corner inside a 12pt button.** Every
+button and input hardcoded `borderRadius: 12`, a value in no token table, while the
+ripple helper defaulted to `radius.md`. So every press in the app left a sliver of
+un-rippled fill at each corner — the kind of wrongness nobody can name and everybody
+can see. There is now a `radius.control` token and both use it.
+
+**The profile screen said booking did not exist yet.** *"Your tokens and past visits will
+appear here once booking is switched on"* — written in Phase 3, still on screen four
+phases after booking shipped, next to a My Visits tab that had been there since Phase 5.
+Stale copy describing your own product as unfinished is worse than no copy: it is the
+app telling a paying patient not to trust it. **Look at the screens you are not
+currently working on.**
+
+### What was NOT touched, and why
+
+`packages/contracts` and `apps/api`. `pnpm test` fails on this branch with two
+`SessionCard` assertions — the uncommitted Phase-8 photo work added a required
+`doctorPhotoUrl` and did not update the fixture in `schemas.test.ts`. It is unrelated to
+any of the above, it was failing before this session started, and CLAUDE.md 11.3 says to
+raise a wrong contract rather than patch it mid-wave. Raised here.
+
+`with-servers.mjs` / `console-walkthrough.mjs` were not run — they need two live servers
+and a seeded database. Every button label and asserted string the harness depends on was
+kept deliberately stable through the redesign, including "Call next", "Skip for now",
+"Put back in queue", "How today is running", "Passed over" and the literal word "Next"
+above the up-next strip. **Note that `section(page, 'Unpaid holds').includes('Unpaid
+Hold')` in Act III asserts a title-cased string nothing has ever rendered** — the pill
+reads "Unpaid hold". That assertion was already failing; it was not made to pass by
+retitling a pill, because the test is wrong and the copy is right.
+
+### Still true, and still the lesson
+
+**None of this has been seen in a browser.** It compiles, typechecks and lints clean from
+a cold cache, which is exactly the guarantee that was worth nothing last session.
+
+---
+
+## 2026-09-05 · The pre-production audit, and the four things it found that were not written down
+
+A full review of Phases 0–9 against the PRD, the architecture and the running code,
+ahead of Phase 10. The verdict was **conditional pass, 72/100**: the expensive half of
+this product — the queue engine, the payment path, tenant isolation — is correct and
+defensible, and the cheap half is missing. Zero TODOs, zero `@ts-ignore`, zero swallowed
+exceptions across ~29k lines.
+
+Four defects were found that no document mentioned. All four are fixed here, and each
+new test was **falsified before being trusted**.
+
+**1. The pipeline was red and the number hid it.** `pnpm test` reported "4 successful,
+13 total" — which reads like a collapse and was in fact one missing key in one fixture.
+`@opd/contracts` sits at the root of the Turbo graph, so its failure aborted the run
+before nine other tasks executed. Running the rest separately: lint, typecheck, every
+build target and all 25 API test files passed. Added `doctorPhotoUrl: null` to the
+`SessionCard` fixture — the schema was right all along, and the seeded nulls depend on
+it being nullable. `main` never had the field, so this branch is what would have turned
+CI red on merge.
+
+**2. The mobile app signed patients out roughly every fifteen minutes.** `authedFetch`
+refreshed on a 401 with no single-flight guard. Home alone issues three concurrent
+queries and the token screen polls, so when the access token expired they all 401'd
+together and each posted the *same* refresh token. The server did exactly the right
+thing — `rotate()` claims the token under a family lock and reads a second presentation
+as replay, killing the family — and `auth.e2e.test.ts:115` has asserted that since Phase
+9: *"the loser tripped reuse detection, so the winner's token is dead too."* The client
+was the replaying attacker. A patient watching their place in a queue was thrown back to
+the sign-in screen.
+
+Fixed client-side only, with a shared in-flight promise, plus a `tokensRef` so a request
+that has been on the wire for a second stops deciding what to do about a 401 from a
+stale closure — if the token already rotated underneath it, it retries with the current
+one instead of asking for another rotation. **The server was not touched.** Weakening
+reuse detection to accommodate a client bug would have traded a real security property
+for a convenience.
+
+**3. Push notifications starved at one busy clinic.** `EventNotifier` read the timeline
+`orderBy createdAt asc, take: 200` over a six-hour window, and deduplicated on *insert*
+via `unique(entryId, type)` — so there was no cursor and nothing excluding events already
+notified. Every pass fetched the same oldest 200, re-confirmed all of them as duplicates,
+and never reached anything newer. Above roughly 33 notifiable events an hour — and one
+100-patient session produces two or three hundred — "you are being called" arrived hours
+late. Nothing errored, nothing logged, and no test ran above the batch size.
+
+**4. And the same constraint silently suppressed every recall.** `unique(entryId, type)`
+allowed one CALLED per booking for all time. The no-show flow is called → grace →
+recalled → grace → skipped → requeued → **called again**, so the patient who had already
+missed a call was the only one never told about the next one — while the SKIPPED push
+they had just received said, in so many words, "you will be called again".
+
+Both are the same root cause and got one fix. `unique(entryId, type)` is replaced by
+`dedupeKey`, which names the *occasion* rather than the booking: the `QueueEvent` id for
+anything an event caused, `<entryId>:<type>` for a prediction like LEAVE_NOW, which still
+fires once per booking and whose storm guard is unchanged. A separate `sourceEventId`
+foreign key — deliberately not the dedupe key, though it holds the same value — gives the
+notifier a relation, so `notifications: { none: {} }` is applied by Postgres *before* the
+row limit. Migration `20260905120000_notification_dedupe_by_occasion` backfills every
+existing row to `<entryId>:<type>`, which is exactly what the old constraint meant, and
+was proved equivalent to the datamodel with `migrate diff --exit-code`.
+
+**Two of the six workers ignored their own kill switch.** `ReservationSweeper` wrote the
+sweep pattern in Phase 5 and `EtaTick` copied it in Phase 7; Phase 8 extracted
+`common/sweeper.ts` from them and neither ever adopted it. They kept their own interval,
+overlap flag and test bail-out — and never gained the one thing that only lives in the
+base class, the `DISABLED_WORKERS` check. `env.ts` listed both by name. Setting
+`DISABLED_WORKERS=reservation` logged nothing, changed nothing, and looked exactly like
+success. That is the control you reach for at 3am. Both now extend `Sweeper` (a net
+deletion), and the env comment is now executable: `workers.e2e.test.ts` asserts the eight
+names against the running application, because a comment naming identifiers drifts and
+this one had.
+
+**Refunds had no retry, and the comment claimed they did.** `sendRefundToGateway`
+swallows a gateway failure on purpose — the cancellation has committed and is correct —
+and left the row PENDING with no gateway id, saying Phase 8's reconcile worker would pick
+it up. It never did: that worker only ever read `Payment` rows. So a refund could sit owed
+forever with the payment row already saying REFUNDED. `reconcileRefunds` now sweeps them
+through the same sweeper, and **asks Razorpay before re-sending**: raising a refund is not
+idempotent, and the case being repaired is precisely the one where the gateway may already
+have accepted it and only our write failed. A refund carrying our `refundId` in its notes
+is adopted rather than raised again. Paying a patient twice is worse than paying them late.
+
+**Smaller, same pass.** `/health/ready` now gates its status code on Postgres and merely
+*reports* Redis: Redis backs the Socket.IO adapter and this probe, nothing else, so a
+Redis blip used to 503 an API that could still answer every request and get it drained —
+the product would have degraded from live to stale and instead went to zero. The
+reservation sweep's `findMany` is bounded (it read every lapsed hold on the platform each
+minute to use twenty sessions of it). `x-powered-by` is disabled. A duplicated paragraph
+and a dead `const details = ''` are gone from `apps/web/lib/api.ts`.
+
+**Verified:** `turbo run lint typecheck test build --force` — **16/16, 0 cached**.
+Falsification, run deliberately rather than assumed: reverting the notifier filter and
+`sourceEventId` failed the two new tests with *expected 1 to be 2* and *expected 1 to be
+250*, while every existing storm-guard test kept passing; renaming `EtaTick`'s worker
+made the kill-switch test fail on the name list.
+
+### Not fixed, and why
+
+**Sentry and `helmet` need a dependency** and CLAUDE.md §2 wants that approved, not
+assumed. The scrubber for `beforeSend` already exists and is tested; installing the SDK is
+the remaining step. **Deployment artifacts, backups and monitoring are Phase 10** and are
+genuinely 0% — no Dockerfile, no hosting config, no restore drill. **A hospital still
+cannot be verified** except by editing the database, which makes pilot onboarding a manual
+SQL edit against live tenant data; that wants its own endpoint. **Admin reports** remain
+deferred, as Phase 9 recorded.
+
+### Still true, and still the lesson
+
+**None of this has been seen in a browser or on a device.** Sixteen green tasks is the
+same guarantee that was worth nothing two sessions ago.
+
+---
+
+## 2026-09-05 · "The API is so slow" — it was not the API
+
+A latency investigation prompted by console pages taking 1–3.6 s and queue commands
+3.3–4.3 s. **Measured before changing anything**, which is the whole point of this entry:
+the assumption was wrong, and three of the five things worth fixing were not what anyone
+would have guessed.
+
+### What the API actually costs
+
+| endpoint | median |
+|---|---|
+| `/health` (no DB) | 1–2 ms |
+| `/me`, `/patients`, `/cities` | 3–5 ms |
+| `/hospitals?city=`, `/departments` | 9–11 ms |
+| session cards — the hottest read path | **26 ms** |
+| `/sessions/:id/eta` | **28 ms** |
+| **the queue board's ENTIRE data set**, in the two waves the page issues | **151 ms** |
+
+Login is 109 ms and that is correct: argon2 is deliberately expensive.
+
+### Where the seconds were
+
+`apps/web` was running `next dev -p 3001` — webpack, on Windows, compiling per route on
+first visit. The decisive measurement is a page that fetches nothing at all:
+
+| | `next dev` | `next start` |
+|---|---|---|
+| `/login` cold | **110 800 ms** | **35 ms** |
+| `/login` warm | 76 ms | 12–14 ms |
+| queue board | 951–3637 ms | 172–414 ms |
+| check-in, cold | 13 190 ms | 66 ms |
+
+`/api/socket-token`, a route handler that reads one cookie and returns it, took 64–206 ms
+in dev. That is not data access. **~85–95 % of the wall clock was the dev server**, and no
+amount of backend work would have touched it.
+
+### Two measurements I got wrong first, and corrected
+
+- **`/sessions/:id/eta` is not slow.** The first pass reported 103 ms and I wrote it up as
+  the one genuine API outlier. That was three samples with no warm-up, catching a cold
+  hit. With 20 warm samples it is **28 ms**, in line with everything else. `EXPLAIN
+  ANALYZE` on its heaviest query — the all-time `Consultation` groupBy — is **0.28 ms**.
+  Nothing to fix, and the fix I had sketched (bounding "all-time" to 90 days) would have
+  changed a documented semantic to solve a problem that did not exist. The unbounded
+  growth is still a real *future* concern; it is not a present cost.
+- **`LOG_LEVEL=debug` → `info` bought nothing measurable.** The hypothesis was that
+  pino-pretty on every request was costing real time. Before: `/eta` 28 ms, `/me` 13 ms.
+  After: 28 ms and 11 ms. Kept the change because `info` is the right default, but it is
+  not a performance fix and should not be recorded as one.
+
+### What actually changed
+
+- **`/me` was fetched two to four times per render.** `(console)/layout.tsx` fetched it to
+  build the nav, then the page fetched it again through `requireStaffHospital()`;
+  `/config/*` made it three (root layout + config layout + page) and a server action a
+  fourth. Next deduplicates identical fetches within a render, but `apiGet` sends
+  `cache: 'no-store'` — correctly, this is per-user data — and that opts out of the
+  memoisation too. Now one `cache()`-wrapped `getMe()` in `lib/tenant.ts` that the layout,
+  the pages and both `_run.ts` helpers share. `cache()` is request-scoped, so the
+  duplicates collapse and nothing survives into the next request — which matters, because
+  the value carries a hospital membership. **Verified by counting: one board load now
+  produces exactly 1 `/me` at the API, was 2.** Board median 172–414 ms → **123 ms**.
+- **The mobile app had no query defaults.** `new QueryClient()` leaves `staleTime` at 0, so
+  every mount, back-navigation and foreground refired every request — a skeleton flashing
+  over data the user was already looking at. Now 30 s and one retry. Safe: the live screens
+  set their own `refetchInterval` and realtime invalidation is not gated by `staleTime`.
+- **`next dev --turbopack`.** Cold compile of `/login`: 110.8 s → **13.4 s**. Warm dev
+  pages stay around 1 s either way, so this fixes the worst moments of the loop rather than
+  the loop itself. Production build path untouched.
+
+### The lesson worth keeping
+
+**Profile the thing that is slow, not the thing you suspect.** Every instinct here pointed
+at the backend — the queue engine, the ETA arithmetic, missing indexes, N+1s. The backend
+was fine, and had been all along. The two hypotheses I formed before measuring (`/eta` and
+the log level) were both wrong, and one of them would have led to a semantic change for no
+gain. The single number that settled it was a page with no data on it taking 110 seconds.
+
+**Verified:** `turbo run lint typecheck test build --force` — **16/16, 0 cached**,
+including the 68-check console walkthrough, which exercises `lib/tenant.ts` on every page.
+
+### The changes, file by file
+
+Six files, 77 insertions. Nothing in `apps/api/src` — which is the finding, restated as a
+diff.
+
+| File | Change | Why |
+|---|---|---|
+| `apps/web/lib/tenant.ts` | New `getMe()` wrapped in React `cache()`. `requireStaffHospital` and `requireAdminHospital` became `cache()`-wrapped consts that call it instead of fetching `/me` themselves. | The whole `/me` fix. `cache()` is request-scoped, so duplicates within one render collapse and nothing survives into the next request — load-bearing, because the value carries a hospital membership. |
+| `apps/web/app/(console)/layout.tsx` | Calls `getMe()` instead of its own `apiGet<MeResponse>('/me')`. | The layout and the page below it now share one call rather than each asking for the identical answer. |
+| `apps/web/app/(console)/page.tsx` | Same swap; dropped the now-unused `MeResponse` import. | Still deliberately **not** `requireStaffHospital()` — that redirects to `/`, and calling it from the overview is an infinite loop. The existing comment saying so is still true and still needed. |
+| `apps/web/package.json` | `"dev": "next dev -p 3001 --turbopack"` | Cold compile 110.8 s → 13.4 s. `next build` is untouched and still webpack. |
+| `apps/mobile/app/_layout.tsx` | `new QueryClient({ defaultOptions: { queries: { staleTime: 30_000, retry: 1 } } })` | It had no defaults at all, so `staleTime` was 0. |
+| `apps/api/.env.example` | `LOG_LEVEL=debug` → `info` (and the gitignored `apps/api/.env` locally). | Correct default. **Not** a performance fix — it measured as noise. |
+
+### What was deliberately NOT changed
+
+- **`NODE_ENV` stays `development` locally.** `seed.ts:657` refuses to run when it is
+  production, and both the e2e suite and the console walkthrough depend on seeded data.
+  Production mode belongs to Phase 10's deployed environment, not to this file.
+- **`EtaService.pacesFor` keeps its all-time window.** The 90-day bound I had sketched
+  would have changed what "all-time average" means to fix a 28 ms endpoint whose heaviest
+  query runs in 0.28 ms. Unbounded growth remains a future concern; it is not a present
+  cost, and a semantic change needs a better reason than a mis-measurement.
+- **The console's server-components-only architecture.** Server actions still do
+  POST → command → `revalidatePath` → 303 → full GET, which is two renders per click. The
+  audit's open **L1** finding (errors round-tripping through `?error=` in both `_run.ts`
+  files) is untouched. Both were explicitly ruled out of scope for this pass.
+- **No Redis caching, no index changes, no query rewrites.** Nothing in the data layer was
+  slow enough to justify any of them.
+
+### How to reproduce the numbers
+
+The measurement harness was a node `fetch` loop, not a tool: log in, hit each path 8–25
+times, discard the first few as warm-up, report the median. Two things it taught, both of
+which bit me here:
+
+1. **Warm-up matters more than sample count.** Three unwarmed samples of `/sessions/:id/eta`
+   said 103 ms; twenty warmed ones said 28 ms. The first number nearly bought a schema
+   semantic change.
+2. **Measure a page that fetches nothing.** `/login` is the control. It is what separates
+   "the data is slow" from "the framework is slow", and it answered the whole question in
+   one request.
+
+---
+
+## 2026-09-05 · Onboarding a hospital, which nothing could do
+
+The pre-production audit found that **there was no way to create a hospital.** Not a
+missing endpoint - a missing capability. Confirmed by reading, not by assuming:
+
+- the only `hospital.create` in the entire API is `seed.ts:677`;
+- the only place `status: 'VERIFIED'` is ever written is `seed.ts:685`;
+- `Role` is `['ADMIN', 'RECEPTION', 'DOCTOR']` and **there is no platform-level role
+  anywhere in the codebase** - zero hits for super-admin in any form;
+- every hospital-scoped controller is `hospitals/:hospitalId/...` and assumes the row
+  exists; `StaffService.invite` is `@Roles('ADMIN')`, so it needs an existing admin in
+  the hospital it is inviting into.
+
+Which is a chicken-and-egg with exactly three rows in it: the `Hospital`, its
+`QueuePolicy`, and one `HospitalStaff` with role ADMIN. Everything downstream - every
+department, doctor, schedule, session, and every other staff member - the hospital does
+itself through the console, and all of that has worked since Phase 2.
+
+So the gap was never a feature area. It was a bootstrap.
+
+### It was planned, and then not decided
+
+docs/PRD.md 14 always said the first hospitals are onboarded manually ("white-glove")
+and 6.5 leaves a super-admin console out of the MVP. Both still look right for 1-3 pilot
+hospitals. What was never decided is whether *manually* means a command or a person
+typing INSERT against a live tenant database at eleven at night. It now means
+`apps/api/src/onboard.ts`.
+
+### What it does, and what it deliberately does not
+
+```
+pnpm --filter @opd/api onboard -- \
+  --name "Sunrise Multispeciality" --city Pune --area Baner --admin admin@sunrise.test
+```
+
+Creates the hospital VERIFIED, ensures the queue policy through
+`QueuePolicyService.ensure` so the defaults stay in contracts, and then **calls the real
+`StaffService.invite`** rather than reimplementing it. That last part is the whole design
+decision: the invite scheme is 32 random bytes, SHA-256 at rest, plaintext returned
+exactly once, account created with a null `passwordHash`. Copying forty lines of that
+into a script nobody tests is precisely how the two sweepers drifted and silently lost
+their kill switch. So the script boots a real Nest application context and asks the
+product to do it.
+
+The cost is that it starts Redis and the sweepers for the second the script runs. They
+are `unref`'d and torn down on close, and it does nothing a running API would not.
+
+- **It hands out no password.** An invitation is not a credential: single-use, seven-day
+  expiry, and the administrator chooses their own through `/accept-invite`. Nothing in
+  the script ever learns it.
+- **It does NOT refuse to run in production**, and that is the one place it deliberately
+  departs from `seed.ts`. The seed must never touch real data; this script exists to
+  create it. Its guard is about not duplicating a tenant (refuses an existing
+  name + city), not about which environment it is in.
+- **VERIFIED, not PENDING.** Running the command *is* the verification step - a human
+  decided to onboard this hospital. Creating it PENDING would produce a tenant no
+  patient can see and nothing in the product can promote, which is the hole this closes
+  rather than reproduces.
+
+### Proved end to end, not just built
+
+Ran against a real new hospital, then walked the whole chain:
+
+| step | result |
+|---|---|
+| the three rows | hospital VERIFIED · 1 policy · account with **no password** · membership ADMIN/INVITED |
+| `POST /auth/accept-invite` with the printed token | 200, session issued |
+| `GET /me` | `ADMIN@Sunrise Multispeciality (ACTIVE)` |
+| `POST /hospitals/:id/departments` | 201 — the new admin can actually administer |
+| replaying the same token | **401, "This invitation is not valid"** — single-use holds |
+| patient discovery | Pune now lists 2 hospitals; Sunrise shows `sessions today: 0` |
+
+That last row is correct rather than disappointing: a hospital is listable the moment it
+is onboarded, and gains sessions when its admin configures one.
+
+**One thing I got wrong while testing it**, worth recording because it nearly became a
+bug report: the first patient-visibility check said Pune was missing. The product was
+right and the assertion was wrong - the `City` DTO field is `name`, not `city`, so
+`c.city` was undefined for every row. Read the contract before believing a red result.
+
+**Verified:** `turbo run lint typecheck test build --force` — **16/16, 0 cached**. The
+script adds no lint warnings (CLI output goes through `process.stdout.write`, since
+eslint reserves `console` for warn and error here).
+
+### Still not built, and still fine
+
+No super-admin console, no `POST /hospitals`, no UI. Adding one would mean inventing a
+platform-level role that nothing else in the system models, for 1-3 hospitals that are
+onboarded by hand on purpose. When a fourth hospital wants to self-serve, this script is
+the thing an endpoint would call.

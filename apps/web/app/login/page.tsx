@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import type { ApiError } from '@opd/contracts';
+import { AuthShell } from '../../components/auth-shell';
+import { Banner, Field, btn, inputLg } from '../../components/ui';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -35,49 +37,58 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-6">
-      <h1 className="text-h1 text-primary">OPD Console</h1>
-      <p className="mt-2 text-body text-ink-muted">Sign in to run your hospital&apos;s OPD queue.</p>
-
-      <form onSubmit={onSubmit} className="mt-8 flex flex-col gap-4" noValidate>
-        <label className="flex flex-col gap-1.5">
-          <span className="text-label">Email</span>
+    <AuthShell
+      title="Sign in"
+      intro="Run your hospital’s OPD queue."
+      footer={
+        <>
+          Invited by an administrator? Use the single-use link they sent you — it sets your password
+          and signs you in.
+        </>
+      }
+    >
+      <form onSubmit={onSubmit} className="flex flex-col gap-4" noValidate>
+        <Field id="email" label="Email">
           <input
+            id="email"
             type="email"
             required
             autoComplete="email"
+            autoFocus
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="h-12 rounded-sm border border-line bg-surface px-3 text-body outline-none focus:ring-2 focus:ring-accent"
+            className={inputLg}
           />
-        </label>
+        </Field>
 
-        <label className="flex flex-col gap-1.5">
-          <span className="text-label">Password</span>
+        <Field id="password" label="Password">
           <input
+            id="password"
             type="password"
             required
             autoComplete="current-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="h-12 rounded-sm border border-line bg-surface px-3 text-body outline-none focus:ring-2 focus:ring-accent"
+            className={inputLg}
           />
-        </label>
+        </Field>
 
-        {error && (
-          <p role="alert" className="rounded-md bg-danger-bg px-3 py-2 text-body text-danger">
+        {/*
+          The message the server actually gave, in the one banner the whole product
+          uses. It is announced as an alert because a person who has just pressed a
+          button and is looking at the button will not see a sentence appear above
+          it - which is every failed sign-in on a small screen.
+        */}
+        {error !== null && (
+          <Banner tone="danger" role="alert">
             {error}
-          </p>
+          </Banner>
         )}
 
-        <button
-          type="submit"
-          disabled={pending}
-          className="h-12 rounded-md bg-primary text-label text-white disabled:bg-slate-200 disabled:text-ink-disabled"
-        >
+        <button type="submit" disabled={pending} className={btn('primary', 'lg') + ' mt-1 w-full'}>
           {pending ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
-    </main>
+    </AuthShell>
   );
 }

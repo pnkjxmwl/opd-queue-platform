@@ -1512,6 +1512,129 @@ follow-ups · visit history · documents/attachments.
 when the socket drops, and the phone re-syncing after a connectivity loss. Both are
 implemented and neither has been exercised.
 
+### Pre-production audit — 2026-09-05
+
+A review of everything built so far, against the PRD and the running code rather than
+the checkboxes, before Phase 10 starts. Narrative in `PROGRESS.md`. **Verdict:
+conditional pass.** The queue engine, the payment path and tenant isolation are
+correct; what was missing was all at the edges.
+
+**It found four defects no document mentioned, and they change two rows above.**
+
+- ☑ **Phase 8's kill switch did not work for two of its six workers.** `ReservationSweeper`
+  and `EtaTick` predate `common/sweeper.ts` and never adopted it, so they never read
+  `DISABLED_WORKERS` — while `env.ts` listed both by name. Both now extend `Sweeper`, and
+  the name list is asserted in `workers.e2e.test.ts` rather than written in a comment.
+- ☑ **Phase 8's notifier starved at one busy clinic.** `take: 200` over an oldest-first
+  six-hour window with dedupe on insert meant it re-read the same 200 events forever.
+  Above ~33 notifiable events/hour — one 100-patient session makes 200–300 — "you are
+  being called" arrived hours late, silently.
+- ☑ **The same constraint suppressed every recall.** `unique(entryId, type)` allowed one
+  CALLED per booking, so a requeued patient was never told about the second call. Replaced
+  by `dedupeKey`, which keys on the occasion; LEAVE_NOW still fires once per booking.
+- ☑ **A refund whose gateway call failed was never retried.** `reconcileRefunds` now
+  sweeps them, asking Razorpay first so a refund is never raised twice.
+- ☑ Also: readiness no longer 503s a healthy API on a Redis blip; the reservation sweep is
+  bounded; `x-powered-by` off; the `@opd/contracts` fixture that was aborting the whole
+  pipeline is fixed (**16/16 green, 0 cached**).
+
+**Still open, and now the real Phase 10 list:**
+
+- ☐ **Error tracking and `helmet`** — both need a dependency, which CLAUDE.md §2 wants
+  approved rather than assumed. `common/scrub.ts` is written and tested; installing the
+  Sentry SDK and wiring `beforeSend` is the remaining step.
+- ☑ **Onboarding a hospital — done, 2026-09-05.** There was no way to create one: the only
+  `hospital.create` in the API was the seed, the only write of `status: VERIFIED` was the
+  seed, and there is no platform-level role anywhere. `apps/api/src/onboard.ts` closes it:
+  `pnpm --filter @opd/api onboard -- --name X --city Y --admin a@b.test` creates the
+  hospital VERIFIED, ensures its queue policy, and invites the first ADMIN **through the
+  real `StaffService`** rather than reimplementing the token scheme. Proved end to end —
+  accept-invite issues a session, the new admin creates a department, a replayed token is
+  refused, and the hospital appears in patient discovery. No super-admin console, and
+  none needed for a white-glove pilot (PRD 14).
+- ☐ **`EtaTick` broadcasts at most 50 sessions per minute** and `LeaveNowNotifier` 30. Fine
+  at pilot; patients in session 51+ silently stop seeing their window drift.
+- ☐ **Admin reports** (`P9-BE-02`) remain deferred, as Phase 9 recorded.
+- ☐ **Rate limiting is in-memory**, so it becomes per-instance decoration the day a second
+  API process runs — the same day the Socket.IO Redis adapter starts earning its keep.
+
+### Latency — measured 2026-09-05, and it is not where anyone thought
+
+Prompted by "the API is so slow". **It is not.** Every endpoint is 2–30 ms and the whole
+queue board's data is **151 ms**. The 1–3.6 s pages were `next dev`. Narrative and the
+two measurements I got wrong are in `PROGRESS.md`.
+
+| | `next dev` | `next start` |
+|---|---|---|
+| `/login` (fetches nothing) cold | 110 800 ms | 35 ms |
+| queue board | 951–3637 ms | **123 ms** |
+
+**Two consequences for Phase 10, both good.** `P10-WEB-01` deploys the console to Vercel,
+which runs the production build — so the console gets roughly an 8× improvement from the
+deploy itself, with no work. And no backend performance work is warranted before launch:
+nothing in `apps/api/src` changed in this pass, because nothing there was slow.
+
+☑ Fixed along the way: `/me` was being fetched 2–4× per render (now once, request-scoped
+via `cache()`); the mobile app had no `staleTime` so every screen mount refetched;
+`next dev --turbopack` cuts cold compiles from 110.8 s to 13.4 s.
+
+### The UI redesign — state as of 2026-09-05
+
+Not a phase; a cross-cutting pass over both clients. The narrative, including four
+false starts, is in `docs/PROGRESS.md`.
+
+**Shipped**
+
+- ☑ **Photos, end to end.** `photoUrl` on `Hospital` and `Doctor` (nullable),
+  migration `20260904025421_hospital_doctor_photo`, through `HospitalCard`,
+  `PublicDoctor`, `SessionCard` and `MyQueueEntry`, served by the API, seeded with
+  verified URLs. One hospital and one doctor are left null **on purpose** so the
+  fallback is visible rather than theoretical.
+- ☑ **Inter actually loads**, in both clients, for the first time since Phase 1.
+  `fontWeight` is set alongside `fontFamily` on every token.
+- ☑ **Gradients removed.** Built, then taken out — see `docs/Design.md` 2.5.
+- ☑ **`Photo` and `Skeleton`** in `apps/mobile/lib/ui.tsx`. Skeletons replaced the
+  spinner in `QueryState`.
+- ☑ **Mobile**: reset to baseline, theme realigned, `Field` fixed (tap target, and a
+  focus style that cannot fight the keyboard), login, signup, Home, hospital detail.
+- ☑ **Console**: fixed rail with working active states on both navs, dense primitives,
+  the queue board split into a sticky action column and a scrolling roster column,
+  sign-in rebuilt to match.
+- ☑ **Seed**: 4 Mumbai hospitals, 25 doctors, four other patient accounts with paid
+  bookings, and `checkInCode` on every paid booking — the token screen had never had a
+  QR to show.
+
+**Still open**
+
+- ☑ **Five console config pages** and the queue list, board, check-in and walk-in
+  pages — done in the 2026-09-05 console redesign, off one design system in
+  `apps/web/components/`. See PROGRESS.md, "The console redesign".
+- ☐ **Six mobile screens** still on baseline styling: location, department, doctors
+  list, doctor detail, session detail, join, patients. My Visits, the token screen and
+  profile were rebuilt on 2026-09-05.
+  **None of the rebuilt screens has been confirmed on a device yet.**
+- ☐ **The console redesign has not been seen in a browser either.** It builds,
+  typechecks and lints clean, and the console walkthrough cannot run without two live
+  servers and a seeded database. Every defect in Phases 5 and 6 was found by a person
+  looking at a screen; nothing about this session changes that.
+- ☐ **A console upload path and object storage** for photos. `photoUrl` is seeded.
+- ☐ **`with-servers.mjs`**: verify a live server rather than an open port, and clean up
+  its fixture sessions. Stale servers and 69 accumulated fixtures produced three false
+  alarms in one day.
+
+**Explicitly not being built** — no data exists behind any of them, and a demo you have
+to walk back is worse than a plainer one: ratings, review counts, distance, years of
+experience, languages, a platform fee, a payment-method picker, an "I've Arrived"
+button (reception scans the QR), and a specialty grid on Home (no city-wide department
+endpoint).
+
+**A fee on a doctor row** stays deferred for a different reason: the fee lives on
+`OPDSession`, not `Doctor`, so it needs a derived `todayFeePaiseFrom` on `PublicDoctor`
+before a doctor card can honestly show one.
+
+No ratings and no review counts, in the mockups or here. They need a whole feature
+behind them and a demo you have to walk back is worse than a plainer one.
+
 Fill a row the day a phase's integration checkpoint passes. This is your record of where you actually are —
 useful when you come back after a break, and the first thing to hand a second developer if you ever add one.
 Keep the *narrative* (what you built, what you decided, what broke) in **PROGRESS.md**; this table is the index.

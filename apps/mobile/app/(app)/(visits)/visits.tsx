@@ -7,7 +7,7 @@ import { Icon } from '../../../lib/icon';
 import { QueryState } from '../../../lib/discovery';
 import { EntryStatusPill } from '../../../lib/visits';
 import { calendarDate, istClock } from '../../../lib/format';
-import { pressable } from '../../../lib/ui';
+import { Segmented, pressable } from '../../../lib/ui';
 import { theme } from '../../../theme';
 
 /**
@@ -40,21 +40,20 @@ export default function MyVisits() {
 
   return (
     <View style={styles.screen}>
+      {/*
+        One control with two halves, not two loose pills. The pills read as two
+        independent buttons, so it was never obvious that choosing one deselected the
+        other - and the unselected half looked disabled rather than available.
+      */}
       <View style={styles.tabs}>
-        {(['active', 'past'] as const).map((value) => (
-          <Pressable
-            key={value}
-            onPress={() => setScope(value)}
-            accessibilityRole="tab"
-            accessibilityState={{ selected: scope === value }}
-            style={[styles.tab, scope === value && styles.tabOn]}
-            android_ripple={{ color: theme.color.teal[100] }}
-          >
-            <Text style={[styles.tabText, scope === value && styles.tabTextOn]}>
-              {value === 'active' ? 'Upcoming' : 'Past'}
-            </Text>
-          </Pressable>
-        ))}
+        <Segmented
+          value={scope}
+          onChange={setScope}
+          options={[
+            { value: 'active', label: 'Upcoming' },
+            { value: 'past', label: 'Past' },
+          ]}
+        />
       </View>
 
       <ScrollView
@@ -83,6 +82,8 @@ export default function MyVisits() {
           <Link key={entry.id} href={`/visit/${entry.id}`} asChild>
             <Pressable style={styles.card} android_ripple={pressable().android_ripple}>
               <View style={styles.cardTop}>
+                {/* A slab, not loose type: the token is what a patient scans this
+                    list for, and it has to be findable down a column of names. */}
                 <Text style={styles.token}>{entry.tokenLabel}</Text>
                 <EntryStatusPill status={entry.status} />
               </View>
@@ -119,26 +120,12 @@ export default function MyVisits() {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: theme.color.canvas },
   tabs: {
-    flexDirection: 'row',
-    gap: theme.space[2],
     paddingHorizontal: theme.space[4],
     paddingVertical: theme.space[3],
     backgroundColor: theme.color.surface,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: theme.color.border,
   },
-  tab: {
-    paddingVertical: theme.space[2],
-    paddingHorizontal: theme.space[4],
-    borderRadius: theme.radius.full,
-    backgroundColor: theme.color.slate[100],
-    // docs/Design.md 9: a tap target is never smaller than 44x44.
-    minHeight: 44,
-    justifyContent: 'center',
-  },
-  tabOn: { backgroundColor: theme.color.teal[100] },
-  tabText: { ...theme.font.body, color: theme.color.textMuted },
-  tabTextOn: { color: theme.color.teal[800], fontWeight: '600' },
   content: { padding: theme.space[4], gap: theme.space[3], paddingBottom: theme.space[10] },
   card: {
     backgroundColor: theme.color.surface,
@@ -150,7 +137,20 @@ const styles = StyleSheet.create({
   },
   cardTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   // Tabular numerals so a column of token numbers does not jitter (docs/Design.md 3).
-  token: { ...theme.font.h2, color: theme.color.primary, fontVariant: ['tabular-nums'] },
+  token: {
+    ...theme.font.h3,
+    color: theme.color.text,
+    fontVariant: ['tabular-nums'],
+    minWidth: 64,
+    textAlign: 'center',
+    overflow: 'hidden',
+    paddingHorizontal: theme.space[2],
+    paddingVertical: 3,
+    borderRadius: theme.radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.color.border,
+    backgroundColor: theme.color.slate[100],
+  },
   // The patient reads BEFORE the doctor: when a family has several bookings it is
   // the only thing that tells them apart.
   patient: { ...theme.font.h3, color: theme.color.text, marginTop: theme.space[1] },

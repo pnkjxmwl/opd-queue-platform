@@ -67,14 +67,21 @@ export class NotificationsService {
   // -------------------------------------------------------------------------
 
   /**
-   * Queue one message, exactly once per booking per type.
+   * Queue one message, exactly once per occasion.
    *
-   * **The dedupe is the database's `unique(entryId, type)`, not a check here**
-   * (docs/Rules.md 5). "You are getting close" is produced by a sweep that runs every
-   * half-minute; an application check loses that race the first time two passes
-   * overlap, and docs/Phases.md is blunt about the consequence: *"notification storms
-   * destroy trust faster than no notifications."* A duplicate insert violates the
-   * constraint and is swallowed as "already told them", which is the truth.
+   * **The dedupe is the database's `unique(dedupeKey)`, not a check here**
+   * (docs/Rules.md 5). These are produced by sweeps running every half-minute; an
+   * application check loses that race the first time two passes overlap, and
+   * docs/Phases.md is blunt about the consequence: *"notification storms destroy
+   * trust faster than no notifications."* A duplicate insert violates the constraint
+   * and is swallowed as "already told them", which is the truth.
+   *
+   * **What counts as one occasion depends on where the message came from.** Pass
+   * `sourceEventId` for anything caused by a queue event and each event gets its own
+   * notification - so a patient who is skipped, requeued and then called again is
+   * told about that second call, which the old `unique(entryId, type)` silently
+   * swallowed. Omit it for a prediction like LEAVE_NOW, which keys on the booking
+   * and therefore still fires once ever, however many times the sweep recomputes it.
    *
    * Returns whether this call is the one that recorded it.
    */
@@ -86,12 +93,16 @@ export class NotificationsService {
     tokenLabel: string;
     hospitalName: string;
     aheadCount?: number;
+    /** The QueueEvent behind this message, when one caused it. */
+    sourceEventId?: string | null;
   }): Promise<boolean> {
     const { title, body } = render(input.type, {
       tokenLabel: input.tokenLabel,
       hospitalName: input.hospitalName,
       aheadCount: input.aheadCount,
     });
+
+    const sourceEventId = input.sourceEventId ?? null;
 
     try {
       await this.prisma.notification.create({
@@ -101,6 +112,9 @@ export class NotificationsService {
           type: input.type,
           title,
           body,
+          sourceEventId,
+          // One event, one notification; otherwise one booking, one notification.
+          dedupeKey: sourceEventId ?? `${input.entryId}:${input.type}`,
           // The deep link, and nothing else. No name, no diagnosis (docs/Rules.md 8).
           data: { type: input.type, entryId: input.entryId, sessionId: input.sessionId },
         },

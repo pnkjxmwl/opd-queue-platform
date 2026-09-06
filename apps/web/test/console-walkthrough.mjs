@@ -266,7 +266,15 @@ check(
   (await columnOf('QueueEntry', priya.id, 'priority')) === 'EMERGENCY',
 );
 
-const escalated = section(await board(sessionId), 'Next');
+// Anchored to the roster the console presents AS the call order, not to a 900-character
+// window after the word "Next".
+//
+// The old anchor passed for an accidental reason: the board was one long column, so the
+// slice after "Next" happened to run into the waiting list further down the page. Once
+// the board became two columns that window stopped reaching it, and a check that had
+// never really been reading the call order started failing. Reading the list itself is
+// what it meant to do all along, and it is now insensitive to where that list sits.
+const escalated = section(await board(sessionId), 'Waiting here');
 check(
   'the emergency jumps to the front of the call order',
   escalated.includes(priya.tokenLabel) &&

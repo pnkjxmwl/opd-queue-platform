@@ -2,34 +2,39 @@ import Link from 'next/link';
 import type { Doctor, OPDSession, Paginated } from '@opd/contracts';
 import { requireStaffHospital } from '../../../lib/tenant';
 import { queueGet } from './_run';
-import { Card, Empty, ErrorBanner, buttonQuiet, input, label, td, th } from '../config/ui';
-import { istTime, rupees } from './ui';
+import { Icon } from '../../../components/icon';
+import {
+  Card,
+  EmptyState,
+  ErrorBanner,
+  PageHeader,
+  btn,
+  input,
+  label,
+} from '../../../components/ui';
+import {
+  SESSION_FINISHED,
+  SessionStatusBadge,
+  istDateLabel,
+  istTime,
+  istToday,
+  rupees,
+} from './ui';
 
 /**
  * P6-WEB-01 (entry) · which session am I running?
  *
- * Defaults to today in **IST, resolved on the server**. The browser's idea of today
- * is the 00:30 bug this project already documented once on the session generator: a
- * receptionist opening the console just after midnight must see tonight's date, not
- * yesterday's, and a machine with a wrong timezone must not decide that.
+ * **A board of sessions, not a table of rows.** A session is a thing a person opens
+ * and works inside for three hours; the five-column table it used to be gave a
+ * doctor's name the same weight as a fee and buried "Open board" in a right-hand
+ * cell. Each session is now one target the size of a card, with the doctor first,
+ * the clock second and the state marked - the three things someone squints at when
+ * they are deciding which one is theirs.
+ *
+ * The date defaults to today in IST, resolved on the server (`istToday`).
  */
 
 const PATH = '/queue';
-
-/** `en-CA` formats as YYYY-MM-DD, which is exactly the CalendarDate the API wants. */
-const IST_DATE = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' });
-
-const STATUS_STYLE: Record<string, string> = {
-  OPEN_FOR_REGISTRATION: 'bg-success-bg text-success',
-  ACTIVE: 'bg-info-bg text-info',
-  SCHEDULED: 'bg-canvas text-ink-muted',
-  COMPLETED: 'bg-canvas text-ink-muted',
-  CANCELLED: 'bg-danger-bg text-danger',
-  ENDED_EARLY: 'bg-warning-bg text-warning',
-};
-
-/** A session nobody can act on any more. Listed, but not a link to a board. */
-const FINISHED = ['COMPLETED', 'CANCELLED', 'ENDED_EARLY'];
 
 export default async function QueuePage({
   searchParams,
@@ -38,12 +43,11 @@ export default async function QueuePage({
 }) {
   const params = await searchParams;
   const hospital = await requireStaffHospital();
-  const date = params.date ?? IST_DATE.format(new Date());
+  const date = params.date ?? istToday();
+  const today = istToday();
 
   const [page, doctors] = await Promise.all([
-    queueGet<Paginated<OPDSession>>(
-      `/hospitals/${hospital.id}/sessions?date=${date}&limit=100`,
-    ),
+    queueGet<Paginated<OPDSession>>(`/hospitals/${hospital.id}/sessions?date=${date}&limit=100`),
     queueGet<Paginated<Doctor>>(`/hospitals/${hospital.id}/doctors?limit=100`),
   ]);
 
@@ -57,22 +61,30 @@ export default async function QueuePage({
       ? page.items.filter((s) => s.currentProviderDoctorId === hospital.doctorId)
       : page.items;
 
+  const live = sessions.filter((s) => !SESSION_FINISHED.includes(s.status));
+  const finished = sessions.filter((s) => SESSION_FINISHED.includes(s.status));
+
   return (
     <>
-      <h1 className="text-h1">Queue</h1>
-      <p className="mt-2 text-body-lg text-ink-muted">
-        {hospital.name} ·{' '}
-        {hospital.role === 'DOCTOR' ? 'your sessions' : 'all sessions'} on{' '}
-        <span className="tabular-nums">{date}</span>
-      </p>
-
-      <div className="mt-6">
-        <ErrorBanner message={params.error} />
-
-        <Card title="Sessions">
-          <form className="mb-4 flex flex-wrap items-end gap-3">
-            <div className="w-48">
-              <label className={label} htmlFor="filter-date">
+      <PageHeader
+        eyebrow={hospital.name}
+        title="Queue"
+        description={
+          <>
+            {hospital.role === 'DOCTOR' ? 'Your sessions' : 'All sessions'} on{' '}
+            <span className="font-medium text-ink">{istDateLabel(date)}</span>
+            {date === today && ' — today'}
+          </>
+        }
+        actions={
+          /*
+            A GET form, so the date is in the URL and the view is linkable and
+            reloadable. `date` is the only field, and the button is beside it rather
+            than under a "Filters" heading - one control does not need a toolbar.
+          */
+          <form className="flex items-end gap-2">
+            <div>
+              <label className={label + ' sr-only'} htmlFor="filter-date">
                 Date
               </label>
               <input
@@ -80,74 +92,161 @@ export default async function QueuePage({
                 name="date"
                 type="date"
                 defaultValue={date}
-                className={input + ' mt-1'}
+                className={input + ' w-[10.5rem]'}
               />
             </div>
-            <button type="submit" className={buttonQuiet}>
+            <button type="submit" className={btn('quiet')}>
               Show
             </button>
+            {date !== today && (
+              <Link href={PATH} className={btn('ghost')}>
+                Today
+              </Link>
+            )}
           </form>
+        }
+      />
 
-          {sessions.length === 0 ? (
-            <Empty>
-              {hospital.role === 'DOCTOR'
-                ? 'You have no session on this date.'
-                : 'No sessions on this date. An admin generates them from the schedules under Configuration.'}
-            </Empty>
-          ) : (
-            <table className="w-full border-collapse">
-              <thead>
-                <tr className="border-b border-line">
-                  <th className={th}>Doctor</th>
-                  <th className={th}>Window (IST)</th>
-                  <th className={th}>Fee</th>
-                  <th className={th}>Status</th>
-                  <th className={th} />
-                </tr>
-              </thead>
-              <tbody>
-                {sessions.map((session) => (
-                  <tr key={session.id} className="border-b border-line last:border-0">
-                    <td className={td}>
-                      {doctorName.get(session.currentProviderDoctorId) ?? 'Unknown doctor'}
-                    </td>
-                    <td className={td + ' tabular-nums'}>
-                      {istTime(session.scheduledStart)}–
-                      {istTime(session.scheduledEnd)}
-                    </td>
-                    <td className={td + ' tabular-nums'}>₹{rupees(session.feePaise)}</td>
-                    <td className={td}>
-                      <span
-                        className={
-                          'rounded-full px-2.5 py-0.5 text-caption ' +
-                          (STATUS_STYLE[session.status] ?? 'bg-canvas text-ink-muted')
-                        }
-                      >
-                        {session.status.replaceAll('_', ' ')}
-                      </span>
-                    </td>
-                    <td className={td + ' text-right'}>
-                      {FINISHED.includes(session.status) ? (
-                        // Deliberately inert rather than absent: a finished session
-                        // still has to be visibly THERE, or staff hunt for one they
-                        // remember running.
-                        <span className="text-caption text-ink-disabled">Finished</span>
-                      ) : (
-                        <Link
-                          className={buttonQuiet + ' inline-flex items-center'}
-                          href={`${PATH}/${session.id}`}
-                        >
-                          Open board
-                        </Link>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+      {params.error !== undefined && (
+        <div className="mb-5">
+          <ErrorBanner message={params.error} />
+        </div>
+      )}
+
+      {sessions.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon="calendar"
+            title={
+              hospital.role === 'DOCTOR'
+                ? 'No session for you on this date'
+                : 'No sessions on this date'
+            }
+            action={
+              hospital.role === 'ADMIN' ? (
+                <Link href="/config/sessions" className={btn('primary')}>
+                  <Icon name="plus" className="h-4 w-4" />
+                  Generate sessions
+                </Link>
+              ) : (
+                <Link href={PATH} className={btn('quiet')}>
+                  Back to today
+                </Link>
+              )
+            }
+          >
+            {hospital.role === 'ADMIN'
+              ? 'Sessions come from the weekly schedules under Configuration, or can be added one at a time.'
+              : 'An administrator generates the day’s sessions from the schedules.'}
+          </EmptyState>
         </Card>
-      </div>
+      ) : (
+        <div className="flex flex-col gap-6">
+          <SessionGrid
+            heading={live.length > 0 && finished.length > 0 ? 'Open' : undefined}
+            sessions={live}
+            doctorName={doctorName}
+          />
+          {finished.length > 0 && (
+            <SessionGrid heading="Finished" sessions={finished} doctorName={doctorName} />
+          )}
+        </div>
+      )}
     </>
+  );
+}
+
+function SessionGrid({
+  heading,
+  sessions,
+  doctorName,
+}: {
+  heading?: string;
+  sessions: OPDSession[];
+  doctorName: Map<string, string>;
+}) {
+  if (sessions.length === 0) return null;
+
+  return (
+    <section>
+      {heading !== undefined && (
+        <h2 className="mb-2.5 text-eyebrow uppercase text-ink-muted">
+          {heading} · {sessions.length}
+        </h2>
+      )}
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {sessions.map((session) => (
+          <SessionCard
+            key={session.id}
+            session={session}
+            doctor={doctorName.get(session.currentProviderDoctorId) ?? 'Unknown doctor'}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SessionCard({ session, doctor }: { session: OPDSession; doctor: string }) {
+  const done = SESSION_FINISHED.includes(session.status);
+
+  const body = (
+    <>
+      <div className="flex items-start justify-between gap-3">
+        <h3 className="min-w-0 truncate text-h3 text-ink">{doctor}</h3>
+        <SessionStatusBadge status={session.status} />
+      </div>
+
+      <dl className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-caption text-ink-muted">
+        <div className="flex items-center gap-1.5">
+          <dt className="sr-only">Window</dt>
+          <Icon name="clock" className="h-3.5 w-3.5" />
+          <dd className="tabular-nums">
+            {istTime(session.scheduledStart)}–{istTime(session.scheduledEnd)}
+          </dd>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <dt className="sr-only">Fee</dt>
+          <dd className="tabular-nums">₹{rupees(session.feePaise)}</dd>
+        </div>
+        {session.pausedAt !== null && (
+          <div className="flex items-center gap-1.5 font-medium text-warning">
+            <dt className="sr-only">Queue</dt>
+            <Icon name="pause" className="h-3.5 w-3.5" />
+            <dd>Paused</dd>
+          </div>
+        )}
+      </dl>
+    </>
+  );
+
+  /*
+    A finished session is deliberately inert rather than absent: staff hunt for one
+    they remember running. Rendered as a `div`, not a dead link - a link that goes
+    nowhere is worse than no link, because it is only discovered by pressing it.
+  */
+  if (done) {
+    return (
+      <div className="rounded-lg border border-line bg-surface/60 p-4 shadow-xs">
+        {body}
+        <p className="mt-3 text-caption text-ink-disabled">This session is closed.</p>
+      </div>
+    );
+  }
+
+  return (
+    <Link
+      href={`${PATH}/${session.id}`}
+      className="group rounded-lg border border-line bg-surface p-4 shadow-xs transition-colors hover:border-line-strong hover:bg-hover"
+    >
+      {body}
+      <span className="mt-3 inline-flex items-center gap-1 text-label font-semibold text-primary">
+        Open board
+        <Icon
+          name="arrow-right"
+          className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5"
+        />
+      </span>
+    </Link>
   );
 }

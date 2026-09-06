@@ -34,7 +34,7 @@ export const MY_ENTRY_INCLUDE = {
       department: { select: { name: true } },
       // The id as well as the name: the ETA engine learns per DOCTOR, and after a
       // substitution it must be the person actually in the room (docs/PRD.md 8.11).
-      currentProvider: { select: { id: true, name: true } },
+      currentProvider: { select: { id: true, name: true, photoUrl: true } },
     },
   },
 } as const;
@@ -157,6 +157,7 @@ export function toMyQueueEntry(
     hospitalArea: row.session.hospital.area,
     departmentName: row.session.department.name,
     doctorName: row.session.currentProvider.name,
+    doctorPhotoUrl: row.session.currentProvider.photoUrl,
 
     scheduledStart: row.session.scheduledStart.toISOString(),
     scheduledEnd: row.session.scheduledEnd.toISOString(),

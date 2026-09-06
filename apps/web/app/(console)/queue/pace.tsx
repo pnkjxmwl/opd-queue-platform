@@ -1,4 +1,6 @@
 import type { SessionEta } from '@opd/contracts';
+import { Icon } from '../../../components/icon';
+import { Badge } from '../../../components/ui';
 
 /**
  * How fast this clinic is actually moving, for the person standing at the desk.
@@ -19,35 +21,42 @@ import type { SessionEta } from '@opd/contracts';
  * one drawn from forty are not the same claim, and a doctor deciding whether to
  * trust the board deserves to know which they are looking at - the same reasoning
  * that put `basis` in the contract rather than only a number.
+ *
+ * The redesign stacked the three figures instead of putting them in a 3-up grid.
+ * They are a sentence read top to bottom - per patient, plus the gap between
+ * patients, gives the window a joiner is quoted - and side by side they read as
+ * three unrelated KPIs, which is the shape of a dashboard nobody uses.
  */
 export function Pace({ eta }: { eta: SessionEta }) {
   return (
     <section
       aria-label="How the clinic is running"
-      className="mt-6 rounded-lg border border-line bg-surface p-5 shadow-md"
+      className="rounded-lg border border-line bg-surface shadow-xs"
     >
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-h3">How today is running</h2>
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-line-soft px-4 py-3">
+        <h2 className="text-h3 text-ink">How today is running</h2>
+        {/* Label and icon, never colour alone (docs/Design.md 8). A board read
+            across a room, by somebody who may not distinguish red from green. */}
         {eta.runningBehind ? (
-          // Label and icon, never colour alone (docs/Design.md). A board read across
-          // a room in daylight, by somebody who may not distinguish red from green.
-          <span className="inline-flex items-center gap-1 rounded-md bg-warning-bg px-2 py-1 text-caption text-warning">
-            <span aria-hidden>▲</span> Running behind
-          </span>
+          <Badge tone="warning" icon="trending-up">
+            Running behind
+          </Badge>
         ) : (
-          <span className="inline-flex items-center gap-1 rounded-md bg-canvas px-2 py-1 text-caption text-ink-muted">
-            <span aria-hidden>●</span> On its usual pace
-          </span>
+          <Badge tone="success" icon="check">
+            On its usual pace
+          </Badge>
         )}
-      </div>
+      </header>
 
-      <dl className="mt-4 grid gap-4 sm:grid-cols-3">
+      <dl className="divide-y divide-line-soft">
         <Figure
+          icon="clock"
           label="Per patient"
           value={`${eta.expectedConsultMins} min`}
           note={CONSULT_BASIS[eta.basis](eta.sampleSize)}
         />
         <Figure
+          icon="refresh-cw"
           label="Between patients"
           value={`${eta.deadTimeMins} min`}
           note={
@@ -59,6 +68,7 @@ export function Pace({ eta }: { eta: SessionEta }) {
           }
         />
         <Figure
+          icon="user-plus"
           label="If someone joined now"
           value={eta.joinNowEtaFrom === null ? '—' : window(eta.joinNowEtaFrom, eta.joinNowEtaTo)}
           note={
@@ -70,7 +80,7 @@ export function Pace({ eta }: { eta: SessionEta }) {
       </dl>
 
       {eta.runningBehind && (
-        <p className="mt-4 text-body text-ink-muted">
+        <p className="border-t border-line-soft bg-warning-bg/50 px-4 py-3 text-caption text-warning">
           Consultations are taking materially longer than this doctor’s usual pace. Anyone waiting
           will be seen later than their token suggested — worth telling the room.
         </p>
@@ -105,13 +115,28 @@ function window(from: string, to: string | null): string {
   return `${start}–${clock.format(new Date(to))}`;
 }
 
-function Figure({ label, value, note }: { label: string; value: string; note: string }) {
+function Figure({
+  icon,
+  label,
+  value,
+  note,
+}: {
+  icon: 'clock' | 'refresh-cw' | 'user-plus';
+  label: string;
+  value: string;
+  note: string;
+}) {
   return (
-    <div>
-      <dt className="text-caption text-ink-muted">{label}</dt>
+    <div className="flex items-baseline justify-between gap-4 px-4 py-2.5">
+      <div className="min-w-0">
+        <dt className="flex items-center gap-1.5 text-label font-medium text-ink">
+          <Icon name={icon} className="h-3.5 w-3.5 text-ink-disabled" />
+          {label}
+        </dt>
+        <p className="mt-0.5 pl-5 text-caption text-ink-muted">{note}</p>
+      </div>
       {/* Tabular numerals so figures line up rather than jitter as they change. */}
-      <dd className="mt-1 text-h3 tabular-nums text-ink">{value}</dd>
-      <p className="mt-1 text-caption text-ink-muted">{note}</p>
+      <dd className="shrink-0 text-h2 tabular-nums text-ink">{value}</dd>
     </div>
   );
 }

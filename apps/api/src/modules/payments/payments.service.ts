@@ -376,6 +376,80 @@ export class PaymentsService {
     return { checked: stale.length, confirmed };
   }
 
+  /**
+   * The other half of the safety net: refunds we raised and never managed to send.
+   *
+   * `sendRefundToGateway` deliberately swallows a gateway failure - the cancellation
+   * has already committed and is correct, and failing the request would tell a
+   * patient their cancellation did not work when it did. The row is left PENDING
+   * with no `razorpayRefundId`, and the comment there claimed the payment-reconcile
+   * worker would pick it up. It never did: that worker only ever looked at `Payment`
+   * rows. So a refund could sit owed forever, with the books saying it was paid.
+   *
+   * **It asks Razorpay before it re-sends.** Raising a refund is not idempotent, and
+   * the case being repaired is precisely the one where the gateway may already have
+   * accepted it and only our write failed. A refund carrying our `refundId` in its
+   * notes is one we already sent, so its id is adopted rather than a second refund
+   * being raised. Paying a patient twice is a worse outcome than paying them late.
+   */
+  async reconcileRefunds(
+    olderThan: Date,
+    limit = 20,
+  ): Promise<{ checked: number; sent: number; adopted: number }> {
+    if (!this.razorpay.configured) return { checked: 0, sent: 0, adopted: 0 };
+
+    const stranded = await this.prisma.refund.findMany({
+      where: {
+        status: 'PENDING',
+        razorpayRefundId: null,
+        createdAt: { lt: olderThan },
+      },
+      select: {
+        id: true,
+        amountPaise: true,
+        payment: { select: { id: true, razorpayPaymentId: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+      take: limit,
+    });
+
+    let sent = 0;
+    let adopted = 0;
+
+    for (const refund of stranded) {
+      const gatewayPaymentId = refund.payment.razorpayPaymentId;
+      // Nothing was ever captured, so there is nothing to give back. The row is
+      // bookkeeping for a payment that never completed.
+      if (gatewayPaymentId === null) continue;
+
+      try {
+        const existing = await this.razorpay.refundsForPayment(gatewayPaymentId);
+        const already = existing.find((r) => r.notes?.refundId === refund.id);
+
+        if (already !== undefined) {
+          await this.prisma.refund.update({
+            where: { id: refund.id },
+            data: { razorpayRefundId: already.id },
+          });
+          adopted += 1;
+          this.log.warn(
+            { refundId: refund.id, razorpayRefundId: already.id },
+            'adopted a refund the gateway had already accepted but we never recorded',
+          );
+          continue;
+        }
+
+        await this.sendRefundToGateway(refund.id, refund.payment.id, refund.amountPaise);
+        sent += 1;
+      } catch (error) {
+        // One unreachable payment must not stop the rest of the sweep.
+        this.log.error({ err: error, refundId: refund.id }, 'refund reconcile failed for one row');
+      }
+    }
+
+    return { checked: stranded.length, sent, adopted };
+  }
+
   private async onPaymentCaptured(
     entity: { id: string; order_id?: string | null; amount: number; currency: string } | undefined,
   ): Promise<WebhookAck> {
@@ -724,10 +798,14 @@ export class PaymentsService {
   /**
    * Raise a refund with Razorpay for a row already written as PENDING.
    *
-   * Never throws onward: the cancellation has already committed and is correct. A
-   * gateway failure leaves the row PENDING with no gateway id, which is precisely
-   * what Phase 8's payment-reconcile worker looks for. Failing the request instead
-   * would tell the patient their cancellation did not work, when it did.
+   * Never throws onward: the cancellation has already committed and is correct.
+   * Failing the request instead would tell the patient their cancellation did not
+   * work, when it did.
+   *
+   * A gateway failure leaves the row PENDING with no gateway id, which is what
+   * `reconcileRefunds` above looks for and retries. That was not true until the
+   * pre-production audit - this comment used to claim the reconcile worker covered
+   * it, and the worker only ever read `Payment` rows.
    */
   private async sendRefundToGateway(
     refundId: string,

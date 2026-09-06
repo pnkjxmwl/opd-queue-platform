@@ -28,14 +28,14 @@ export default function GlobalError({
           minHeight: '100vh',
           display: 'grid',
           placeItems: 'center',
-          fontFamily: 'system-ui, sans-serif',
+          fontFamily: 'Inter, system-ui, -apple-system, Segoe UI, sans-serif',
           background: '#F7FAFC',
           color: '#0F172A',
         }}
       >
-        <main style={{ maxWidth: '28rem', padding: '24px' }}>
-          <h1 style={{ fontSize: '20px', margin: '0 0 8px' }}>The console could not start</h1>
-          <p style={{ margin: '0 0 20px', color: '#64748B', lineHeight: 1.5 }}>
+        <main style={{ maxWidth: '28rem', padding: '32px', textAlign: 'center' }}>
+          <h1 style={{ fontSize: '22px', letterSpacing: '-0.02em', margin: '0 0 8px' }}>The console could not start</h1>
+          <p style={{ margin: '0 0 24px', color: '#64748B', fontSize: '15px', lineHeight: 1.6 }}>
             Something failed before the page could load. Reloading usually fixes it. If it does
             not, the system may be down — please tell your hospital administrator.
           </p>
@@ -44,12 +44,13 @@ export default function GlobalError({
             onClick={reset}
             style={{
               height: '44px',
-              padding: '0 16px',
+              padding: '0 20px',
               border: 0,
-              borderRadius: '6px',
+              borderRadius: '8px',
               background: '#0E7C7B',
               color: '#fff',
-              fontSize: '14px',
+              fontSize: '15px',
+              fontWeight: 600,
               cursor: 'pointer',
             }}
           >

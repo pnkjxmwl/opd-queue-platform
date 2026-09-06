@@ -239,6 +239,11 @@ describe('discovery schemas', () => {
     doctorId: '11111111-0000-4000-8000-000000000004',
     doctorName: 'Dr. Anita Sharma',
     doctorSpecialization: null,
+    // Null, not absent. The key is REQUIRED and the value is nullable, which is the
+    // shape a clinic that has uploaded no photograph actually has - and the seed
+    // leaves one hospital and one doctor null on purpose so the fallback avatar is
+    // exercised rather than assumed. Omitting it here is what broke this fixture.
+    doctorPhotoUrl: null,
     isSubstitute: false,
     date: '2026-08-30',
     scheduledStart: '2026-08-30T04:30:00.000Z',

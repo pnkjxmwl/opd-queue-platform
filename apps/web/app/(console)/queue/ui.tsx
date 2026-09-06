@@ -1,44 +1,48 @@
-import type { QueueEntryPriority, QueueEntryStatus } from '@opd/contracts';
+import type { OPDSession, QueueEntryPriority, QueueEntryStatus } from '@opd/contracts';
+import { Badge, type BadgeTone } from '../../../components/ui';
+import type { IconName } from '../../../components/icon';
 
 /**
- * The queue console's own presentation bits.
+ * The queue's presentation vocabulary - the words and marks a status is allowed to
+ * be said with, in one place so two screens cannot word the same state differently.
  *
- * Deliberately additive to `../config/ui.tsx` rather than a rewrite: the shell, the
- * buttons, the error banner and the pager are already there and already match
- * docs/Design.md. What is here is what a queue has and a config form does not - a
- * status vocabulary and a token.
+ * Everything visual comes from `components/ui`; what lives here is the mapping from
+ * a domain enum to a tone, an icon and a sentence in English.
  */
 
 /**
- * docs/Design.md 2.4, transcribed. **Every status carries a WORD**, because
- * docs/Design.md 8 forbids colour-only meaning and a receptionist working a busy
- * desk under fluorescent light is exactly who that rule protects.
+ * docs/Design.md 2.4, transcribed - **now with the icons that table always
+ * specified and no screen ever rendered.**
+ *
+ * Colour was doing the work alone, which docs/Design.md 8 forbids, and the words
+ * were carrying the rest at 12px grey. "Called" and "Completed" are one glance apart
+ * on a busy board and were the same shape.
  *
  * RESERVED and RESCHEDULED are not in the design table because no patient-facing
  * screen shows them; the console does, so they get the neutral treatment and an
- * honest label rather than being left to fall through to a blank pill.
+ * honest label rather than falling through to a blank pill.
  */
-const STATUS: Record<QueueEntryStatus, { label: string; className: string }> = {
-  RESERVED: { label: 'Unpaid hold', className: 'bg-canvas text-ink-muted' },
-  CONFIRMED: { label: 'Booked', className: 'bg-info-bg text-info' },
-  VIRTUAL_WAITING: { label: 'Waiting', className: 'bg-info-bg text-info' },
-  CHECKED_IN: { label: 'Checked in', className: 'bg-teal-100 text-teal-800' },
-  READY: { label: 'Checked in', className: 'bg-teal-100 text-teal-800' },
-  CALLED: { label: 'Called', className: 'bg-warning-bg text-warning' },
-  IN_CONSULTATION: { label: 'In consultation', className: 'bg-success-bg text-success' },
-  COMPLETED: { label: 'Completed', className: 'bg-canvas text-ink-muted' },
-  NO_SHOW: { label: 'No-show', className: 'bg-danger-bg text-danger' },
-  SKIPPED: { label: 'Skipped', className: 'bg-warning-bg text-warning' },
-  CANCELLED: { label: 'Cancelled', className: 'bg-canvas text-ink-disabled' },
-  RESCHEDULED: { label: 'Rescheduled', className: 'bg-canvas text-ink-muted' },
+const STATUS: Record<QueueEntryStatus, { label: string; tone: BadgeTone; icon: IconName }> = {
+  RESERVED: { label: 'Unpaid hold', tone: 'neutral', icon: 'clock' },
+  CONFIRMED: { label: 'Booked', tone: 'info', icon: 'home' },
+  VIRTUAL_WAITING: { label: 'Waiting', tone: 'info', icon: 'home' },
+  CHECKED_IN: { label: 'Checked in', tone: 'teal', icon: 'check-circle' },
+  READY: { label: 'Checked in', tone: 'teal', icon: 'check-circle' },
+  CALLED: { label: 'Called', tone: 'warning', icon: 'bell' },
+  IN_CONSULTATION: { label: 'In consultation', tone: 'success', icon: 'stethoscope' },
+  COMPLETED: { label: 'Completed', tone: 'neutral', icon: 'check' },
+  NO_SHOW: { label: 'No-show', tone: 'danger', icon: 'user-x' },
+  SKIPPED: { label: 'Skipped', tone: 'warning', icon: 'skip-forward' },
+  CANCELLED: { label: 'Cancelled', tone: 'neutral', icon: 'slash' },
+  RESCHEDULED: { label: 'Rescheduled', tone: 'neutral', icon: 'refresh-cw' },
 };
 
 export function StatusPill({ status }: { status: QueueEntryStatus }) {
-  const { label, className } = STATUS[status];
+  const { label, tone, icon } = STATUS[status];
   return (
-    <span className={`inline-block whitespace-nowrap rounded-full px-2.5 py-0.5 text-caption ${className}`}>
+    <Badge tone={tone} icon={icon}>
       {label}
-    </span>
+    </Badge>
   );
 }
 
@@ -54,22 +58,51 @@ export const statusLabel = (status: QueueEntryStatus): string => STATUS[status].
 export function PriorityPill({ priority }: { priority: QueueEntryPriority }) {
   if (priority === 'NORMAL') return null;
   return (
-    <span className="ml-1.5 inline-block whitespace-nowrap rounded-full bg-danger-bg px-2 py-0.5 text-caption text-danger">
-      {priority === 'EMERGENCY' ? '▲ Emergency' : '▲ Priority'}
-    </span>
+    <Badge tone="danger" icon="alert-triangle">
+      {priority === 'EMERGENCY' ? 'Emergency' : 'Priority'}
+    </Badge>
   );
 }
 
-/** Tabular numerals: docs/Design.md 8 requires them for anything that changes. */
-export const token = 'font-semibold tabular-nums text-ink';
+/**
+ * The state of a whole session, in the words staff use rather than the enum.
+ *
+ * `OPEN_FOR_REGISTRATION` was being printed with its underscores stripped, so the
+ * session list read "OPEN FOR REGISTRATION" in a 12px pill next to "ENDED EARLY".
+ * The database's vocabulary is not the receptionist's.
+ */
+const SESSION: Record<string, { label: string; tone: BadgeTone; icon: IconName }> = {
+  SCHEDULED: { label: 'Scheduled', tone: 'neutral', icon: 'calendar' },
+  OPEN_FOR_REGISTRATION: { label: 'Taking bookings', tone: 'info', icon: 'inbox' },
+  ACTIVE: { label: 'Running', tone: 'success', icon: 'activity' },
+  COMPLETED: { label: 'Finished', tone: 'neutral', icon: 'check' },
+  ENDED_EARLY: { label: 'Ended early', tone: 'warning', icon: 'alert-triangle' },
+  CANCELLED: { label: 'Cancelled', tone: 'danger', icon: 'slash' },
+};
+
+export function SessionStatusBadge({ status }: { status: OPDSession['status'] }) {
+  const shape = SESSION[status] ?? {
+    label: status.replaceAll('_', ' ').toLowerCase(),
+    tone: 'neutral' as const,
+    icon: 'info' as const,
+  };
+  return (
+    <Badge tone={shape.tone} icon={shape.icon}>
+      {shape.label}
+    </Badge>
+  );
+}
+
+/** A session nobody can act on any more. Listed, but not a link to a board. */
+export const SESSION_FINISHED = ['COMPLETED', 'CANCELLED', 'ENDED_EARLY'];
 
 /**
  * Instants are stored UTC and rendered in Asia/Kolkata (docs/Rules.md 5), the way
  * the clock is read in India: "7 PM", "6 AM", "10:30 AM".
  *
  * 12-hour, with the ":00" dropped on the hour - the same rule and the same output
- * as `istClock` in the mobile app, so a session reads identically to the patient
- * and to the receptionist looking at them.
+ * as `istClock` in the mobile app, so a session reads identically to the patient and
+ * to the receptionist looking at them.
  *
  * `en-US` rather than `en-IN`: en-IN renders lowercase "pm", and the two apps have
  * to agree character for character. Intl also emits a narrow no-break space before
@@ -95,23 +128,37 @@ export const istTime = (value: Date | string): string =>
 export const rupees = (paise: number): string => (paise / 100).toFixed(2);
 
 /**
- * A confirmation that something happened, as the counterpart to `ErrorBanner`.
+ * Today, **in IST, resolved on the server**.
  *
- * Not colour alone: the tick and the word carry the meaning. This matters more on
- * the check-in desk than anywhere else in the product - a receptionist glancing at a
- * screen between two patients needs "A004 · Anita Sharma checked in", not a green
- * rectangle.
+ * The browser's idea of today is the 00:30 bug this project already documented once
+ * on the session generator: a receptionist opening the console just after midnight
+ * must see tonight's date, not yesterday's, and a machine with a wrong timezone must
+ * not get to decide that. `en-CA` formats as YYYY-MM-DD, which is exactly the
+ * CalendarDate the API wants.
  */
-export function SuccessBanner({ message }: { message?: string }) {
-  if (!message) return null;
-  return (
-    <p
-      role="status"
-      className="mb-4 flex items-start gap-2 rounded-md bg-success-bg px-3 py-2 text-body-lg text-success"
-    >
-      <span aria-hidden="true">✓</span>
-      <span>{message}</span>
-    </p>
-  );
-}
+const IST_DATE = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' });
+export const istToday = (): string => IST_DATE.format(new Date());
 
+/** "Tue, 9 Sep" - a date a person reads, next to the ISO one a machine needs. */
+const IST_LONG = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Kolkata',
+  weekday: 'short',
+  day: 'numeric',
+  month: 'short',
+});
+
+export const istDateLabel = (date: string): string =>
+  // Noon UTC is comfortably inside the IST day whatever the runtime's own zone.
+  IST_LONG.format(new Date(`${date}T12:00:00Z`));
+
+/**
+ * The token, as the console's one recognisable object.
+ *
+ * Re-exported from the design system rather than redefined, because the check-in
+ * desk, the walk-in list, the board and the session list all show one and all drew
+ * it differently.
+ */
+export { TokenChip, SuccessBanner } from '../../../components/ui';
+
+/** Kept: the board and the desk still import a class for a bare token string. */
+export const token = 'font-semibold tabular-nums tracking-tight text-ink';

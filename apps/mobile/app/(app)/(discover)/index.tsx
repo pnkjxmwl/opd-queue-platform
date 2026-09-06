@@ -151,6 +151,10 @@ export default function Home() {
         renderItem={({ item }) => (
           <Row
             avatar={item.name}
+            // Passing photoUrl - even when it is null - opts this into the taller
+            // card with an 88px photograph. A hospital is the biggest choice on this
+            // screen and was rendering in the same box as a department line.
+            photoUrl={item.photoUrl}
             title={item.name}
             subtitle={item.area ?? item.city}
             badge={
@@ -177,6 +181,9 @@ export default function Home() {
                 ? `Nothing in ${city} matches “${query}”.`
                 : `No hospitals are listed in ${city} yet.`
             }
+            // Four, because Mumbai has four - the placeholder should be the shape of
+            // the answer, not an arbitrary count that makes the page resize.
+            skeletonRows={4}
             onRetry={() => void hospitals.refetch()}
           />
         }

@@ -16,6 +16,10 @@ async function bootstrap(): Promise<void> {
   // lost to a phantom "invalid signature".
   const app = await NestFactory.create(AppModule, { bufferLogs: true, rawBody: true });
 
+  // Express announces itself on every response. It tells an attacker which stack to
+  // look up known issues for and tells a legitimate client nothing at all.
+  app.getHttpAdapter().getInstance().disable('x-powered-by');
+
   app.useLogger(app.get(Logger));
   app.enableShutdownHooks();
 

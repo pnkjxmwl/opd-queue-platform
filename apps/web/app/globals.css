@@ -3,12 +3,110 @@
 @tailwind utilities;
 
 @layer base {
-  body {
-    @apply bg-canvas text-ink font-sans;
+  /**
+   * Typographic defaults the whole console inherits, rather than a `font-sans` and
+   * a colour repeated on nine screens.
+   *
+   * `text-rendering` and the two font-feature settings are what make Inter look set
+   * rather than dumped: `cv11` gives the single-storey l that stops "Ill" reading as
+   * three bars, and `ss01` fixes the ambiguous 1 in a column of token numbers.
+   */
+  html {
+    -webkit-text-size-adjust: 100%;
   }
 
-  /* docs/Design.md 3 + 8: live-updating numbers must not jitter as they change. */
+  body {
+    @apply bg-canvas text-body text-ink font-sans antialiased;
+    font-feature-settings: 'cv11', 'ss01';
+    text-rendering: optimizeLegibility;
+  }
+
+  /**
+   * ONE focus ring for the whole console, on `:focus-visible` only.
+   *
+   * Every screen used to bring its own - `ring-teal-100` here, `ring-teal-200`
+   * there, `ring-accent` on the invite page - and all of them fired on mouse clicks
+   * too, so pressing a button left a halo behind on it. Keyboard users got an
+   * inconsistent ring and mouse users got one they never asked for. This is the
+   * single definition; nothing else in the app declares a focus style.
+   */
+  :focus-visible {
+    outline: 2px solid theme('colors.accent');
+    outline-offset: 2px;
+    border-radius: theme('borderRadius.xs');
+  }
+
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  /**
+   * The date and time pickers are the only native controls the console cannot
+   * restyle, and Chrome renders their indicator at 60% grey with no hover. Matching
+   * it to `ink-muted` is the difference between a field that looks like part of the
+   * product and one that looks like a browser default sitting in it.
+   */
+  ::-webkit-calendar-picker-indicator {
+    opacity: 0.45;
+    cursor: pointer;
+    transition: opacity 120ms ease-out;
+  }
+
+  ::-webkit-calendar-picker-indicator:hover {
+    opacity: 0.85;
+  }
+
+  ::selection {
+    background: theme('colors.teal.100');
+    color: theme('colors.teal.900');
+  }
+
+  /**
+   * A rail and a scrolling pane means this console has a permanent scrollbar on the
+   * right of the content column. The platform default is a 17px grey slab that reads
+   * as a seam down the page.
+   */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.line.strong') transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: theme('colors.line.strong');
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 9999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: theme('colors.ink.disabled');
+  }
+}
+
+@layer utilities {
+  /** docs/Design.md 3 + 8: live-updating numbers must not jitter as they change. */
   .tabular {
     font-variant-numeric: tabular-nums;
+  }
+}
+
+/**
+ * docs/Design.md 7: respect the OS setting. A receptionist who has asked their
+ * machine to stop moving things has asked this console too - including the pulse on
+ * the live indicator, which is the one animation here that runs forever.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
