@@ -7415,3 +7415,86 @@ All four are in a header at the top of `render.yaml`, because the person who hit
 Verified the exact build chain locally against the scratch database - install with
 `--prod=false`, prisma generate, turbo build, `migrate deploy` - rather than trusting
 that a string that looks right is right.
+
+## 2026-09-08 · Reversing yesterday's "correction" to the eta entry — it was wrong
+
+Rules.md 16 says never edit a past entry to look right in hindsight; write one that
+reverses it. This reverses one of mine.
+
+Yesterday I wrote that the audit's description of `eta.e2e.test.ts` - that it "fails
+for the first ~15 minutes of every IST day" - was **wrong**, on the grounds that the
+failure happened at "00:04 local while IST was 18:34 the previous day", and concluded
+"the machine is not on IST".
+
+**That was based on a broken measurement, and the original entry was right all along.**
+
+`TZ=Asia/Kolkata date` is a **no-op in Git Bash on Windows**. It does not apply the
+zone; it hands back UTC. So the "IST 18:34" I read was UTC, and the machine's own local
+clock - which I had dismissed - *was* IST. The failure happened at **00:04 IST**:
+literally inside the first fifteen minutes of the IST day, exactly where the audit said
+it would be.
+
+Established properly this time, three ways that agree:
+
+```
+bash local :  Tue, Sep  8, 2026  4:42 AM     <- this IS IST
+bash -u    :  Mon, Sep  7, 2026 11:12 PM     <- UTC
+python     :  UTC 2026-09-07 23:12 -> IST 2026-09-08 04:42
+server Date:  Mon, 07 Sep 2026 23:11:57 GMT  <- agrees
+```
+
+Python with an explicit `timezone(timedelta(hours=5, minutes=30))`, or the machine's
+own local clock, are the reliable ways to ask. `TZ=` in front of `date` is not, on this
+machine, and it fails **silently and plausibly** - the worst combination, and the same
+shape as the `columnOf` and `fixture.mjs` bugs this week: a right-looking command
+returning a confident wrong answer.
+
+Two things follow. The eta fixture's defect is exactly as first recorded and still open
+- it wants an injectable clock. And the reasoning in yesterday's entry about "the local
+calendar day disagreeing with the IST calendar day" should be disregarded; the stashed
+clean-tree re-run in that entry is still valid, since it only ever showed the failure
+was unrelated to that day's changes.
+
+## 2026-09-08 · Staging is up, and everything on it was proved rather than assumed
+
+`https://opd-api-koes.onrender.com` — Render, Singapore, all free plans.
+
+**Verified against the running deployment, not the dashboard:**
+
+| Claim | How |
+|---|---|
+| Boots | `/health` 200 |
+| Postgres and Redis reachable | `/health/ready` → `database: up, redis: up` |
+| **Migrations ran** | a signup wrote an `Account` row - the empty-schema failure mode was the one worth ruling out |
+| Argon2id works on Render's Linux | that signup hashed a password; `@node-rs/argon2` is a native module and was a real risk |
+| Generated JWT secrets valid | login round-tripped |
+| helmet live | `cross-origin-resource-policy: cross-origin`, HSTS, nosniff, **no `x-powered-by`** |
+| `rawBody: true` survived | see below |
+| Error shape intact | `{"error":{"code":...,"requestId":...}}` |
+
+**The webhook, both ways.** An unsigned POST got `400 Webhook signature verification
+failed`; the same body with a real HMAC-SHA256 over the raw bytes got `201
+{"handled":"IGNORED"}` - accepted, then ignored because the order id was invented. That
+single pair proves the shared secret matches on both sides AND that `rawBody: true`
+survived the deploy, which `PROGRESS.md` records as having cost hours before.
+
+A `GET` on the webhook URL returns `404 Cannot GET` and that is correct - the route is
+POST-only. It looked like a broken deploy and was not.
+
+**Onboarded rather than seeded**, deliberately: fake hospitals in a deployed environment
+are what CLAUDE.md 12 warns about, and the onboard path is the one a pilot will actually
+use, so it is the one worth rehearsing. `Demo Hospital` (Mumbai) → General Medicine →
+Dr. Meera Iyer → a live session at ₹300.
+
+The invite link the script prints points at `http://localhost:3001`, because the console
+is not deployed. Harmless here - `POST /auth/accept-invite` is public, so the token was
+redeemed directly - but **a real hospital cannot be onboarded until the console is
+deployed**, or that link is a dead end. That is a genuine `P10-WEB-01` dependency and it
+was not written down anywhere.
+
+**Razorpay is fully configured**, proved by a join succeeding: `A001`, payment `CREATED`.
+Creating that order is a live call to Razorpay, so the key id and secret are real. A
+blank key is not graceful degradation - `payments.service.ts:194` throws.
+
+**Not proved:** an actual card payment through checkout, and anything needing the
+console or a phone.
