@@ -63,9 +63,26 @@ function runPsql(statement) {
       if (error?.code !== 'ENOENT') throw error;
     }
   }
+  // The docker fallback, for a machine with no local psql - which is most Windows
+  // machines, so this is the path that usually runs.
+  //
+  // It takes the user and database FROM DATABASE_URL when there is one. Hardcoding
+  // '-U opd -d opd' meant that whenever psql was absent, a DATABASE_URL pointing at
+  // some other database was silently ignored and every query went to `opd` instead:
+  // the walkthrough would report "no hospital matching Apollo" while looking at a
+  // database nobody had asked it to look at. Wrong answers from the right-looking
+  // command are the expensive kind.
+  let user = 'opd';
+  let database = 'opd';
+  if (url !== undefined && url !== '') {
+    const parsed = new URL(url);
+    user = decodeURIComponent(parsed.username) || user;
+    database = parsed.pathname.slice(1) || database;
+  }
+
   return execFileSync(
     'docker',
-    ['exec', '-i', 'opd-postgres', 'psql', '-U', 'opd', '-d', 'opd', ...PSQL_ARGS, statement],
+    ['exec', '-i', 'opd-postgres', 'psql', '-U', user, '-d', database, ...PSQL_ARGS, statement],
     { encoding: 'utf8' },
   );
 }

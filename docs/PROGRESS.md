@@ -7329,3 +7329,53 @@ not just a save. That is the one step most likely to be missed.
 Not free tier anywhere, deliberately: a free web service spins down, a free Key Value
 is evicted, and free Postgres expires after 30 days. Each of those breaks something
 this product depends on — the WebSockets, the six sweepers, or the pilot's data.
+
+## 2026-09-08 · Act VI, and a fixture that was reading the wrong database
+
+The roles split went in green on lint, typecheck and 377 API tests, and **CI still went
+red**. Two checks in the console walkthrough's "Act VI - two people, one board":
+
+```
+X the stale board still offers Start consultation
+X the stale action is refused in a sentence a receptionist can act on
+```
+
+Act VI is signed in as reception and its whole subject is a page that went out of date
+while somebody else acted. It happened to make that point with **Start consultation** -
+the one button reception no longer has. The board did the right thing (no button) and
+the forced press came back `Error: Not permitted` instead of the friendly stale-state
+sentence, so both checks failed for the same reason.
+
+Fixed by making the point with **No-show**, which reception does have. The act is about
+staleness, not about which control was stale.
+
+### The fixture was querying a different database than it was told to
+
+Running the walkthrough locally was blocked because the seed refuses when the database
+holds a hospital it did not create - correctly; the local one holds `Lotus Health
+Clinic` from the onboarding script. So it was pointed at a scratch `opd_walk` database
+instead, leaving that alone.
+
+It still failed, with `No hospital matching "Apollo"` - after a seed that had just
+printed nine hospitals.
+
+**`fixture.mjs` has two ways to reach Postgres and they disagreed.** It prefers `psql`
+with `DATABASE_URL`, and falls back to `docker exec ... psql -U opd -d opd` when psql
+is missing - which is most Windows machines, so the fallback is the path that usually
+runs. The fallback's database name was **hardcoded**. With no local psql, a
+`DATABASE_URL` pointing anywhere else was silently ignored and every query went to
+`opd`, so the walkthrough reported on a database nobody had asked it to look at.
+
+It now derives the user and database from `DATABASE_URL` when there is one. Worth
+noting how it presented: not as an error, but as a confident, plausible, wrong answer.
+
+### Verified
+
+72 passed, 0 failed, locally, against the scratch database - including the two new
+checks, `reception is not offered Start consultation` and the doctor login doing both
+clinical steps. `Lotus Health Clinic` was still there afterwards, untouched.
+
+The lesson from the `columnOf` entry two days ago repeats exactly: **the checks that
+need a live environment only ever ran in CI, so CI was the only place they could fail.**
+Pointing them at a scratch database makes them runnable in ten minutes on the machine
+where the change is being written, which is where they belong.

@@ -427,11 +427,15 @@ check(
 // every board on every screen is going out of date as it is read.
 await press(await board(sessionId), { button: 'Call next' });
 const staleBoard = await board(sessionId);
-check('the stale board still offers Start consultation', canPress(staleBoard, 'Start consultation'));
+// No-show, not Start consultation: this act is signed in as reception, and the
+// clinical two are the doctor's now (PRD 6.2). The point being made is about a page
+// that went out of date, not about which button it was, so it is made with a button
+// reception actually has.
+check('the stale board still offers No-show', canPress(staleBoard, 'No-show'));
 
 await press(await board(sessionId), { button: 'No-show' });
 
-const staleAttempt = await press(staleBoard, { button: 'Start consultation' });
+const staleAttempt = await press(staleBoard, { button: 'No-show' });
 const staleText = visible(staleAttempt);
 check(
   'the stale action is refused in a sentence a receptionist can act on',
