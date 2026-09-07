@@ -8,6 +8,30 @@
 # they are edited in the dashboard, never here.
 #
 # ---------------------------------------------------------------------------
+# FREE TIER — what it costs, and the date that matters
+# ---------------------------------------------------------------------------
+# All three resources are on Render's free plans. That is a deliberate choice for a
+# first deploy, and it disables things this product genuinely depends on:
+#
+#   1. The web service SPINS DOWN after 15 minutes idle and cold-starts on the next
+#      request. While it is down there are no WebSockets and no sweepers - no ETA
+#      ticks, no reservation expiry, no no-show timers, no arrival nudges. Realtime
+#      will look broken on this plan. It is not; it is asleep. Do not judge Phase 7
+#      or Phase 8 behaviour here.
+#
+#   2. **The Postgres EXPIRES 30 DAYS AFTER CREATION** (14-day grace, then deleted).
+#      Write the date down. Anything in it on that day is gone. This is fine for a
+#      throwaway staging database and is never acceptable under a real hospital.
+#
+#   3. Key Value is 25 MB with no persistence. This one is genuinely fine: it holds
+#      Socket.IO pub/sub and rate-limit counters, neither of which is durable state.
+#
+#   4. 750 free instance-hours per workspace per month, shared across services.
+#
+# Going paid is three `plan:` values and moving the migration step back out of
+# buildCommand into `preDeployCommand:` - a pre-deploy command is ignored on free.
+#
+# ---------------------------------------------------------------------------
 # REGION — read this before applying
 # ---------------------------------------------------------------------------
 # Render has no India region; Singapore is the closest it offers. CLAUDE.md 8 and
@@ -28,10 +52,10 @@ services:
     type: web
     runtime: node
     region: singapore
-    # NOT `free`. A free instance spins down when idle, and this product's WebSockets
-    # and six background sweepers are exactly what dies when it does (Phase 10 risks).
-    # This is Render's cheapest always-on size; scale it up, never down to free.
-    plan: 0.5c-512mb
+    # Free, deliberately, and it costs three things - see FREE TIER at the top.
+    # To go paid later this becomes `0.5c-512mb` and the migration step moves back
+    # out of buildCommand into a `preDeployCommand:` line.
+    plan: free
     healthCheckPath: /health
 
     # Turbo builds @opd/contracts first because @opd/api depends on it; filtering to
@@ -39,20 +63,23 @@ services:
     #
     # `--prod=false` is load-bearing, not belt-and-braces. NODE_ENV=production is set
     # below and applies during the BUILD too, and pnpm honours it by skipping
-    # devDependencies - which is where nest, tsc and turbo all live. Without this the
-    # build fails on the first command. It also keeps the `prisma` CLI installed,
-    # which preDeployCommand needs and which is likewise a devDependency.
+    # devDependencies - which is where nest, tsc, turbo AND the prisma CLI all live.
+    # Without this the build fails on its first command. Verified, not assumed.
+    #
+    # `prisma:deploy` is the LAST step here rather than a `preDeployCommand:`, which
+    # is the correct place for it but is **paid-only**. On a free instance Render
+    # ignores a pre-deploy command, so the migration would never run and the API
+    # would boot against an empty database - failing as mystery 500s rather than as
+    # anything that names the cause. Move it back out when this goes paid.
+    #
+    # It is `migrate deploy`, never `dev` or `reset`; scripts/no-migrate-dev.mjs
+    # refuses those against a non-local host anyway.
     buildCommand: >-
       corepack enable &&
       pnpm install --frozen-lockfile --prod=false &&
       pnpm --filter @opd/api prisma:generate &&
-      pnpm exec turbo run build --filter=@opd/api
-
-    # Runs after the build and BEFORE traffic moves to the new version, so a release
-    # that needs a column gets it first. `prisma:deploy` is `migrate deploy` - the only
-    # migration command safe against a deployed database. `migrate dev` and `reset`
-    # are refused outright by scripts/no-migrate-dev.mjs, which checks the host.
-    preDeployCommand: pnpm --filter @opd/api prisma:deploy
+      pnpm exec turbo run build --filter=@opd/api &&
+      pnpm --filter @opd/api prisma:deploy
 
     startCommand: node apps/api/dist/main.js
 
@@ -118,9 +145,10 @@ services:
   - name: opd-keyvalue
     type: keyvalue
     region: singapore
-    # Again not `free`: a free Key Value instance is evicted when idle, which drops
-    # the Socket.IO adapter's pub/sub and every rate-limit counter with it.
-    plan: 256mb
+    # Free: 25 MB and no persistence. Fine for what this is actually used for - the
+    # Socket.IO adapter's pub/sub holds no durable state, and rate-limit counters are
+    # meant to be short-lived. Losing them on a restart costs nothing.
+    plan: free
     # Reachable only from inside this Render account's network. The API connects over
     # the private URL; nothing outside needs to.
     ipAllowList: []
@@ -131,8 +159,9 @@ databases:
   # ---------------------------------------------------------------------------
   - name: opd-postgres
     region: singapore
-    # `free` expires after 30 days and takes the pilot's data with it. 0.5c-1g is the
-    # smallest size worth putting a hospital's queue on.
-    plan: 0.5c-1g
+    # Free, and this is the one with a real deadline: a free Render Postgres EXPIRES
+    # 30 DAYS AFTER CREATION, with a 14-day grace period before deletion. Whatever is
+    # in it on day 30 is gone. Never let a hospital's queue live here.
+    plan: free
     postgresMajorVersion: "16"
     databaseName: opd

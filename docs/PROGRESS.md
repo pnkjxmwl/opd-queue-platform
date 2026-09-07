@@ -7379,3 +7379,39 @@ The lesson from the `columnOf` entry two days ago repeats exactly: **the checks 
 need a live environment only ever ran in CI, so CI was the only place they could fail.**
 Pointing them at a scratch database makes them runnable in ten minutes on the machine
 where the change is being written, which is where they belong.
+
+## 2026-09-08 · Free tier, and the paid-only step that would have failed silently
+
+Budget decision by the user: all three Render resources on the **free** plans. Recorded
+because the free tier is not simply "the same thing, slower" - it removes things this
+product depends on, and one of them removes itself on a date.
+
+**`preDeployCommand` is paid-only.** That is where `prisma migrate deploy` belonged and
+where it was originally written. On a free instance Render **ignores** it - it does not
+warn, and the blueprint still applies. The API would have booted against a database
+with no tables and failed as a wall of 500s with nothing naming the cause. Checked
+before applying rather than discovered afterwards.
+
+The migration is now the last step of `buildCommand`. Less correct in principle - it
+runs at build time rather than immediately before traffic moves - but on a
+single-instance free service there is no difference worth the outage. Moving it back is
+part of going paid, and the file says so at both ends.
+
+**What free actually costs here:**
+
+- The web service **spins down after 15 minutes idle**. While it sleeps there are no
+  WebSockets and no sweepers: no ETA ticks, no reservation expiry, no no-show timers,
+  no nudges. Realtime will look broken on this plan and will not be. Phases 7 and 8
+  cannot be judged here.
+- **The Postgres expires 30 days after creation**, 14-day grace, then deleted. This is
+  the one with a date on it.
+- Key Value is 25 MB with no persistence, which is genuinely fine: it holds Socket.IO
+  pub/sub and rate-limit counters, neither of which is durable state.
+- 750 free instance-hours per workspace per month.
+
+All four are in a header at the top of `render.yaml`, because the person who hits the
+30-day expiry will be reading that file, not this one.
+
+Verified the exact build chain locally against the scratch database - install with
+`--prod=false`, prisma generate, turbo build, `migrate deploy` - rather than trusting
+that a string that looks right is right.
