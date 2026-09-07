@@ -7102,3 +7102,53 @@ this file has recommended three times is still not set up.**
 to "clean up" a server I had started, while their console was running against it. Their
 login succeeded and the next page load got `ECONNREFUSED` five seconds later. Nothing
 was wrong with the code. Do not kill a port without checking whose server is on it.
+
+## 2026-09-07 · The first red CI on main, from two characters in a test helper
+
+The doctor-presence push (`b99af19`) went red on CI. `pnpm lint`, `pnpm typecheck` and
+`pnpm build` all passed; `@opd/web#test` failed, and Postgres said exactly why:
+
+```
+ERROR:  column "doctorpresence" does not exist
+LINE 1: SELECT doctorPresence FROM "OPDSession" WHERE id = '1c24c829...
+HINT:  Perhaps you meant to reference the column "OPDSession.doctorPresence".
+```
+
+`columnOf` in `apps/web/test/fixture.mjs` quoted the **table** and not the **column**:
+
+```js
+one(`SELECT ${column} FROM "${table}" WHERE id = ${quote(id)}`)
+```
+
+Postgres folds unquoted identifiers to lower case. Prisma creates camelCase columns
+quoted, so they only match when the query quotes them too.
+
+**Why it had never failed before.** All seventeen existing call sites read `status` or
+`priority` — already lower case, so the missing quotes did nothing. The presence work
+added the first camelCase column anyone had ever passed this helper, and a latent bug
+written phases ago surfaced on its first real use. The helper was never right; it had
+only ever been asked easy questions.
+
+**Fixed once, in the helper** — `SELECT "${column}"` — rather than at the one call site
+the failure named. Every existing caller and every future camelCase column is covered by
+the same two characters. `fixture.mjs:132` was checked and is fine: its raw SQL selects
+`h.id, d.id, doc.id, doc.name`, all lower case.
+
+### The part worth remembering
+
+**Local `pnpm test` cannot catch this class of defect and never could.** The console
+walkthrough needs two live servers and a seeded database, so on a normal machine it does
+not run — it is CI that executes it, against the Postgres service container. This is the
+same gap `Phases.md` already records about the console redesign never having been opened
+in a browser, arriving from a different direction: **the checks that need a live
+environment are exactly the ones that only run somewhere else.**
+
+I could not verify the fix locally either — Docker Desktop was not running, there is no
+local `psql`, and nothing was listening on 5433. It was pushed on the strength of
+Postgres's own hint, with CI as the proof, and that was said plainly rather than
+reported as a passing test.
+
+**Not fixed, deliberately:** `apps/api/src/seed.ts:1061` raises an
+`Unexpected console statement` lint **warning**. The lint step passes; it is noise in the
+annotations, not a failure, and touching it in a CI-repair commit would have mixed two
+unrelated things.

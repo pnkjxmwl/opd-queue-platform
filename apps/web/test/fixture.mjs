@@ -209,4 +209,4 @@ export function createSession({ hospital = 'Apollo', booked = ['Anita Sharma', '
 
 /** One column off one row, for reading state back out of the database. */
 export const columnOf = (table, id, column) =>
-  one(`SELECT ${column} FROM "${table}" WHERE id = ${quote(id)}`)?.[0] ?? null;
+  one(`SELECT "${column}" FROM "${table}" WHERE id = ${quote(id)}`)?.[0] ?? null;
