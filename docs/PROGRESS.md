@@ -7498,3 +7498,42 @@ blank key is not graceful degradation - `payments.service.ts:194` throws.
 
 **Not proved:** an actual card payment through checkout, and anything needing the
 console or a phone.
+
+## 2026-09-08 · P10-WEB-01 — the console's Vercel config, and why it is not `next build`
+
+`apps/web/vercel.json`. Three lines of config, each of which is there for a reason that
+is not obvious, and `vercel.json` takes no comments - so they are here.
+
+**`buildCommand` goes through turbo, not `next build`.** `@opd/contracts` resolves to
+`./dist/index.js`, so it is a BUILT package, and 17 files in the console import from it.
+A plain `next build` would fail to resolve it. `turbo run build --filter=@opd/web` builds
+contracts first because the `build` task declares `dependsOn: ["^build"]`.
+
+**`installCommand` carries `--prod=false`, the same trap Render sprang.** Vercel sets
+`NODE_ENV=production` for the build, pnpm honours it by skipping devDependencies, and
+`tailwindcss`, `postcss`, `autoprefixer` and `typescript` are all devDependencies of the
+console. Without the flag there is no CSS pipeline and no compiler.
+
+**Both commands `cd ../..` first**, because the Root Directory is `apps/web` while the
+pnpm workspace and its lockfile live at the repo root.
+
+### Proved before deploying, not after
+
+The full chain was run locally against the live Render API rather than trusted:
+
+- `pnpm exec turbo run build --filter=@opd/web` with the staging URLs - clean.
+- The **built** console (`next start`, not `next dev`) served `/login` in 20 ms.
+- `POST /api/auth/login` as `admin@demo.test` → `{"ok":true}`, against Render.
+- `/queue` rendered **`Demo Hospital`** and **`Dr. Meera Iyer`** - data that exists only
+  in the Render database. The console and the deployed API are genuinely talking.
+
+That is the console's first real end-to-end run against a deployed backend, and it is
+also the first time anyone has seen the redesigned console serve real data - though
+still through curl rather than a human looking at a screen, which remains the gap.
+
+### The one that will bite if forgotten
+
+`NEXT_PUBLIC_API_URL` is **inlined into the browser bundle at build time**, not read at
+runtime. It must exist in Vercel's environment *before* the first build, and changing it
+later requires a redeploy, not a restart. `API_URL` is server-side and does not have
+this property. Two variables, same value, different lifetimes.
