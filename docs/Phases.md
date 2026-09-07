@@ -1362,7 +1362,7 @@ using the runbook.
 | ☑ P10-INFRA-01 | Provision backend host + managed Postgres + Redis | INFRA | 1 | — | **done 2026-09-08, with two deviations.** Render, and **Singapore not India** - Render has no India region (recorded in `render.yaml`; fine for test-key staging, never for real patients). All three on **free** plans: the web service sleeps after 15 min, and **the Postgres expires 30 days after creation** |
 | ☑ P10-INFRA-02 | Env/secrets per environment | INFRA | 1 | — | **done 2026-09-08.** JWT/check-in secrets minted by Render (`generateValue`), Razorpay test keys and a webhook secret of its own set by hand. No secret in the repo |
 | ☑ P10-BE-01 | Backend deploy + Razorpay webhook public URL | BE/INFRA | 2 | 01,02 | **done 2026-09-08.** `https://opd-api-koes.onrender.com` - health and readiness green, migrations applied, helmet live, and the webhook proved BOTH ways: bad signature 400, real HMAC 201. `preDeployCommand` is paid-only, so `migrate deploy` runs at the end of `buildCommand` instead |
-| ☐ P10-WEB-01 | Web console → Vercel | WEB | 2 | 02 | console loads on staging |
+| ☑ P10-WEB-01 | Web console → Vercel | WEB | 2 | 02 | **done 2026-09-08.** `https://opd-queue-platform-web-blue.vercel.app` - signs in against the Render API and renders `Demo Hospital` / `Dr. Meera Iyer` / token `A001`, data that exists only in the deployed database. A real WebSocket connected to Render with a console-issued token and joined the session room (`{"ok":true}`), so realtime works across both deployments |
 | ☐ P10-MOB-01 | Mobile → EAS build → TestFlight + Play internal | MOB | 2 | 02 | installable on a real phone |
 | ☐ P10-TEST-01 | Staging smoke test + onboarding runbook | TEST | 3 | all | **full flow on a real phone**; runbook written |
 

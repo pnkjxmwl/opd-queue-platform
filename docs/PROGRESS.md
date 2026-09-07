@@ -7537,3 +7537,37 @@ still through curl rather than a human looking at a screen, which remains the ga
 runtime. It must exist in Vercel's environment *before* the first build, and changing it
 later requires a redeploy, not a restart. `API_URL` is server-side and does not have
 this property. Two variables, same value, different lifetimes.
+
+## 2026-09-08 · The console is deployed, and the whole stack talks to itself
+
+`https://opd-queue-platform-web-blue.vercel.app` → `https://opd-api-koes.onrender.com`.
+
+Verified against the deployed pair, in this order, each step only meaningful because
+the one before it passed:
+
+1. `/login` renders - `<title>OPD Console</title>`, the form, 200 in 0.2 s.
+2. `POST /api/auth/login` as `admin@demo.test` → `{"ok":true}`. Vercel reached Render.
+3. `/queue` renders **Demo Hospital** and **Dr. Meera Iyer**.
+4. The board at `/queue/:id` renders **A001**, **Test Patient**, **Call next**, **Mark
+   doctor present**, **Open check-in desk** - the redesigned console, serving a real
+   queue from a real database, for the first time.
+5. `/api/socket-token` issues a token.
+6. **A real WebSocket connected to Render with that token and joined the session room**,
+   `subscribe` acking `{"ok":true}`.
+
+Step 6 is the one worth having done. Searching the built JS chunks for the API origin
+found nothing, which proves nothing either way - Next may inline it somewhere the grep
+did not reach. Rather than argue from absence, a socket was actually opened. It
+connected. `NEXT_PUBLIC_API_URL` is baked correctly, the gateway's `cors: origin: true`
+is right for a console on another origin, and Render's free tier does not block
+WebSocket upgrades.
+
+**What this means for the record:** every deployed piece is now exercised end to end
+except a card payment through checkout, and anything needing a phone. The redesigned
+console has still never been looked at by a person - curl reading `Call next` out of the
+HTML is not the same as someone seeing whether the board is usable, and every defect in
+Phases 5 and 6 came from the latter.
+
+Free-tier caveat that will mislead: Render sleeps after 15 minutes, and a sleeping API
+makes the console look broken - a slow first load, then a board that says "Not live"
+until the socket reconnects. That is the plan working, not a defect.
