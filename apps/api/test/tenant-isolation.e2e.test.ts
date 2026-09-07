@@ -2,6 +2,7 @@ import { INestApplication } from '@nestjs/common';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { auth, createTestApp, request, resetDb, signup } from './helpers';
+import { dateColumnFromString, istToday } from '../src/common/ist';
 
 /**
  * P1-TEST-01 - the suite that protects the whole product.
@@ -206,6 +207,81 @@ describe('tenant isolation + IDOR (P1-TEST-01)', () => {
     it('health endpoints stay public', async () => {
       await http().get('/health').expect(200);
       await http().get('/health/ready').expect(200);
+    });
+  });
+  // -------------------------------------------------------------------------
+  // An id that does not exist must be indistinguishable from one you may not have
+  // -------------------------------------------------------------------------
+
+  /**
+   * `TenantGuard` resolves the hospital from the SESSION ROW, and for an unknown
+   * session id it substitutes a sentinel that no membership can match - so an
+   * attacker probing ids gets the same answer whether the session is missing or
+   * merely someone else's. That is the design, and the design was right.
+   *
+   * The sentinel was a literal NUL byte. **Postgres rejects NUL in text**
+   * (SQLSTATE 22021), so the membership query threw and every unknown session id
+   * answered 500 while a real one belonging to another hospital answered 403 -
+   * a difference visible to anyone with a loop and a list of UUIDs, which is
+   * precisely what the sentinel exists to deny. Found by the console walkthrough
+   * on CI reporting `500 vs 404`, three weeks after the guard was written.
+   *
+   * This asserts the two answers are IDENTICAL, not merely that each is "an error".
+   * Asserting only `>= 400` would have passed all along.
+   */
+  describe('unknown ids answer exactly like forbidden ones', () => {
+    async function betaSession(betaId: string): Promise<string> {
+      const department = await prisma.department.create({
+        data: { hospitalId: betaId, name: 'Beta Dept' },
+      });
+      const doctor = await prisma.doctor.create({
+        data: { hospitalId: betaId, departmentId: department.id, name: 'Dr Beta' },
+      });
+      const start = new Date(Date.now() - 60 * 60 * 1000);
+      const session = await prisma.oPDSession.create({
+        data: {
+          hospitalId: betaId,
+          departmentId: department.id,
+          originalDoctorId: doctor.id,
+          currentProviderDoctorId: doctor.id,
+          date: dateColumnFromString(istToday()),
+          scheduledStart: start,
+          scheduledEnd: new Date(start.getTime() + 4 * 60 * 60 * 1000),
+          feePaise: 50_000,
+          status: 'OPEN_FOR_REGISTRATION',
+        },
+      });
+      return session.id;
+    }
+
+    it('answers a missing session exactly as it answers one owned by another hospital', async () => {
+      const { beta, alphaAdmin } = await twoHospitals();
+      const theirs = await betaSession(beta.id);
+
+      const forbidden = await http()
+        .get(`/sessions/${theirs}/queue?limit=5`)
+        .set(auth(alphaAdmin.accessToken));
+      const missing = await http()
+        .get(`/sessions/${MISSING_ID}/queue?limit=5`)
+        .set(auth(alphaAdmin.accessToken));
+
+      expect(missing.status).toBe(forbidden.status);
+      expect(missing.body.error.code).toBe(forbidden.body.error.code);
+      // Named explicitly so a future change to BOTH cannot silently make them 500.
+      expect(missing.status).toBe(403);
+      expect(missing.body.error.code).toBe('TENANT_MISMATCH');
+    });
+
+    it('does not 500 on an unknown session id', async () => {
+      // The regression itself, stated on its own so the failure names the cause.
+      const { alphaAdmin } = await twoHospitals();
+
+      const res = await http()
+        .get(`/sessions/${MISSING_ID}/eta`)
+        .set(auth(alphaAdmin.accessToken));
+
+      expect(res.status).not.toBe(500);
+      expect(res.status).toBe(403);
     });
   });
 });

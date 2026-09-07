@@ -7608,3 +7608,74 @@ should keep using whatever `.env` the developer has, usually a LAN IP.
 Third member of this week's family - `columnOf`, the fixture's hardcoded database, and
 now this. All three: a plausible default quietly substituted for the right value, with
 no error at the point of the mistake.
+
+## 2026-09-08 · A NUL byte made every unknown session id a 500
+
+CI went red on the console walkthrough: `Act VIII - the tenant boundary · a session that
+does not exist answers identically - ids stay un-enumerable`, reporting **`500 vs 404`**.
+The commit it failed on changed `eas.json` and this file, so it was nothing to do with
+that push. It had been true for weeks.
+
+**Reproduced deterministically against the deployed API**, which is the fastest thing
+staging has been useful for so far:
+
+```
+/hospitals/:id/sessions/:missing   404   correct
+/sessions/:missing/queue           500   should be 403
+/sessions/:missing/eta             500   should be 403
+```
+
+Local repro, then the log:
+
+```
+PostgresError { code: "22021",
+  message: "invalid byte sequence for encoding \"UTF8\": 0x00" }
+  at TenantGuard.canActivate (tenant.guard.js:50)
+```
+
+### The cause
+
+`TenantGuard` resolves the hospital from the session row, and for an unknown session id
+substitutes a sentinel no membership can match, so a probe gets `TENANT_MISMATCH`
+whether the session is missing or merely someone else's. **The design is right and the
+comment explaining it is right.** The sentinel was the problem:
+
+```ts
+const NO_SUCH_HOSPITAL = '\0no-such-hospital';   // a literal NUL, not an escape
+```
+
+Postgres rejects NUL inside text values outright. So the membership query did not miss -
+it **threw**, and the guard produced a 500 where it had promised a 403. The reasoning
+was impeccable and the chosen value could not survive contact with the database.
+
+Consequences, in order of how much they matter:
+
+1. **The anti-enumeration guarantee was inverted.** A missing id answered 500 while a
+   real one belonging to another hospital answered 403 - a difference anyone could read
+   with a loop and a list of UUIDs. The thing the sentinel exists to prevent.
+2. Every probe logged an unhandled server error, which from this week also means a
+   Sentry event once a DSN is set.
+3. The NUL made `tenant.guard.ts` read as **binary** to grep, so `grep -n` on it printed
+   "Binary file matches" and searches silently skipped it.
+
+Now `'no-such-hospital'`. Hospital ids are UUIDs, so a plain lowercase phrase can never
+be one; the impossibility never needed an unrepresentable byte.
+
+### Two tests, and they were falsified before being trusted
+
+In `tenant-isolation.e2e.test.ts`: one asserting a missing session and another hospital's
+real session give **identical** status *and* error code, one asserting an unknown id is
+not a 500. Reintroducing the NUL fails both; removing it passes both.
+
+The first is written as an equality on purpose. `expect(status).toBeGreaterThanOrEqual(400)`
+would have passed throughout - "both are errors" is exactly the assertion that lets a
+500-vs-403 leak live for weeks.
+
+### Why nothing caught it sooner
+
+No API test had ever asked a tenant-scoped route for an id that does not exist. Every
+test used a real session, or a real session belonging to someone else. The walkthrough
+did, through the console, and only compared the two statuses to each other - which is
+why it took a browser-shaped test running in CI to find a backend bug.
+
+379 API tests green; the walkthrough is 72/0 with the previously failing check passing.
