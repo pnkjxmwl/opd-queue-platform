@@ -118,3 +118,58 @@ describe('scrubText', () => {
     );
   });
 });
+
+/**
+ * The shape this actually has to survive in production: a Sentry event.
+ *
+ * Written when the exporter was wired in Phase 10, because the first thing wiring it
+ * revealed was that `filename` collides with `name` and every stack frame came back
+ * redacted. A scrubber that removes the file a crash happened in is not protecting a
+ * patient, it is just breaking the report.
+ */
+describe('a Sentry event survives with its stack, without its patients', () => {
+  const event = () => ({
+    event_id: 'abc123',
+    exception: {
+      values: [
+        {
+          type: 'TypeError',
+          value: 'Cannot read properties of null',
+          stacktrace: {
+            frames: [
+              {
+                filename: '/app/dist/modules/queue/commands/call-next.js',
+                module: 'queue/commands/call-next',
+                function: 'callNext',
+                lineno: 42,
+              },
+            ],
+          },
+        },
+      ],
+    },
+    request: { url: '/sessions/x/call-next', headers: { authorization: 'Bearer abc' } },
+    extra: { patient: { name: 'Asha Semwal', phone: '+919876543210' }, tokenLabel: 'A007' },
+  });
+
+  it('keeps what makes the crash findable', () => {
+    const out = scrub(event()) as ReturnType<typeof event>;
+    const frame = out.exception.values[0].stacktrace.frames[0];
+
+    expect(frame.filename).toBe('/app/dist/modules/queue/commands/call-next.js');
+    expect(frame.module).toBe('queue/commands/call-next');
+    expect(frame.function).toBe('callNext');
+    expect(frame.lineno).toBe(42);
+    expect(out.exception.values[0].type).toBe('TypeError');
+    // The queue token is the one identifier that makes a queue error legible.
+    expect(out.extra.tokenLabel).toBe('A007');
+  });
+
+  it('removes the patient and the credential', () => {
+    const out = scrub(event()) as ReturnType<typeof event>;
+
+    expect(out.extra.patient.name).toBe(REDACTED);
+    expect(out.extra.patient.phone).toBe(REDACTED);
+    expect(out.request.headers.authorization).toBe(REDACTED);
+  });
+});

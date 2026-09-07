@@ -133,6 +133,15 @@ export default async function BoardPage({
    * saves the receptionist a click and a red banner.
    */
   const doctorAway = session.doctorPresence !== 'PRESENT';
+
+  /**
+   * Starting and completing a consultation are the doctor's (PRD 6.2), so the API
+   * refuses them from RECEPTION. Same contract as `doctorAway`: this only stops a
+   * button that would come back 403, and the server is still the one enforcing it
+   * (lib/tenant.ts says so at length). ADMIN keeps both - it is the hospital's own
+   * account and the only role that can always unstick a clinic.
+   */
+  const clinicalDenied = hospital.role === 'RECEPTION';
   const AWAY_REASON: Record<string, string> = {
     NOT_PRESENT: 'The doctor has not been marked present yet.',
     ON_BREAK: 'The doctor is on a break.',
@@ -243,11 +252,16 @@ export default async function BoardPage({
                 <form action={completeConsultation} className="mt-4">
                   {sessionField}
                   {hidden('entryId', inConsultation.id)}
-                  <button type="submit" className={btn('primary', 'lg') + ' w-full'}>
+                  <button
+                    type="submit"
+                    className={btn('primary', 'lg') + ' w-full'}
+                    disabled={clinicalDenied}
+                  >
                     <Icon name="check" className="h-4 w-4" />
                     Complete consultation
                   </button>
                 </form>
+                {clinicalDenied && <ClinicalNote />}
               </>
             ) : called !== null ? (
               <>
@@ -263,12 +277,13 @@ export default async function BoardPage({
                   <button
                     type="submit"
                     className={btn('primary', 'lg') + ' w-full'}
-                    disabled={doctorAway}
+                    disabled={doctorAway || clinicalDenied}
                   >
                     <Icon name="play" className="h-4 w-4" />
                     Start consultation
                   </button>
                 </form>
+                {clinicalDenied && <ClinicalNote />}
                 {/*
                   Same guard as call-next: the server refuses START_CONSULTATION unless
                   the doctor is present. Completing is deliberately NOT guarded - a
@@ -543,6 +558,21 @@ export default async function BoardPage({
 }
 
 /** The patient in the room, or the one being waited on. The board's largest object. */
+/**
+ * Why the button above is dead, for the person looking at it.
+ *
+ * Not colour alone (docs/Design.md): an icon and a sentence. It names the remedy -
+ * who CAN do it - because "you may not" with no next step just strands the desk.
+ */
+function ClinicalNote() {
+  return (
+    <p className="mt-2.5 flex items-start gap-1.5 text-caption text-muted">
+      <Icon name="user" className="mt-0.5 h-3.5 w-3.5" />
+      Consultations are recorded by the doctor. Ask them to sign in, or an admin.
+    </p>
+  );
+}
+
 function Patient({ entry }: { entry: QueueEntryView }) {
   return (
     <div className="flex items-center gap-3">

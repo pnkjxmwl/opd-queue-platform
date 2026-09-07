@@ -1540,9 +1540,14 @@ correct; what was missing was all at the edges.
 
 **Still open, and now the real Phase 10 list:**
 
-- ☐ **Error tracking and `helmet`** — both need a dependency, which CLAUDE.md §2 wants
-  approved rather than assumed. `common/scrub.ts` is written and tested; installing the
-  Sentry SDK and wiring `beforeSend` is the remaining step.
+- ☑ **Error tracking and `helmet` — done, 2026-09-08.** Both dependencies approved and
+  installed. `helmet` with two deliberate overrides (no CSP: this serves JSON, never
+  HTML; `crossOriginResourcePolicy: cross-origin`, because the console and the app are
+  both on another origin and helmet's default would exist only to break them).
+  `common/sentry.ts` is the only caller of `scrub`, on `beforeSend`, and the filter
+  reports 5xx only. **Wiring it found a real defect in the scrubber:** `filename`
+  contains `name`, so every stack frame came back `[redacted]` - a stack with the
+  function and the line but not the file.
 - ☑ **Onboarding a hospital — done, 2026-09-05.** There was no way to create one: the only
   `hospital.create` in the API was the seed, the only write of `status: VERIFIED` was the
   seed, and there is no platform-level role anywhere. `apps/api/src/onboard.ts` closes it:
@@ -1580,10 +1585,13 @@ was on any list. Narrative in `PROGRESS.md`.
   close those too — reusing `closeRegistration` — adds no policy, since the gate already
   refuses those joins; it changes background behaviour for every hospital, so it wants a
   deliberate decision.
-- ☐ **The queue controller applies one `@Roles('ADMIN','RECEPTION','DOCTOR')` to all
-  thirteen commands**, so reception can complete a consultation, which PRD §6.2 gives to
-  the doctor. The controller's own comment defers the split to "a Phase 6/9 concern" —
-  **both phases shipped without it.**
+- ☑ **The queue controller's single `@Roles` — split, 2026-09-08.** `start-consultation`
+  and `complete-consultation` are now `ADMIN, DOCTOR`; the other eleven commands stay
+  shared, because the desk really does run the board and PRD §6.2 describes what a
+  doctor SEES rather than an exclusive grant. Four tests assert both directions.
+  Two suites had encoded the old model - the console walkthrough and the whole-journey
+  test both drove consultations as reception, and both now use two logins, which is
+  what a real clinic has.
 - ☐ **`eta.e2e.test.ts` "flags a session running behind" fails for the first ~15 minutes
   of every IST day.** It places its "today" consultations 5, 10 and 15 minutes ago, which
   straddle the calendar boundary just after midnight, so today's pace has too few samples

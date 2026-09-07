@@ -33,6 +33,7 @@ describe('the whole journey (P9-TEST-01)', () => {
   let patientToken: string;
   let patientId: string;
   let staffToken: string;
+  let doctorToken: string;
 
   const FEE_PAISE = 50_000;
 
@@ -93,12 +94,22 @@ describe('the whole journey (P9-TEST-01)', () => {
     await prisma.hospitalStaff.create({
       data: { hospitalId, accountId: staff.accountId, role: 'RECEPTION', status: 'ACTIVE' },
     });
+
+    // Two logins, because a real clinic has two people. Starting and completing a
+    // consultation are the doctor's (PRD 6.2) and the API refuses them from the
+    // desk; running the whole journey on one token would have tested a hospital
+    // that does not exist.
+    const clinician = await signup(app, `journey-doctor-${Date.now()}@test.dev`);
+    doctorToken = clinician.accessToken;
+    await prisma.hospitalStaff.create({
+      data: { hospitalId, accountId: clinician.accountId, role: 'DOCTOR', status: 'ACTIVE' },
+    });
   });
 
-  const command = (name: string, body: Record<string, unknown> = {}) =>
+  const command = (name: string, body: Record<string, unknown> = {}, token = staffToken) =>
     request(app.getHttpServer())
       .post(`/sessions/${sessionId}/${name}`)
-      .set(auth(staffToken))
+      .set(auth(token))
       .send(body);
 
   /** Both trails, for one entry, as the engine is required to write them. */
@@ -159,8 +170,9 @@ describe('the whole journey (P9-TEST-01)', () => {
     expect(entry.status).toBe('CALLED');
     expect(entry.calledAt).not.toBeNull();
 
-    await command('start-consultation', { entryId }).expect(201);
-    await command('complete-consultation', { entryId }).expect(201);
+    // The doctor, not the desk.
+    await command('start-consultation', { entryId }, doctorToken).expect(201);
+    await command('complete-consultation', { entryId }, doctorToken).expect(201);
 
     entry = await prisma.queueEntry.findUniqueOrThrow({ where: { id: entryId } });
     expect(entry.status).toBe('COMPLETED');

@@ -58,8 +58,15 @@ const SENSITIVE_KEY = new RegExp(
  * token is [redacted]) while protecting nothing. This collision is exactly why the
  * scrubber has tests: the first version silently removed the one field that made a
  * queue error legible.
+ *
+ * `filename` and `module` are the second collision, found the day this was actually
+ * wired to Sentry (Phase 10): both contain "name", so every stack frame in every
+ * report came back `"filename": "[redacted]"` - a stack with the function and the
+ * line but not the file. They are server paths inside our own bundle, never
+ * user-supplied. **If an upload path is ever added, a user-supplied filename must
+ * not land on this key** - name it `originalFilename` or scrub it at the source.
  */
-const NOT_SENSITIVE = /^token(label|number|prefix)$/i;
+const NOT_SENSITIVE = /^(token(label|number|prefix)|filename|module)$/i;
 
 export const REDACTED = '[redacted]';
 

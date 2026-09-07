@@ -48,10 +48,22 @@ import { setPriority } from './commands/priority';
  * patient-facing discovery deliberately keeps `:id` for the opposite reason (trap 12
  * in docs/PROGRESS.md).
  *
- * Every role that can be in a hospital may issue these. Splitting them by role is a
- * Phase 6/9 concern once the two consoles exist and the permission model is real -
- * a small hospital's admin genuinely does run reception, and inventing a stricter
- * split now would be guessing.
+ * **Roles.** The class default is every role that can be in a hospital, because a
+ * small hospital's admin genuinely does run reception and the desk genuinely does
+ * drive the board. Two commands override it: STARTING and COMPLETING a consultation
+ * are the clinical record - they assert a doctor saw this patient - and PRD 6.2
+ * gives them to the doctor. A method-level @Roles wins over this one (RolesGuard
+ * uses getAllAndOverride), so the override is additive and reads locally.
+ *
+ * ADMIN keeps them deliberately: it is the hospital's own owner account and the only
+ * role that can always unstick a clinic. RECEPTION is the one being excluded.
+ *
+ * The rest stay shared ON PURPOSE. PRD 6.2 lists Call Next, Skip and End Session
+ * under the doctor's console, but that section describes what a doctor SEES, not an
+ * exclusive grant - 6.3 gives reception "operational fixes" over the same queue, and
+ * call-next is already gated on the doctor being present, which is the guarantee
+ * that actually matters. Restricting them further would add friction without
+ * protecting a record.
  */
 @Roles('ADMIN', 'RECEPTION', 'DOCTOR')
 @Controller('sessions/:sessionId')
@@ -90,6 +102,7 @@ export class QueueController {
     return callNext(this.queue, sessionId, actorOf(account, tenant));
   }
 
+  @Roles('ADMIN', 'DOCTOR')
   @Post('start-consultation')
   startConsultation(
     @Param('sessionId') sessionId: string,
@@ -100,6 +113,7 @@ export class QueueController {
     return startConsultation(this.queue, sessionId, actorOf(account, tenant), body);
   }
 
+  @Roles('ADMIN', 'DOCTOR')
   @Post('complete-consultation')
   completeConsultation(
     @Param('sessionId') sessionId: string,

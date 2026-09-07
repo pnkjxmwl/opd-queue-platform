@@ -1,0 +1,138 @@
+# Render Blueprint — the API, its Postgres and its Key Value store (P10-INFRA-01/02, P10-BE-01).
+#
+# Backend only, deliberately. The console goes to Vercel (P10-WEB-01) and the mobile
+# app to EAS; neither belongs in here.
+#
+# Apply it: Render Dashboard → New → Blueprint → point at this repo. Render prompts
+# once for every `sync: false` value below, and ONLY on the first apply — after that
+# they are edited in the dashboard, never here.
+#
+# ---------------------------------------------------------------------------
+# REGION — read this before applying
+# ---------------------------------------------------------------------------
+# Render has no India region; Singapore is the closest it offers. CLAUDE.md 8 and
+# Phase 10's risk list both ask for India-region hosting for DPDP data residency, so
+# this is a deliberate, recorded deviation, not an oversight.
+#
+# It is fine for THIS deployment: a staging pilot on Razorpay test keys holds no real
+# patient and no real money. It stops being fine the day a live hospital's patients
+# are in this database - at which point the choice is a Mumbai region on a provider
+# that has one (AWS/GCP/Azure, or DigitalOcean Bangalore) and this file is replaced.
+# Do not quietly promote this to production.
+
+services:
+  # ---------------------------------------------------------------------------
+  # The API
+  # ---------------------------------------------------------------------------
+  - name: opd-api
+    type: web
+    runtime: node
+    region: singapore
+    # NOT `free`. A free instance spins down when idle, and this product's WebSockets
+    # and six background sweepers are exactly what dies when it does (Phase 10 risks).
+    # This is Render's cheapest always-on size; scale it up, never down to free.
+    plan: 0.5c-512mb
+    healthCheckPath: /health
+
+    # Turbo builds @opd/contracts first because @opd/api depends on it; filtering to
+    # the API keeps web and mobile out of the deploy entirely.
+    #
+    # `--prod=false` is load-bearing, not belt-and-braces. NODE_ENV=production is set
+    # below and applies during the BUILD too, and pnpm honours it by skipping
+    # devDependencies - which is where nest, tsc and turbo all live. Without this the
+    # build fails on the first command. It also keeps the `prisma` CLI installed,
+    # which preDeployCommand needs and which is likewise a devDependency.
+    buildCommand: >-
+      corepack enable &&
+      pnpm install --frozen-lockfile --prod=false &&
+      pnpm --filter @opd/api prisma:generate &&
+      pnpm exec turbo run build --filter=@opd/api
+
+    # Runs after the build and BEFORE traffic moves to the new version, so a release
+    # that needs a column gets it first. `prisma:deploy` is `migrate deploy` - the only
+    # migration command safe against a deployed database. `migrate dev` and `reset`
+    # are refused outright by scripts/no-migrate-dev.mjs, which checks the host.
+    preDeployCommand: pnpm --filter @opd/api prisma:deploy
+
+    startCommand: node apps/api/dist/main.js
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+
+      # PORT is injected by Render; env.ts reads it and main.ts listens on it.
+
+      - key: DATABASE_URL
+        fromDatabase:
+          name: opd-postgres
+          property: connectionString
+
+      - key: REDIS_URL
+        fromService:
+          name: opd-keyvalue
+          type: keyvalue
+          property: connectionString
+
+      # 256-bit base64, generated once by Render and never seen by anyone. All three
+      # clear the >=32-char floor env.ts enforces. Never reuse the local values.
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: CHECKIN_SECRET
+        generateValue: true
+
+      # Razorpay TEST keys for the pilot. The webhook secret must be this
+      # environment's OWN - sharing one with local means a laptop tunnel can process
+      # this environment's payments.
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+
+      # This service's own public origin, e.g. https://opd-api.onrender.com - needed
+      # for the redirect-mode checkout return URL. Set by hand AFTER the first deploy,
+      # because the URL does not exist until then. env() memoises at first call, so
+      # changing it requires a restart, not just a save.
+      - key: PUBLIC_BASE_URL
+        sync: false
+
+      # Optional. Empty is a valid, supported state for all three:
+      #   SENTRY_DSN        empty disables error reporting entirely (common/sentry.ts)
+      #   GOOGLE_CLIENT_IDS empty disables POST /auth/google rather than failing boot
+      #   EXPO_ACCESS_TOKEN only needed once push goes out from this environment
+      - key: SENTRY_DSN
+        sync: false
+      - key: GOOGLE_CLIENT_IDS
+        sync: false
+      - key: EXPO_ACCESS_TOKEN
+        sync: false
+
+  # ---------------------------------------------------------------------------
+  # Redis, for the Socket.IO adapter and rate limiting
+  # ---------------------------------------------------------------------------
+  - name: opd-keyvalue
+    type: keyvalue
+    region: singapore
+    # Again not `free`: a free Key Value instance is evicted when idle, which drops
+    # the Socket.IO adapter's pub/sub and every rate-limit counter with it.
+    plan: 256mb
+    # Reachable only from inside this Render account's network. The API connects over
+    # the private URL; nothing outside needs to.
+    ipAllowList: []
+
+databases:
+  # ---------------------------------------------------------------------------
+  # Postgres
+  # ---------------------------------------------------------------------------
+  - name: opd-postgres
+    region: singapore
+    # `free` expires after 30 days and takes the pilot's data with it. 0.5c-1g is the
+    # smallest size worth putting a hospital's queue on.
+    plan: 0.5c-1g
+    postgresMajorVersion: "16"
+    databaseName: opd

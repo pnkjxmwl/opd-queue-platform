@@ -216,6 +216,18 @@ check(
   (await columnOf('OPDSession', sessionId, 'status')) === 'ACTIVE',
 );
 
+// The clinical record is the doctor's (PRD 6.2). Reception got this far - check-in,
+// presence, call-next are all theirs - and stops here.
+check(
+  'reception is not offered Start consultation',
+  !canPress(page, 'Start consultation') && /recorded by the doctor/i.test(visible(page)),
+  visible(page).slice(0, 300),
+);
+
+logout();
+await login(WEB, 'doctor@apollo.test', 'Demo@12345');
+page = await board(sessionId);
+
 page = await press(page, { button: 'Start consultation' });
 check(
   'Start consultation moves them into the room',
@@ -227,6 +239,11 @@ check(
   'Complete consultation finishes them',
   (await columnOf('QueueEntry', anita.id, 'status')) === 'COMPLETED',
 );
+
+// Back to the desk for the rest of the walkthrough, which is reception's work.
+logout();
+await login(WEB, 'reception@apollo.test', 'Demo@12345');
+page = await board(sessionId);
 
 page = await press(page, { button: 'Call next' });
 check(`the next call takes ${rahul.tokenLabel}`, visible(page).includes(`Called ${rahul.tokenLabel}`), visible(page).slice(0, 200));

@@ -2,6 +2,7 @@ import { ArgumentsHost, Catch, ExceptionFilter, HttpException, Logger } from '@n
 import type { Request, Response } from 'express';
 import type { ApiError } from '@opd/contracts';
 import { AppError } from '../errors';
+import { reportFault } from '../sentry';
 
 /**
  * The single place an error becomes an HTTP response (docs/Rules.md 7).
@@ -33,6 +34,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
         `Unhandled server error: ${where}`,
         exception instanceof Error ? exception.stack : String(exception),
       );
+      // 5xx only, and scrubbed on the way out (common/sentry.ts). A no-op until a
+      // DSN is configured, which is every environment but staging and production.
+      reportFault(exception, requestId);
     } else {
       this.logger.warn(`${body.error.code}: ${where} - ${body.error.message}`);
     }

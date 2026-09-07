@@ -37,6 +37,8 @@ describe('console reads + staff actions (P6-BE-01)', () => {
   let sessionId: string;
   let actor: QueueActor;
   let reception: Awaited<ReturnType<typeof signup>>;
+  /** A DOCTOR *membership*. Not the Doctor row - beforeAll has its own `doctor` for that. */
+  let doctorStaff: Awaited<ReturnType<typeof signup>>;
   let outsider: Awaited<ReturnType<typeof signup>>;
   /** The app account the booked patients belong to. `Payment.accountId` is required. */
   let patientAccountId: string;
@@ -133,6 +135,11 @@ describe('console reads + staff actions (P6-BE-01)', () => {
     patientAccountId = (await signup(app, 'patient@console.test')).accountId;
     await prisma.hospitalStaff.create({
       data: { hospitalId, accountId: reception.accountId, role: 'RECEPTION' },
+    });
+
+    doctorStaff = await signup(app, 'doctor@console.test');
+    await prisma.hospitalStaff.create({
+      data: { hospitalId, accountId: doctorStaff.accountId, role: 'DOCTOR' },
     });
 
     actor = { accountId: null, hospitalId, type: 'SYSTEM' };
@@ -472,6 +479,117 @@ describe('console reads + staff actions (P6-BE-01)', () => {
 
       expect(res.body.error.code).toBe('TENANT_MISMATCH');
       expect(await statusOf(anita.entryId)).toBe('CONFIRMED');
+    });
+  });
+  // -------------------------------------------------------------------------
+  // Who may touch the clinical record
+  // -------------------------------------------------------------------------
+
+  /**
+   * The queue controller carried ONE `@Roles('ADMIN','RECEPTION','DOCTOR')` over all
+   * thirteen commands, so the front desk could record that a doctor had seen a
+   * patient. Its own comment deferred the split to "a Phase 6/9 concern" and both
+   * phases shipped without it; the pre-production audit found it still open.
+   *
+   * Starting and completing a consultation are the clinical record - they assert a
+   * doctor saw this patient - and PRD 6.2 gives them to the doctor. Everything else
+   * on the board stays shared, because the desk really does run it.
+   *
+   * Both directions are asserted. A test that only proved the doctor CAN would still
+   * pass if the split were reverted tomorrow.
+   */
+  describe('only a doctor may start or complete a consultation (PRD 6.2)', () => {
+    /** A checked-in patient, called, with the doctor marked present. */
+    async function readyToBeSeen(): Promise<string> {
+      const anita = await book('Anita', 1);
+      await http()
+        .post(`/sessions/${sessionId}/check-in`)
+        .set(auth(reception.accessToken))
+        .send({ tokenNumber: 1 })
+        .expect(201);
+      // call-next and start-consultation both refuse a doctor nobody marked present.
+      await http()
+        .post(`/sessions/${sessionId}/presence`)
+        .set(auth(reception.accessToken))
+        .send({ presence: 'PRESENT' })
+        .expect(201);
+      await http()
+        .post(`/sessions/${sessionId}/call-next`)
+        .set(auth(reception.accessToken))
+        .expect(201);
+      return anita.entryId;
+    }
+
+    it('refuses reception a start-consultation, and changes nothing', async () => {
+      const entryId = await readyToBeSeen();
+
+      await http()
+        .post(`/sessions/${sessionId}/start-consultation`)
+        .set(auth(reception.accessToken))
+        .send({ entryId })
+        .expect(403);
+
+      // Still CALLED - the refusal changed nothing. call-next leaves them CALLED;
+      // only start-consultation moves them on, which is the thing just refused.
+      expect(await statusOf(entryId)).toBe('CALLED');
+    });
+
+    it('refuses reception a complete-consultation', async () => {
+      const entryId = await readyToBeSeen();
+      await http()
+        .post(`/sessions/${sessionId}/start-consultation`)
+        .set(auth(doctorStaff.accessToken))
+        .send({ entryId })
+        .expect(201);
+
+      await http()
+        .post(`/sessions/${sessionId}/complete-consultation`)
+        .set(auth(reception.accessToken))
+        .send({ entryId })
+        .expect(403);
+
+      expect(await statusOf(entryId)).toBe('IN_CONSULTATION');
+    });
+
+    it('lets the doctor do both', async () => {
+      const entryId = await readyToBeSeen();
+
+      await http()
+        .post(`/sessions/${sessionId}/start-consultation`)
+        .set(auth(doctorStaff.accessToken))
+        .send({ entryId })
+        .expect(201);
+      expect(await statusOf(entryId)).toBe('IN_CONSULTATION');
+
+      await http()
+        .post(`/sessions/${sessionId}/complete-consultation`)
+        .set(auth(doctorStaff.accessToken))
+        .send({ entryId })
+        .expect(201);
+      expect(await statusOf(entryId)).toBe('COMPLETED');
+    });
+
+    it('still lets reception run the desk - check-in, walk-in and priority', async () => {
+      // The other side of the split. If someone "tightens" the class default to
+      // DOCTOR only, reception loses the desk and this fails.
+      const anita = await book('Anita', 1);
+      await http()
+        .post(`/sessions/${sessionId}/check-in`)
+        .set(auth(reception.accessToken))
+        .send({ tokenNumber: 1 })
+        .expect(201);
+
+      await http()
+        .post(`/sessions/${sessionId}/walk-in`)
+        .set(auth(reception.accessToken))
+        .send({ name: 'Walk In' })
+        .expect(201);
+
+      await http()
+        .post(`/sessions/${sessionId}/priority`)
+        .set(auth(reception.accessToken))
+        .send({ entryId: anita.entryId, priority: 'EMERGENCY', reason: 'chest pain' })
+        .expect(201);
     });
   });
 });

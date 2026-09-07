@@ -7152,3 +7152,180 @@ reported as a passing test.
 `Unexpected console statement` lint **warning**. The lint step passes; it is noise in the
 annotations, not a failure, and touching it in a CI-repair commit would have mixed two
 unrelated things.
+
+## 2026-09-08 · The three things standing in front of Phase 10
+
+Not a phase. The three items the pre-production audit left open that had to be closed
+before pointing anything at a real server, done in one pass because none of them is
+big and all three are the kind that get harder after a hospital is live.
+
+### 1 · A guard, because `migrate dev` was the only migrate script there was
+
+`apps/api/package.json` had `"prisma:migrate": "prisma migrate dev"` and nothing else.
+`migrate dev` rewrites migration history and `migrate reset` **drops every row**, and
+the only `migrate deploy` in the repo was inside the test bootstrap. Phase 10's own
+risk list asks for "a deploy-script guard, not a thing you remember" and there was no
+guard.
+
+`scripts/no-migrate-dev.mjs` now fronts both destructive scripts, and `prisma:deploy`
+exists as the safe one.
+
+**It refuses on the HOST, not on `NODE_ENV`.** The accident worth stopping is a local
+shell with a staging `DATABASE_URL` pasted into it, where `NODE_ENV` is still
+"development" and every other signal says you are at home. Verified all three ways -
+localhost passes, `db.staging.render.com` exits 1 with the remedy printed, and an
+empty URL passes through so `env.ts` keeps giving its clearer error.
+
+### 2 · The `@Roles` split, and the two suites that had encoded the old model
+
+One `@Roles('ADMIN','RECEPTION','DOCTOR')` covered all thirteen queue commands, so the
+front desk could record that a doctor had seen a patient. The controller's own comment
+deferred the split to "a Phase 6/9 concern"; both phases shipped without it.
+
+**Only `start-consultation` and `complete-consultation` moved.** They are the clinical
+record - they assert a doctor saw this patient. The other eleven stay shared on
+purpose: PRD §6.2 lists Call Next, Skip and End Session under the doctor's console, but
+that section describes what a doctor SEES, and §6.3 gives reception "operational fixes"
+over the same queue. `call-next` is already gated on the doctor being present, which is
+the guarantee that actually matters. ADMIN keeps everything, being the hospital's own
+account and the only role that can always unstick a clinic.
+
+**The interesting part was not the controller, it was what the split broke.** Two
+suites drove the entire doctor loop on a reception login:
+
+- `console-walkthrough.mjs` logged in as `reception@apollo.test` and pressed Start and
+  Complete consultation.
+- `journey.e2e.test.ts` ran the whole discover→complete journey on one `staffToken`.
+
+Both now use two logins, which is what a real clinic has, and the walkthrough asserts
+reception is *not offered* the button before switching. The tests were not wrong about
+the code; they were modelling a hospital that does not exist.
+
+The board disables both buttons for RECEPTION with a sentence saying who can do it,
+reusing the exact pattern `doctorAway` already established. That is UI, not the
+boundary - the API refuses it either way (`lib/tenant.ts` says so at length).
+
+**A wrong assumption of mine, caught by its own test:** the first version asserted the
+entry was still `READY` after the refusal. It is `CALLED` - `call-next` leaves them
+CALLED and only `start-consultation` moves them on, which is the thing being refused.
+The test was right to fail.
+
+### 3 · Sentry and helmet, and the defect that wiring them exposed
+
+Both installed with approval. `helmet` takes two deliberate overrides: no CSP (this
+process serves JSON to two native clients and a console on another origin, never
+HTML), and `crossOriginResourcePolicy: 'cross-origin'` instead of helmet's
+`same-origin` — the console and the Expo app are both on a different origin from the
+API, which is the entire deployment shape, so the default would be a header that
+exists only to break them. Confirmed against a running server rather than assumed:
+`Cross-Origin-Resource-Policy: cross-origin`, HSTS present, `x-powered-by` gone.
+
+**The find. `scrub` redacted every stack frame's `filename`.** Phase 9 wrote and tested
+the scrubber but nothing ever called it, and `SENSITIVE_KEY` matches substrings: the
+`name` entry - deliberately wide - also catches `filename` and `module`. Wired to
+Sentry's `beforeSend`, every report would have arrived with the function and the line
+number but no file:
+
+```
+"filename": "[redacted]",
+"function": "callNext",
+"lineno": 42
+```
+
+That is not protecting a patient, it is breaking the report. Both keys joined
+`NOT_SENSITIVE` alongside the `tokenLabel` collision Phase 9 had already found by the
+same route — **the second time this exact substring trade has cost something**, and the
+reason the comment now names the upload path as the case that must not reuse the key.
+
+Two tests hold it: a realistic Sentry event keeps its frame, module, function, line and
+`tokenLabel`, and loses its patient name, phone and `authorization`.
+
+### What this says about tests that never run
+
+Every one of these three had been written down and left. The scrubber had 13 tests and
+zero callers, which is why the `filename` collision survived a phase: **a tested
+function that nothing calls is not covered, it is only exercised.** The same shape as
+yesterday's `columnOf` — right-looking code that had only ever been asked easy
+questions.
+
+### An unrelated correction to the record
+
+`eta.e2e.test.ts` failed mid-run and then passed on a re-run with no code change. The
+audit entry says it fails "for the first ~15 minutes of every IST day"; **that
+description of when is wrong.** It failed here at 00:04 *local* while IST was 18:34 the
+previous day — the machine is not on IST. The real trigger is the machine's calendar
+day disagreeing with the IST calendar day, which is a wider window than the entry
+claims and catches anyone not sitting in India. Proved unrelated to this work by
+stashing everything and re-running: identical single failure on a clean tree. Still
+open, still wants an injectable clock rather than a skip.
+
+### Not done
+
+The console walkthrough was **not** run. It needs seeded data and the local database
+holds one hospital the seed did not create — `Lotus Health Clinic`, from the onboarding
+script — so seeding refuses rather than overwriting it, correctly. Left for the user to
+decide; the walkthrough edits are syntax-checked and the console build is green, but
+nobody has watched reception get refused on a screen.
+
+## 2026-09-08 · The Render blueprint, and the region we do not have
+
+Scope for this deploy, set by the user: **backend only**, Razorpay **test keys only**,
+no Apple or Google Play enrolment yet. So `render.yaml` describes three things - the
+API, a Postgres and a Key Value instance - and nothing else. The console and the app
+are not in it.
+
+### Render has no India region
+
+Checked rather than assumed: Render offers Oregon, Ohio, Virginia, Frankfurt and
+Singapore. **There is no Mumbai.** CLAUDE.md 8 and Phase 10's risk list both require
+India-region hosting for DPDP residency, so this is a recorded deviation and the file
+says so at the top.
+
+**Why it is acceptable here and nowhere else.** A staging pilot on test keys holds no
+real patient data and no real money — there is nothing for DPDP to be about. The
+moment a live hospital's patients are in that database it stops being true, and the
+answer then is a Mumbai region on a provider that has one (AWS/GCP/Azure, or
+DigitalOcean Bangalore), not an argument. The blueprint says "do not quietly promote
+this to production" in as many words.
+
+Worth being precise, because it is easy to overstate: DPDP is a negative-list regime
+rather than blanket localisation, so Singapore is probably lawful. The reason not to
+lean on that is that a hospital's procurement will ask, and "probably lawful" is a bad
+answer to give a customer.
+
+### Three things that would have broken the first deploy
+
+All three found before applying, none of them guessable:
+
+1. **Every plan name I first wrote was invalid.** `starter` and `basic-256mb` do not
+   exist. Render's identifiers are shapes: `0.5c-512mb` for the web service, `256mb`
+   for Key Value, `0.5c-1g` for Postgres. A wrong one fails the blueprint on apply.
+
+2. **`NODE_ENV=production` would have killed the build.** It is set for the service and
+   Render applies it during the BUILD too, and pnpm honours it by skipping
+   devDependencies — where `nest`, `tsc` and `turbo` all live. The build would have
+   failed on its first command. Proved in an isolated temp package rather than
+   reasoned about: with `NODE_ENV=production` pnpm installed the dependency and
+   skipped the devDependency; with `--prod=false` it installed both. That flag is
+   load-bearing. It also keeps the `prisma` CLI, a devDependency, available for
+   `preDeployCommand`.
+
+3. **`engines: ">=20.0.0"` is unbounded**, which Render resolves to the newest Node
+   there is. Pinned with a `.node-version` of 24.16.0 — the version everything here
+   was actually built and tested against.
+
+### What the blueprint does and does not decide
+
+`preDeployCommand` runs `prisma migrate deploy` before traffic moves to the new
+version, so a release that needs a column gets it first. `migrate dev` and `reset`
+cannot run against it at all — `scripts/no-migrate-dev.mjs` refuses on the host.
+
+The three JWT/check-in secrets are `generateValue: true`, so Render mints them and
+nobody ever sees them. Razorpay's three and `PUBLIC_BASE_URL` are `sync: false`.
+`PUBLIC_BASE_URL` cannot be set until after the first deploy, because the URL does not
+exist until then, and `env()` memoises at first call — so setting it needs a restart,
+not just a save. That is the one step most likely to be missed.
+
+Not free tier anywhere, deliberately: a free web service spins down, a free Key Value
+is evicted, and free Postgres expires after 30 days. Each of those breaks something
+this product depends on — the WebSockets, the six sweepers, or the pilot's data.
