@@ -19,6 +19,9 @@
     "preview": {
       "distribution": "internal",
       "channel": "preview",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://opd-api-koes.onrender.com"
+      },
       "android": {
         "image": "latest",
         "buildType": "apk"
@@ -27,6 +30,9 @@
     "production": {
       "channel": "production",
       "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://opd-api-koes.onrender.com"
+      },
       "android": {
         "image": "latest",
         "buildType": "app-bundle"

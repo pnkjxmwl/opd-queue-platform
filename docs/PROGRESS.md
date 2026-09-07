@@ -7571,3 +7571,40 @@ Phases 5 and 6 came from the latter.
 Free-tier caveat that will mislead: Render sleeps after 15 minutes, and a sleeping API
 makes the console look broken - a slow first load, then a board that says "Not live"
 until the socket reconnects. That is the plan working, not a defect.
+
+## 2026-09-08 · The app: what free actually allows, and the URL that would have been baked wrong
+
+With the API on Render and the console on Vercel, the question was what the app can do
+without the store accounts the user has deliberately not bought.
+
+**Android: everything. iOS: nothing.** `eas.json`'s `preview` profile builds an **APK**,
+which sideloads straight onto a phone - no Google Play account, no review, free. iOS has
+no equivalent: an installable build needs an Apple Developer membership, so it stays
+parked. `BUILDS.md` already said all of this; the profiles were built for exactly this.
+
+Nothing else was missing. The project is already linked to EAS
+(`extra.eas.projectId`), FCM is configured (`google-services.json` is committed), and
+the push work of 2026-09-03 stands.
+
+### The defect this would have shipped
+
+`lib/auth.tsx:9`:
+
+```ts
+export const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000';
+```
+
+`.env` is gitignored - correctly - and an EAS build runs **in Expo's cloud**, which
+therefore has no `.env`. The variable would have been undefined and the fallback would
+have baked **`http://localhost:3000` into the APK**. On a phone that resolves to the
+phone itself, so every screen would have failed with a network error and the app would
+have looked broken while being fine.
+
+`EXPO_PUBLIC_API_URL` is now set in the `preview` and `production` profiles in
+`eas.json`. It is a public URL, not a secret, so it belongs in the repo. `development`
+is deliberately left without one: those builds pull JS from a local Metro server and
+should keep using whatever `.env` the developer has, usually a LAN IP.
+
+Third member of this week's family - `columnOf`, the fixture's hardcoded database, and
+now this. All three: a plausible default quietly substituted for the right value, with
+no error at the point of the mistake.
