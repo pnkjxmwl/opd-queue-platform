@@ -7727,3 +7727,62 @@ clean, with `opd-api-koes.onrender.com` present and `http://localhost:3000` abse
 devDependency. EAS is documented to install devDependencies, and this could not be
 verified without a cloud build. If the next build fails with `tsc: not found`, that is
 the cause and not something else.
+
+## 2026-09-08 · The APK built and ran — where Phase 10 actually stands
+
+The `preview` build finished on commit `59849f9`, the one carrying the
+`eas-build-post-install` hook, and the user installed and ran it on a real phone.
+
+**That closes the risk the last entry left open.** It said the hook needed `tsc`, a
+devDependency, and that whether EAS installs devDependencies could not be checked
+without a cloud build. It does. The build that failed and the build that succeeded
+differ by exactly that hook, which is as clean a proof as this kind of thing gets.
+
+### Phase 10 as of now
+
+| | |
+|---|---|
+| ☑ P10-INFRA-01 | Render: Postgres + Key Value, **Singapore** (no India region), all free plans |
+| ☑ P10-INFRA-02 | Secrets per environment; JWT/check-in minted by Render, Razorpay set by hand |
+| ☑ P10-BE-01 | `opd-api-koes.onrender.com` - health, readiness, migrations, helmet, webhook both ways |
+| ☑ P10-WEB-01 | `opd-queue-platform-web-blue.vercel.app` - signs in, renders the board, socket connects |
+| ◐ P10-MOB-01 | Android APK built and running on a phone. **TestFlight and Play internal not done** - paid accounts, deliberately deferred |
+| ☐ P10-TEST-01 | The checkpoint: the whole journey on a phone, and the onboarding runbook |
+
+`P10-MOB-01` is a `◐` and not a tick. Section 0 is explicit that `◐` must never be
+rounded up, and two of the three things that row asks for have not happened.
+
+### What deploying actually cost, and it was not the deploying
+
+Four defects, none of which existed in the code as written and all of which were about
+the gap between a machine that has already built everything and one that has not:
+
+1. `render.yaml` needed `--prod=false`, because `NODE_ENV=production` makes pnpm skip
+   the devDependencies the build runs on.
+2. `vercel.json` needed its build routed through turbo, because `@opd/contracts`
+   compiles to `dist/` and a plain `next build` cannot resolve it.
+3. `eas.json` needed `EXPO_PUBLIC_API_URL`, because the cloud has no `.env` and the
+   fallback would have baked `localhost` into the APK.
+4. `apps/mobile/package.json` needed `eas-build-post-install`, because EAS installs the
+   workspace but never builds it.
+
+**Three targets, one lesson, learned separately three times.** A workspace package that
+compiles is not installed, it is built, and every environment has to be told - and each
+of these failed in a way that looked like something else: a missing binary, an
+unresolvable module, an app that seemed to have no network.
+
+The fifth defect of the day was not a deploy problem at all. The console walkthrough,
+running in CI, reported `500 vs 404` and turned out to be a NUL byte in `TenantGuard`
+that had inverted the anti-enumeration guarantee for weeks. Staging is what made it
+reproducible in one curl.
+
+### Still not known
+
+**What the app actually looked like on the phone.** The build ran; nobody has recorded
+what happened after that. Six mobile screens are still on baseline styling and the
+rebuilt ones had never been seen on a device before today. Until those observations are
+written down here, `P10-TEST-01` has not started - and every defect in Phases 5 and 6
+came from exactly this kind of looking.
+
+Also unexercised: a card payment through checkout, and push to this build from the
+deployed API.
