@@ -7679,3 +7679,51 @@ did, through the console, and only compared the two statuses to each other - whi
 why it took a browser-shaped test running in CI to find a backend bug.
 
 379 API tests green; the walkthrough is 72/0 with the previously failing check passing.
+
+## 2026-09-08 · The APK failed because EAS never builds the workspace
+
+First `preview` build errored in 78 seconds. The log named it exactly:
+
+```
+While trying to resolve module `@opd/contracts` from apps/mobile/lib/realtime.tsx,
+the package .../node_modules/@opd/contracts/package.json was successfully found.
+However, this package itself specifies a `main` module field that could not be
+resolved (.../@opd/contracts/dist/index.js). Indeed, none of these files exist
+pnpm expo export:embed --eager --platform android --dev false exited with non-zero code: 1
+```
+
+**EAS installs dependencies; it does not build the workspace.** `@opd/contracts` has
+`main: "./dist/index.js"` and is compiled by `tsc`, so on a fresh EAS checkout `dist/`
+does not exist. The symlink resolves, the package.json is found, and the file it points
+at was never created.
+
+### Why `development` builds had always worked
+
+They never bundle JS. A dev-client build loads it from Metro **on the laptop**, where
+`dist/` has existed since Phase 0. `preview` is the first profile to run
+`expo export:embed` on EAS's machine, and that machine had never once compiled contracts.
+The failure was three phases old and could only surface here.
+
+Same shape as `render.yaml` and `vercel.json`, which both needed their build to go
+through turbo for exactly this reason. Three deploy targets, one lesson, learned
+separately each time: **a workspace package that compiles is not installed, it is built,
+and every deploy target has to be told.**
+
+### The fix, and it was falsified first
+
+`eas-build-post-install` in `apps/mobile/package.json` - EAS runs it after install and
+prebuild, before Gradle bundles:
+
+```json
+"eas-build-post-install": "cd ../.. && pnpm --filter @opd/contracts build"
+```
+
+Reproduced the failure locally before fixing it, by deleting `packages/contracts/dist` -
+which is precisely the EAS server's state - and running `expo export`. Identical error,
+same file, same module. Then ran the hook command verbatim and re-bundled: 4.25 MB,
+clean, with `opd-api-koes.onrender.com` present and `http://localhost:3000` absent.
+
+**One residual risk, stated rather than hidden:** the hook needs `tsc`, a
+devDependency. EAS is documented to install devDependencies, and this could not be
+verified without a cloud build. If the next build fails with `tsc: not found`, that is
+the cause and not something else.

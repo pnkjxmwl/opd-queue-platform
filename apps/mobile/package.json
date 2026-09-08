@@ -10,7 +10,8 @@
     "build": "echo \"mobile builds ship via EAS (Phase 10)\" && exit 0",
     "lint": "node ./scripts/check-pressable-style.cjs && eslint .",
     "typecheck": "node ./scripts/generate-router-types.cjs && tsc -p tsconfig.json --noEmit",
-    "test": "echo \"no mobile tests yet\" && exit 0"
+    "test": "echo \"no mobile tests yet\" && exit 0",
+    "eas-build-post-install": "cd ../.. && pnpm --filter @opd/contracts build"
   },
   "dependencies": {
     "@babel/runtime": "^7.26.0",
